@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 //! End-to-end tests: full attack simulation and benign install verification.
 //!
 //! These tests spin up the full Sanctum pipeline (watcher → analyser →
@@ -18,7 +19,7 @@ use sanctum_sentinel::watcher::{PthWatcher, WatchEventKind};
 ///   3. Provides helpers to create files and wait for events
 ///   4. Tears down cleanly on drop
 struct TestEnvironment {
-    temp_dir: tempfile::TempDir,
+    _temp_dir: tempfile::TempDir,
     site_packages: PathBuf,
     quarantine_dir: PathBuf,
 }
@@ -32,7 +33,7 @@ impl TestEnvironment {
         fs::create_dir_all(&quarantine_dir).expect("create quarantine");
 
         Self {
-            temp_dir,
+            _temp_dir: temp_dir,
             site_packages,
             quarantine_dir,
         }
@@ -57,7 +58,7 @@ async fn e2e_full_attack_simulation() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
     // Start watcher on the site-packages directory
-    let _watcher = PthWatcher::start(&[env.site_packages.clone()], tx)
+    let _watcher = PthWatcher::start(std::slice::from_ref(&env.site_packages), tx)
         .expect("watcher should start");
 
     // Give the watcher a moment to register
@@ -70,21 +71,18 @@ async fn e2e_full_attack_simulation() {
     // Wait for the watcher event (with timeout)
     let event = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
 
-    match event {
-        Ok(Some(e)) => {
-            assert!(
-                e.path.to_string_lossy().contains("evil.pth"),
-                "event path should contain evil.pth"
-            );
-            assert!(matches!(
-                e.kind,
-                WatchEventKind::Created | WatchEventKind::Modified
-            ));
-        }
-        _ => {
-            // On some platforms, filesystem events may not fire immediately.
-            // Continue with the analysis pipeline anyway.
-        }
+    if let Ok(Some(e)) = event {
+        assert!(
+            e.path.to_string_lossy().contains("evil.pth"),
+            "event path should contain evil.pth"
+        );
+        assert!(matches!(
+            e.kind,
+            WatchEventKind::Created | WatchEventKind::Modified
+        ));
+    } else {
+        // On some platforms, filesystem events may not fire immediately.
+        // Continue with the analysis pipeline anyway.
     }
 
     // Analyse the file
@@ -155,7 +153,7 @@ async fn e2e_benign_pip_install_not_flagged() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
-    let _watcher = PthWatcher::start(&[env.site_packages.clone()], tx)
+    let _watcher = PthWatcher::start(std::slice::from_ref(&env.site_packages), tx)
         .expect("watcher should start");
 
     tokio::time::sleep(Duration::from_millis(200)).await;

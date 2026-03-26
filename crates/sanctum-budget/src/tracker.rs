@@ -207,6 +207,12 @@ impl BudgetTracker {
         };
         let json = serde_json::to_string_pretty(&state)?;
         std::fs::write(path, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(path, perms);
+        }
         Ok(())
     }
 
@@ -489,10 +495,7 @@ mod tests {
 
     #[test]
     fn save_load_roundtrip() {
-        let dir = match tempfile::tempdir() {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Ok(dir) = tempfile::tempdir() else { return };
         let path = dir.path().join("budget.json");
 
         let mut tracker = BudgetTracker::new(&test_config());
@@ -511,10 +514,7 @@ mod tests {
         let loaded = BudgetTracker::load_from_file(&path, &test_config());
         assert!(loaded.is_ok());
 
-        let loaded = match loaded {
-            Ok(t) => t,
-            Err(_) => return,
-        };
+        let Ok(loaded) = loaded else { return };
 
         // Verify spend was preserved
         assert_eq!(
@@ -534,6 +534,26 @@ mod tests {
             &test_config(),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_file_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(dir) = tempfile::tempdir() else { return };
+        let path = dir.path().join("budget.json");
+
+        let mut tracker = BudgetTracker::new(&test_config());
+        let usage = make_usage(Provider::OpenAI, "gpt-4o", 1_000_000, 0);
+        tracker.record_usage(&usage);
+
+        let save_result = tracker.save_to_file(&path);
+        assert!(save_result.is_ok());
+
+        let metadata = std::fs::metadata(&path);
+        assert!(metadata.is_ok());
+        let mode = metadata.map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+        assert_eq!(mode, 0o600, "budget file should have 0o600 permissions");
     }
 
     #[test]

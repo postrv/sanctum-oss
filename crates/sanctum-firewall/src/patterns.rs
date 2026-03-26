@@ -15,20 +15,23 @@ pub struct CredentialPattern {
     pub regex: &'static LazyLock<Regex>,
 }
 
-/// Compile a regex from a string, returning a fallback that matches nothing on
-/// error. All callers pass compile-time literal patterns that are known valid,
-/// so the error branch is unreachable in practice.
+/// Compile a regex from a string. All callers pass compile-time literal
+/// patterns that are known valid, so the error branch is unreachable in
+/// practice. On failure we abort the process because `panic!()` is denied by
+/// workspace lints.
 #[allow(clippy::option_if_let_else)]
 fn compile_regex(pattern: &str) -> Regex {
     match Regex::new(pattern) {
         Ok(re) => re,
-        // The error branch is unreachable for our known-good literals, but we
-        // cannot use `unreachable!()` under `#[deny(panic)]`. We hint to the
-        // CPU to yield rather than busy-spin, though this path is never taken.
-        #[allow(clippy::empty_loop)]
-        Err(_) => loop {
-            std::hint::spin_loop();
-        },
+        Err(e) => {
+            // All patterns are compile-time literals; this branch is unreachable.
+            // abort() is used because panic!() is denied by workspace lints.
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("FATAL: sanctum credential pattern failed to compile: {e}");
+            }
+            std::process::abort();
+        }
     }
 }
 
@@ -62,6 +65,11 @@ static_regex!(
 );
 static_regex!(PRIVATE_KEY_RE, r"-----BEGIN[A-Z ]*PRIVATE KEY-----");
 static_regex!(CONNECTION_STRING_RE, r"(postgresql|mongodb|redis|mysql)://[^\s@]+@[^\s]+");
+static_regex!(SLACK_USER_RE, r"xoxp-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,34}");
+static_regex!(SLACK_APP_RE, r"xapp-[0-9]-[A-Z0-9]{10,13}-[0-9]{13}-[a-zA-Z0-9]{64}");
+static_regex!(NPM_TOKEN_RE, r"npm_[a-zA-Z0-9]{36}");
+static_regex!(PYPI_TOKEN_RE, r"pypi-[A-Za-z0-9_\-]{16,}");
+static_regex!(DIGITALOCEAN_RE, r"dop_v1_[a-f0-9]{64}");
 
 /// All registered credential patterns.
 ///
@@ -127,6 +135,26 @@ pub static PATTERNS: &[CredentialPattern] = &[
     CredentialPattern {
         name: "Connection String",
         regex: &CONNECTION_STRING_RE,
+    },
+    CredentialPattern {
+        name: "Slack User Token",
+        regex: &SLACK_USER_RE,
+    },
+    CredentialPattern {
+        name: "Slack App Token",
+        regex: &SLACK_APP_RE,
+    },
+    CredentialPattern {
+        name: "npm Token",
+        regex: &NPM_TOKEN_RE,
+    },
+    CredentialPattern {
+        name: "PyPI Token",
+        regex: &PYPI_TOKEN_RE,
+    },
+    CredentialPattern {
+        name: "DigitalOcean PAT",
+        regex: &DIGITALOCEAN_RE,
     },
 ];
 
@@ -350,6 +378,105 @@ mod tests {
             .iter()
             .position(|p| p.name == "OpenAI API Key");
         assert!(anthropic_idx < openai_idx, "Anthropic must precede OpenAI for specificity");
+    }
+
+    // ---- New patterns: Slack User Token ----
+
+    #[test]
+    fn slack_user_token_matches_valid_token() {
+        let key = "xoxp-1234567890-1234567890-abcdefghijklmnopqrstuvwx";
+        assert!(SLACK_USER_RE.is_match(key));
+    }
+
+    #[test]
+    fn slack_user_token_rejects_normal_text() {
+        assert!(!SLACK_USER_RE.is_match("just a normal string"));
+    }
+
+    #[test]
+    fn slack_user_token_rejects_bot_token() {
+        // xoxb- should NOT match the user-token pattern (xoxp-)
+        assert!(!SLACK_USER_RE.is_match("xoxb-1234567890-abcdefghijklmnopqrst"));
+    }
+
+    // ---- New patterns: Slack App Token ----
+
+    #[test]
+    fn slack_app_token_matches_valid_token() {
+        let key = format!(
+            "xapp-1-A1234567890-1234567890123-{}",
+            "a".repeat(64)
+        );
+        assert!(SLACK_APP_RE.is_match(&key));
+    }
+
+    #[test]
+    fn slack_app_token_rejects_normal_text() {
+        assert!(!SLACK_APP_RE.is_match("this is not a slack app token"));
+    }
+
+    // ---- New patterns: npm Token ----
+
+    #[test]
+    fn npm_token_matches_valid_token() {
+        let key = format!("npm_{}", "a".repeat(36));
+        assert!(NPM_TOKEN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn npm_token_rejects_short_token() {
+        let key = format!("npm_{}", "a".repeat(10));
+        assert!(!NPM_TOKEN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn npm_token_rejects_normal_text() {
+        assert!(!NPM_TOKEN_RE.is_match("npm install something"));
+    }
+
+    // ---- New patterns: PyPI Token ----
+
+    #[test]
+    fn pypi_token_matches_valid_token() {
+        let key = format!("pypi-{}", "A".repeat(32));
+        assert!(PYPI_TOKEN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn pypi_token_rejects_short_token() {
+        let key = "pypi-abc";
+        assert!(!PYPI_TOKEN_RE.is_match(key));
+    }
+
+    #[test]
+    fn pypi_token_rejects_normal_text() {
+        assert!(!PYPI_TOKEN_RE.is_match("pypi package index"));
+    }
+
+    // ---- New patterns: DigitalOcean PAT ----
+
+    #[test]
+    fn digitalocean_pat_matches_valid_token() {
+        let key = format!("dop_v1_{}", "a".repeat(64));
+        assert!(DIGITALOCEAN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn digitalocean_pat_rejects_short_token() {
+        let key = format!("dop_v1_{}", "a".repeat(10));
+        assert!(!DIGITALOCEAN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn digitalocean_pat_rejects_normal_text() {
+        assert!(!DIGITALOCEAN_RE.is_match("digitalocean droplet"));
+    }
+
+    #[test]
+    fn digitalocean_pat_rejects_uppercase() {
+        // Pattern only matches lowercase hex
+        let key = format!("dop_v1_{}", "A".repeat(64));
+        assert!(!DIGITALOCEAN_RE.is_match(&key));
     }
 
     #[test]

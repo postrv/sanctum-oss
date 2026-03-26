@@ -43,10 +43,9 @@ mod tests {
             let cost_anthropic = calculate_cost(Provider::Anthropic, "claude-sonnet-4-6", input_tokens, output_tokens);
             let cost_google = calculate_cost(Provider::Google, "gemini-2.5-pro", input_tokens, output_tokens);
 
-            // Cost should be >= 0 (trivially true for u64, but documents intent)
-            prop_assert!(cost_openai <= u64::MAX);
-            prop_assert!(cost_anthropic <= u64::MAX);
-            prop_assert!(cost_google <= u64::MAX);
+            // Verify costs are finite (the function returned without panic/overflow).
+            // For u64 this is always true, but documents the intent that no overflow occurred.
+            let _ = (cost_openai, cost_anthropic, cost_google);
 
             // If both token counts are zero, cost must be zero
             if input_tokens == 0 && output_tokens == 0 {
@@ -79,9 +78,8 @@ mod tests {
                     model: "gpt-4o".to_string(),
                     input_tokens,
                     output_tokens,
-                    total_tokens: input_tokens + output_tokens,
                 };
-                let status = tracker.record_usage(&usage).expect("should record");
+                let status = tracker.record_usage(&usage);
                 prop_assert!(status.session_spent_cents >= prev_session,
                     "session spend decreased: {} < {}", status.session_spent_cents, prev_session);
                 prop_assert!(status.daily_spent_cents >= prev_daily,
@@ -109,7 +107,6 @@ mod tests {
                 model: "gpt-4o".to_string(),
                 input_tokens,
                 output_tokens,
-                total_tokens: input_tokens + output_tokens,
             };
             let _ = tracker.record_usage(&usage);
 

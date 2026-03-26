@@ -133,6 +133,7 @@ fn remove_claude_hooks() -> Result<(), CliError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

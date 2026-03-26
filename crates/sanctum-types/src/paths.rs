@@ -25,6 +25,18 @@ pub struct WellKnownPaths {
 }
 
 impl WellKnownPaths {
+    /// Construct paths for the current platform, returning an error when `HOME`
+    /// is not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `detect()` returns `None` (i.e. the `HOME` environment
+    /// variable is missing).
+    pub fn require() -> Result<Self, String> {
+        Self::detect()
+            .ok_or_else(|| "HOME environment variable not set — cannot determine safe paths".into())
+    }
+
     /// Construct paths for the current platform, respecting XDG on Linux.
     ///
     /// # Errors
@@ -128,8 +140,39 @@ fn platform_dirs(home: &std::path::Path) -> (PathBuf, PathBuf) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Run `require()` without HOME set in a child process so we don't
+    /// poison the environment for concurrent tests.
+    #[test]
+    fn require_returns_err_when_home_unset() {
+        let exe = std::env::current_exe().expect("current_exe should be available");
+        let output = std::process::Command::new(exe)
+            .env_remove("HOME")
+            .args(["--exact", "paths::tests::require_returns_err_when_home_unset_inner", "--nocapture"])
+            .output()
+            .expect("failed to spawn subprocess");
+        assert!(
+            output.status.success(),
+            "subprocess failed:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// Inner test executed only via the subprocess spawned above.
+    #[test]
+    #[ignore = "executed only via subprocess from require_returns_err_when_home_unset"]
+    fn require_returns_err_when_home_unset_inner() {
+        let result = WellKnownPaths::require();
+        assert!(result.is_err(), "require() should fail without HOME");
+        let msg = result.expect_err("already checked is_err");
+        assert!(
+            msg.contains("HOME environment variable not set"),
+            "unexpected error message: {msg}"
+        );
+    }
 
     #[test]
     fn well_known_paths_are_platform_appropriate() {

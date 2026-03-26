@@ -145,6 +145,7 @@ impl IpcConnection {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use sanctum_types::ipc::MAX_MESSAGE_SIZE;
@@ -249,6 +250,7 @@ mod tests {
 
         // Client sends an oversized frame directly
         let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
+        #[allow(clippy::cast_possible_truncation)]
         let oversized_len = (MAX_MESSAGE_SIZE + 1) as u32;
         stream.write_all(&oversized_len.to_be_bytes()).await.expect("write len");
         // Don't need to write the actual payload — the length check should reject it

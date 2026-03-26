@@ -146,6 +146,57 @@ fn validate_id(id: &str, quarantine_dir: &Path) -> Result<(), SentinelError> {
     Ok(())
 }
 
+/// Directories that are never valid restore targets.
+const SENSITIVE_PREFIXES: &[&str] = &[
+    "/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin",
+    "/usr/lib", "/System", "/Library",
+];
+
+/// Validate that a restore path is safe to write to.
+/// Rejects paths that are non-absolute, contain traversal components,
+/// or target sensitive system directories.
+fn validate_restore_path(path: &Path) -> Result<(), SentinelError> {
+    // Must be absolute
+    if !path.is_absolute() {
+        return Err(SentinelError::Quarantine {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("restore path must be absolute: {}", path.display()),
+            ),
+        });
+    }
+
+    // Check for path traversal components
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(SentinelError::Quarantine {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("restore path contains traversal: {}", path.display()),
+                ),
+            });
+        }
+    }
+
+    // Reject sensitive system directories
+    let path_str = path.to_string_lossy();
+    for prefix in SENSITIVE_PREFIXES {
+        if path_str.starts_with(prefix) {
+            return Err(SentinelError::Quarantine {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("restore path targets sensitive directory: {}", path.display()),
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// Quarantine manager.
 pub struct Quarantine {
     /// Directory where quarantined files are stored.
@@ -185,10 +236,15 @@ impl Quarantine {
         // conflicts with the .json metadata extension naming scheme.
         let file_stem = path
             .file_stem().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string());
+        let now = Utc::now();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
         let id = format!(
-            "{}-{}",
-            Utc::now().format("%Y%m%d-%H%M%S"),
-            file_stem
+            "{}-{}-{:08x}",
+            now.format("%Y%m%d-%H%M%S"),
+            file_stem,
+            nanos
         );
 
         let quarantine_path = self.quarantine_dir.join(&id);
@@ -277,6 +333,9 @@ impl Quarantine {
             }
         })?;
 
+        // Validate the restore path before writing
+        validate_restore_path(&metadata.original_path)?;
+
         // Restore to original location
         fs::write(&metadata.original_path, content).map_err(|e| {
             SentinelError::Quarantine {
@@ -362,6 +421,7 @@ impl Quarantine {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -563,5 +623,115 @@ mod tests {
             matches!(err, SentinelError::InvalidQuarantineId { .. }),
             "expected InvalidQuarantineId, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn restore_rejects_sensitive_system_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("evil.pth");
+        fs::write(&pth_path, "payload").expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine");
+
+        // Tamper with metadata to set original_path to /etc/passwd
+        let meta_path = entry.quarantine_path.with_extension("json");
+        let meta_str = fs::read_to_string(&meta_path).expect("read meta");
+        let mut metadata: QuarantineMetadata =
+            serde_json::from_str(&meta_str).expect("parse meta");
+        metadata.original_path = PathBuf::from("/etc/passwd");
+        let tampered = serde_json::to_string_pretty(&metadata).expect("serialize");
+        fs::write(&meta_path, tampered).expect("write tampered meta");
+
+        let result = q.restore(&entry.id);
+        assert!(result.is_err(), "should reject sensitive path");
+    }
+
+    #[test]
+    fn restore_rejects_relative_path_in_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("evil.pth");
+        fs::write(&pth_path, "payload").expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine");
+
+        // Tamper with metadata to set a relative path
+        let meta_path = entry.quarantine_path.with_extension("json");
+        let meta_str = fs::read_to_string(&meta_path).expect("read meta");
+        let mut metadata: QuarantineMetadata =
+            serde_json::from_str(&meta_str).expect("parse meta");
+        metadata.original_path = PathBuf::from("relative/path/file.txt");
+        let tampered = serde_json::to_string_pretty(&metadata).expect("serialize");
+        fs::write(&meta_path, tampered).expect("write tampered meta");
+
+        let result = q.restore(&entry.id);
+        assert!(result.is_err(), "should reject relative path");
+    }
+
+    #[test]
+    fn restore_rejects_path_traversal_in_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("evil.pth");
+        fs::write(&pth_path, "payload").expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine");
+
+        // Tamper with metadata to include traversal
+        let meta_path = entry.quarantine_path.with_extension("json");
+        let meta_str = fs::read_to_string(&meta_path).expect("read meta");
+        let mut metadata: QuarantineMetadata =
+            serde_json::from_str(&meta_str).expect("parse meta");
+        metadata.original_path = PathBuf::from("/tmp/../../../etc/passwd");
+        let tampered = serde_json::to_string_pretty(&metadata).expect("serialize");
+        fs::write(&meta_path, tampered).expect("write tampered meta");
+
+        let result = q.restore(&entry.id);
+        assert!(result.is_err(), "should reject path with traversal");
+    }
+
+    #[test]
+    fn restore_accepts_valid_restore_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("legit.pth");
+        let content = "safe content";
+        fs::write(&pth_path, content).expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine");
+
+        // The original_path in metadata should be valid (temp dir)
+        let result = q.restore(&entry.id);
+        assert!(result.is_ok(), "valid temp path should be accepted: {result:?}");
+        assert_eq!(fs::read_to_string(&pth_path).expect("read"), content);
+    }
+
+    #[test]
+    fn quarantine_ids_are_unique_in_rapid_succession() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let q = Quarantine::new(dir.path().join("quarantine"));
+
+        let path1 = dir.path().join("file1.pth");
+        let path2 = dir.path().join("file2.pth");
+        fs::write(&path1, "content1").expect("write");
+        fs::write(&path2, "content2").expect("write");
+
+        let entry1 = q
+            .quarantine_file(&path1, &default_meta(&path1))
+            .expect("quarantine 1");
+        let entry2 = q
+            .quarantine_file(&path2, &default_meta(&path2))
+            .expect("quarantine 2");
+
+        assert_ne!(entry1.id, entry2.id, "IDs should differ: {} vs {}", entry1.id, entry2.id);
     }
 }

@@ -163,6 +163,20 @@ fn is_env_dump(command: &str) -> bool {
         }
     }
 
+    // Check for bare `env` command (dumps all environment variables)
+    let trimmed = normalised.trim();
+    if trimmed == "env" {
+        return true;
+    }
+    // env piped to something: "env | grep", "env | less" etc.
+    if let Some(rest) = trimmed.strip_prefix("env ") {
+        let rest = rest.trim_start();
+        // If it starts with a pipe, it's dumping env
+        if rest.starts_with('|') {
+            return true;
+        }
+    }
+
     // "env | grep", "set | grep", "export | grep"
     for source in ENV_PIPE_SOURCES {
         if normalised.contains(source) && normalised.contains("| grep") {
@@ -670,6 +684,30 @@ mod tests {
     }
 
     #[test]
+    fn pre_bash_blocks_bare_env() {
+        let output = pre_bash(&bash_input("env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_env_pipe_less() {
+        let output = pre_bash(&bash_input("env | less"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_allows_env_set_var() {
+        let output = pre_bash(&bash_input("env VAR=val command"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_allows_env_dash_i() {
+        let output = pre_bash(&bash_input("env -i command"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
     fn pre_bash_blocks_env_grep() {
         let output = pre_bash(&bash_input("env | grep SECRET"));
         assert_eq!(output.decision, HookDecision::Block);
@@ -817,8 +855,46 @@ mod tests {
     }
 
     #[test]
+    fn env_dump_detects_bare_env() {
+        assert!(is_env_dump("env"));
+    }
+
+    #[test]
+    fn env_dump_detects_env_pipe_less() {
+        assert!(is_env_dump("env | less"));
+    }
+
+    #[test]
+    fn env_dump_detects_env_pipe_grep_secret() {
+        assert!(is_env_dump("env | grep SECRET"));
+    }
+
+    #[test]
+    fn env_dump_allows_env_set_var() {
+        // "env VAR=val command" is a legitimate use of env to set variables
+        assert!(!is_env_dump("env VAR=val command"));
+    }
+
+    #[test]
+    fn env_dump_allows_env_dash_i() {
+        // "env -i command" is a legitimate use of env
+        assert!(!is_env_dump("env -i command"));
+    }
+
+    #[test]
+    fn env_dump_rejects_environment_word() {
+        // "environment" should not be falsely matched
+        assert!(!is_env_dump("environment"));
+    }
+
+    #[test]
+    fn env_dump_rejects_echo_environment() {
+        // "echo $ENVIRONMENT" should not be falsely matched
+        assert!(!is_env_dump("echo $ENVIRONMENT"));
+    }
+
+    #[test]
     fn env_dump_rejects_normal_env_set() {
-        // "env" without grep is fine (covered by other rules if needed)
         assert!(!is_env_dump("env FOO=bar some_command"));
     }
 

@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn critical_eval_pattern() {
         let result =
-            analyse_pth_line(r#"import os; eval(os.environ.get('PAYLOAD'))"#);
+            analyse_pth_line(r"import os; eval(os.environ.get('PAYLOAD'))");
         assert_eq!(result.level(), ThreatLevel::Critical);
     }
 

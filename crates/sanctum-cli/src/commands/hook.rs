@@ -17,7 +17,12 @@ use sanctum_types::errors::CliError;
 /// `action` is one of `pre-bash`, `pre-write`, `pre-read`, or `post-bash`.
 /// Tool invocation JSON is read from stdin.
 pub fn run(action: &str) -> Result<(), CliError> {
-    let input_str = std::io::read_to_string(std::io::stdin())
+    use std::io::Read;
+
+    let mut input_str = String::new();
+    std::io::stdin()
+        .take(1_048_576) // 1MB limit
+        .read_to_string(&mut input_str)
         .map_err(|e| CliError::InvalidArgs(format!("failed to read stdin: {e}")))?;
 
     let input: HookInput = serde_json::from_str(&input_str)

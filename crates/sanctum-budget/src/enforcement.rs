@@ -148,6 +148,7 @@ fn compute_max_percent(status: &BudgetStatus) -> u8 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::parser::UsageData;
@@ -262,15 +263,9 @@ mod tests {
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
         assert!(parsed.is_ok());
 
-        let value = match parsed {
-            Ok(v) => v,
-            Err(_) => return,
-        };
+        let Ok(value) = parsed else { return };
 
-        let error = match value.get("error") {
-            Some(e) => e,
-            None => return,
-        };
+        let Some(error) = value.get("error") else { return };
 
         assert_eq!(
             error.get("type").and_then(|v| v.as_str()),
@@ -281,11 +276,11 @@ mod tests {
             Some("OpenAI")
         );
         assert_eq!(
-            error.get("session_spent_cents").and_then(|v| v.as_u64()),
+            error.get("session_spent_cents").and_then(serde_json::Value::as_u64),
             Some(500)
         );
         assert_eq!(
-            error.get("session_limit_cents").and_then(|v| v.as_u64()),
+            error.get("session_limit_cents").and_then(serde_json::Value::as_u64),
             Some(100)
         );
     }

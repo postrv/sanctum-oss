@@ -254,7 +254,7 @@ fn scan_source_files(dir: &Path, findings: &mut Vec<Finding>) {
                 }
             }
         }
-    });
+    }, 0);
 }
 
 fn scan_gitignore(dir: &Path, findings: &mut Vec<Finding>) {
@@ -305,7 +305,12 @@ fn scan_gitignore(dir: &Path, findings: &mut Vec<Finding>) {
     }
 }
 
-fn walk_dir(dir: &Path, callback: &mut dyn FnMut(&Path)) {
+fn walk_dir(dir: &Path, callback: &mut dyn FnMut(&Path), depth: usize) {
+    const MAX_DEPTH: usize = 50;
+    if depth >= MAX_DEPTH {
+        return;
+    }
+
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -327,10 +332,74 @@ fn walk_dir(dir: &Path, callback: &mut dyn FnMut(&Path)) {
             }
         }
 
-        if path.is_dir() {
-            walk_dir(&path, callback);
-        } else if path.is_file() {
+        // Use symlink_metadata to avoid following symlinks
+        let Ok(metadata) = path.symlink_metadata() else {
+            continue;
+        };
+
+        if metadata.is_dir() {
+            // Only recurse into real directories, NOT symlinks
+            if !metadata.file_type().is_symlink() {
+                walk_dir(&path, callback, depth + 1);
+            }
+        } else if metadata.is_file() {
             callback(&path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn walk_dir_respects_depth_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Create a deeply nested directory structure (60+ levels)
+        let mut current = dir.path().to_path_buf();
+        for i in 0..60 {
+            current = current.join(format!("level{i}"));
+            fs::create_dir_all(&current).expect("create nested dir");
+        }
+        // Place a file at the deepest level
+        fs::write(current.join("deep.txt"), "deep").expect("write deep file");
+
+        let count = AtomicUsize::new(0);
+        walk_dir(dir.path(), &mut |_path: &Path| {
+            count.fetch_add(1, Ordering::Relaxed);
+        }, 0);
+
+        // The file at depth 60 should NOT be found (MAX_DEPTH is 50)
+        assert_eq!(count.load(Ordering::Relaxed), 0, "file beyond MAX_DEPTH should not be visited");
+    }
+
+    #[allow(clippy::expect_used)]
+    #[cfg(unix)]
+    #[test]
+    fn walk_dir_skips_symlink_directories() {
+        use std::os::unix::fs as unix_fs;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_a = dir.path().join("dir_a");
+        let dir_b = dir.path().join("dir_b");
+        fs::create_dir_all(&dir_a).expect("create dir_a");
+        fs::create_dir_all(&dir_b).expect("create dir_b");
+
+        // Create a symlink loop: dir_a/link_to_b -> dir_b, dir_b/link_to_a -> dir_a
+        unix_fs::symlink(&dir_b, dir_a.join("link_to_b")).expect("symlink a->b");
+        unix_fs::symlink(&dir_a, dir_b.join("link_to_a")).expect("symlink b->a");
+
+        // Place a real file in dir_a
+        fs::write(dir_a.join("real.txt"), "real").expect("write file");
+
+        let count = AtomicUsize::new(0);
+        walk_dir(dir.path(), &mut |_path: &Path| {
+            count.fetch_add(1, Ordering::Relaxed);
+        }, 0);
+
+        // Should find the real file but not hang following symlinks
+        assert_eq!(count.load(Ordering::Relaxed), 1, "should find exactly the real file");
     }
 }

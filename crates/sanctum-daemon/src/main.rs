@@ -20,6 +20,7 @@ use sanctum_types::config::SanctumConfig;
 use sanctum_types::paths::WellKnownPaths;
 use tokio::sync::{Mutex, RwLock};
 
+mod audit;
 mod config;
 mod daemon;
 mod ipc;
@@ -143,6 +144,8 @@ async fn run_daemon(
     // Shutdown channel for IPC-initiated shutdown (C1)
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
+    let audit_path = paths.data_dir.join("audit.log");
+
     let (watcher, mut watch_rx) = start_pth_watcher(&shared_config).await;
     let quarantine = Quarantine::new(paths.quarantine_dir.clone());
     let (_cred_watcher, mut cred_rx) = start_credential_watcher(&shared_config).await;
@@ -172,7 +175,7 @@ async fn run_daemon(
     run_event_loop(
         &start_time, &shared_config, &shared_budget, &ipc_server,
         &shutdown_tx, &mut shutdown_rx, watcher.as_ref(), &mut watch_rx,
-        &quarantine, &mut cred_rx, &mut sigterm, &mut sighup,
+        &quarantine, &mut cred_rx, &mut sigterm, &mut sighup, &audit_path,
     ).await;
 
     // Save budget tracker state to disk on shutdown
@@ -263,6 +266,7 @@ async fn run_event_loop(
     cred_rx: &mut tokio::sync::mpsc::Receiver<CredentialEvent>,
     sigterm: &mut tokio::signal::unix::Signal,
     sighup: &mut tokio::signal::unix::Signal,
+    audit_path: &Path,
 ) {
     loop {
         // Check for day-boundary daily budget resets on each iteration
@@ -304,12 +308,12 @@ async fn run_event_loop(
             // Handle filesystem events
             Some(event) = watch_rx.recv() => {
                 let config_snapshot = shared_config.read().await.clone();
-                handle_watch_event(&event, quarantine, &config_snapshot);
+                handle_watch_event(&event, quarantine, &config_snapshot, audit_path);
             }
 
             // Handle credential file events
             Some(cred_event) = cred_rx.recv() => {
-                handle_credential_event(&cred_event);
+                handle_credential_event(&cred_event, audit_path);
             }
 
             // Handle SIGTERM (graceful shutdown)
@@ -619,7 +623,7 @@ fn trace_creator_lineage(
 }
 
 /// Handle a credential file event by creating a threat event and sending notification.
-fn handle_credential_event(event: &CredentialEvent) {
+fn handle_credential_event(event: &CredentialEvent, audit_path: &Path) {
     match event {
         CredentialEvent::AccessDetected {
             path,
@@ -664,6 +668,7 @@ fn handle_credential_event(event: &CredentialEvent) {
                 action_taken: sanctum_types::threat::Action::Alerted,
             };
             sanctum_notify::notify_threat(&threat_event);
+            audit::append_audit_event(&threat_event, audit_path);
         }
         CredentialEvent::Modified { path } => {
             tracing::info!(
@@ -678,6 +683,7 @@ fn handle_watch_event(
     event: &WatchEvent,
     quarantine: &Quarantine,
     config: &SanctumConfig,
+    audit_path: &Path,
 ) {
     use sanctum_sentinel::pth::analyser::{analyse_pth_file_with_context, content_hash, FileVerdict};
 
@@ -717,13 +723,13 @@ fn handle_watch_event(
 
             match analysis.verdict {
                 FileVerdict::Safe | FileVerdict::AllowlistedKnownPackage => {
-                    handle_safe_verdict(event, escalate_for_lineage, creator_pid, creator_exe);
+                    handle_safe_verdict(event, escalate_for_lineage, creator_pid, creator_exe, audit_path);
                 }
                 FileVerdict::Warning => {
-                    handle_warning_verdict(event, &analysis, escalate_for_lineage, creator_pid, creator_exe);
+                    handle_warning_verdict(event, &analysis, escalate_for_lineage, creator_pid, creator_exe, audit_path);
                 }
                 FileVerdict::Critical => {
-                    handle_critical_verdict(event, &analysis, &hash, config, quarantine, creator_pid, creator_exe);
+                    handle_critical_verdict(event, &analysis, &hash, config, quarantine, creator_pid, creator_exe, audit_path);
                 }
             }
         }
@@ -739,6 +745,7 @@ fn handle_safe_verdict(
     escalate_for_lineage: bool,
     creator_pid: Option<u32>,
     creator_exe: Option<std::path::PathBuf>,
+    audit_path: &Path,
 ) {
     if escalate_for_lineage {
         // File content looks safe but was created by Python startup --
@@ -762,6 +769,7 @@ fn handle_safe_verdict(
             action_taken: sanctum_types::threat::Action::Alerted,
         };
         sanctum_notify::notify_threat(&threat_event);
+        audit::append_audit_event(&threat_event, audit_path);
     } else {
         tracing::debug!(path = %event.path.display(), "file is safe");
     }
@@ -774,6 +782,7 @@ fn handle_warning_verdict(
     escalate_for_lineage: bool,
     creator_pid: Option<u32>,
     creator_exe: Option<std::path::PathBuf>,
+    audit_path: &Path,
 ) {
     // Escalate to Critical if the lineage is suspicious
     let level = if escalate_for_lineage {
@@ -803,9 +812,11 @@ fn handle_warning_verdict(
         action_taken: sanctum_types::threat::Action::Alerted,
     };
     sanctum_notify::notify_threat(&threat_event);
+    audit::append_audit_event(&threat_event, audit_path);
 }
 
 /// Handle a critical .pth file verdict by quarantining, alerting, or logging based on config.
+#[allow(clippy::too_many_arguments)]
 fn handle_critical_verdict(
     event: &WatchEvent,
     analysis: &sanctum_sentinel::pth::analyser::FileAnalysis,
@@ -814,6 +825,7 @@ fn handle_critical_verdict(
     quarantine: &Quarantine,
     creator_pid: Option<u32>,
     creator_exe: Option<std::path::PathBuf>,
+    audit_path: &Path,
 ) {
     tracing::error!(
         path = %event.path.display(),
@@ -869,6 +881,7 @@ fn handle_critical_verdict(
                 action_taken: sanctum_types::threat::Action::Quarantined,
             };
             sanctum_notify::notify_threat(&threat_event);
+            audit::append_audit_event(&threat_event, audit_path);
         }
         sanctum_types::config::PthResponse::Alert => {
             let threat_event = sanctum_types::threat::ThreatEvent {
@@ -885,6 +898,7 @@ fn handle_critical_verdict(
                 action_taken: sanctum_types::threat::Action::Alerted,
             };
             sanctum_notify::notify_threat(&threat_event);
+            audit::append_audit_event(&threat_event, audit_path);
         }
         sanctum_types::config::PthResponse::Log => {
             tracing::error!(

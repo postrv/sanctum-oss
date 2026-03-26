@@ -236,7 +236,7 @@ mod tests {
                 session_spent_cents: 321,
                 session_limit_cents: Some(20000),
                 daily_spent_cents: 321,
-                daily_limit_cents: Some(100000),
+                daily_limit_cents: Some(100_000),
                 alert_triggered: false,
                 session_exceeded: false,
             },

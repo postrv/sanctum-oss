@@ -15,8 +15,6 @@ notify = "7.0"
 nix = { version = "0.29", features = ["process", "signal", "fs"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

@@ -171,6 +171,7 @@ fn print_event(event: &ThreatEvent) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, clippy::similar_names)]
 mod tests {
     use super::*;
     use chrono::Utc;

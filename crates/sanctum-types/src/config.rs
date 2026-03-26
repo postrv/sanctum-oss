@@ -177,15 +177,16 @@ impl std::fmt::Display for BudgetAmount {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn config_deserialises_from_minimal_toml() {
-        let toml_str = r#"
+        let toml_str = r"
             [sentinel]
             watch_pth = true
-        "#;
+        ";
         let config: SanctumConfig =
             toml::from_str(toml_str).expect("minimal config should parse");
         assert!(config.sentinel.watch_pth);

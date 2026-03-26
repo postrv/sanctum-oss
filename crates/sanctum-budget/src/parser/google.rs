@@ -79,10 +79,7 @@ mod tests {
 
         let result = parse_google(&json);
         assert!(result.is_ok());
-        let data = match result {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Ok(data) = result else { return };
         assert_eq!(data.provider, Provider::Google);
         assert_eq!(data.model, "gemini-2.5-pro-preview-03-25");
         assert_eq!(data.input_tokens, 4096);

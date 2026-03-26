@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 //! End-to-end tests: quarantine review flow.
 //!
 //! Tests the complete quarantine lifecycle: quarantine → review → approve/delete.

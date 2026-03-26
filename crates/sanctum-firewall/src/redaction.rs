@@ -292,6 +292,74 @@ mod tests {
     }
 
     #[test]
+    fn redacts_slack_user_token() {
+        let input = "token: xoxp-1234567890-1234567890-abcdefghijklmnopqrstuvwx";
+        let (output, events) = redact_credentials(input);
+        assert!(!output.contains("xoxp-"));
+        assert!(output.contains("[REDACTED:Slack User Token:"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].credential_type, "Slack User Token");
+    }
+
+    #[test]
+    fn redacts_slack_app_token() {
+        let token = format!(
+            "xapp-1-A1234567890-1234567890123-{}",
+            "a".repeat(64)
+        );
+        let input = format!("auth: {token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains("xapp-"));
+        assert!(output.contains("[REDACTED:Slack App Token:"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].credential_type, "Slack App Token");
+    }
+
+    #[test]
+    fn redacts_npm_token() {
+        let token = format!("npm_{}", "a".repeat(36));
+        let input = format!("NPM_TOKEN={token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains("npm_"));
+        assert!(output.contains("[REDACTED:npm Token:"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].credential_type, "npm Token");
+    }
+
+    #[test]
+    fn redacts_pypi_token() {
+        let token = format!("pypi-{}", "A".repeat(32));
+        let input = format!("PYPI_TOKEN={token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains("pypi-"));
+        assert!(output.contains("[REDACTED:PyPI Token:"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].credential_type, "PyPI Token");
+    }
+
+    #[test]
+    fn redacts_digitalocean_pat() {
+        let token = format!("dop_v1_{}", "a".repeat(64));
+        let input = format!("DO_TOKEN={token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains("dop_v1_"));
+        assert!(output.contains("[REDACTED:DigitalOcean PAT:"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].credential_type, "DigitalOcean PAT");
+    }
+
+    #[test]
+    fn redacts_multiple_new_tokens_in_config() {
+        let npm_token = format!("npm_{}", "b".repeat(36));
+        let pypi_token = format!("pypi-{}", "C".repeat(32));
+        let input = format!("NPM_TOKEN={npm_token}\nPYPI_TOKEN={pypi_token}\n");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains(&npm_token));
+        assert!(!output.contains(&pypi_token));
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
     fn output_never_contains_new_pattern_secrets() {
         let secrets = vec![
             "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",

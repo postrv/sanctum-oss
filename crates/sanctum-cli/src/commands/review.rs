@@ -114,6 +114,7 @@ fn list_quarantine(json: bool) -> Result<(), CliError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

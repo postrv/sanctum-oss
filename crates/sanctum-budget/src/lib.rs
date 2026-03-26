@@ -21,3 +21,6 @@ pub use parser::{parse_usage, UsageData};
 pub use pricing::calculate_cost;
 pub use provider::Provider;
 pub use tracker::{BudgetStatus, BudgetTracker};
+
+#[cfg(test)]
+mod property_tests;

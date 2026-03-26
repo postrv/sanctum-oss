@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 //! Property-based tests for security-critical modules.
 //!
 //! These tests use proptest to verify invariants across thousands of

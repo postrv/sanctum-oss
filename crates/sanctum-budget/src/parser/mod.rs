@@ -76,10 +76,7 @@ mod tests {
 
         let usage = parse_usage(body);
         assert!(usage.is_ok());
-        let data = match usage {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Ok(data) = usage else { return };
         assert_eq!(data.provider, Provider::OpenAI);
         assert_eq!(data.input_tokens, 100);
         assert_eq!(data.output_tokens, 50);
@@ -101,10 +98,7 @@ mod tests {
 
         let usage = parse_usage(body);
         assert!(usage.is_ok());
-        let data = match usage {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Ok(data) = usage else { return };
         assert_eq!(data.provider, Provider::Anthropic);
         assert_eq!(data.input_tokens, 200);
         assert_eq!(data.output_tokens, 100);
@@ -124,10 +118,7 @@ mod tests {
 
         let usage = parse_usage(body);
         assert!(usage.is_ok());
-        let data = match usage {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Ok(data) = usage else { return };
         assert_eq!(data.provider, Provider::Google);
         assert_eq!(data.input_tokens, 300);
         assert_eq!(data.output_tokens, 150);

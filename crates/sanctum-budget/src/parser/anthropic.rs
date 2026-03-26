@@ -76,10 +76,7 @@ mod tests {
 
         let result = parse_anthropic(&json);
         assert!(result.is_ok());
-        let data = match result {
-            Ok(d) => d,
-            Err(_) => return,
-        };
+        let Ok(data) = result else { return };
         assert_eq!(data.provider, Provider::Anthropic);
         assert_eq!(data.model, "claude-sonnet-4-6-20260320");
         assert_eq!(data.input_tokens, 2048);

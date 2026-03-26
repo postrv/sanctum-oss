@@ -159,6 +159,7 @@ pub async fn discover_site_packages() -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

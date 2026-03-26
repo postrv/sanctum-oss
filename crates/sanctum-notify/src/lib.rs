@@ -199,7 +199,7 @@ mod tests {
         let input = "legit\u{200B}path/\u{00E9}vil.pth";
         let result = sanitize_for_applescript(input);
         assert!(
-            result.chars().all(|c| c.is_ascii()),
+            result.is_ascii(),
             "non-ASCII must be stripped: {result}"
         );
     }

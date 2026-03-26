@@ -70,6 +70,7 @@ impl ProcessLineage {
     ///
     /// Returns `SentinelError::ProcessNotFound` if the PID doesn't exist.
     /// Terminates after 64 levels of depth to prevent infinite loops.
+    #[allow(clippy::similar_names)]
     pub fn trace(pid: u32, source: &dyn ProcSource) -> Result<Self, SentinelError> {
         let mut chain = Vec::new();
         let mut current_pid = pid;
@@ -153,6 +154,7 @@ pub trait ProcSource {
 
 /// Mock `/proc` filesystem for testing.
 #[cfg(test)]
+#[derive(Default)]
 pub struct MockProcFs {
     processes: std::collections::HashMap<u32, ProcessInfo>,
 }
@@ -162,13 +164,12 @@ impl MockProcFs {
     /// Create a new empty mock.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            processes: std::collections::HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Add a process to the mock.
     #[must_use]
+    #[allow(clippy::similar_names)]
     pub fn process(mut self, pid: u32, name: &str, ppid: Option<u32>) -> Self {
         self.processes.insert(
             pid,
@@ -311,6 +312,7 @@ fn platform_get_process_info(pid: u32) -> Option<ProcessInfo> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

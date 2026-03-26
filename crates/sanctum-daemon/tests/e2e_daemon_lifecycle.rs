@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 //! End-to-end tests: daemon lifecycle management.
 //!
 //! Tests PID file management, stale detection, and quarantine persistence
@@ -179,7 +180,7 @@ fn e2e_concurrent_quarantine_operations() {
 /// Find a PID that is not currently running.
 fn find_unused_pid() -> u32 {
     // Start from a high PID and search downward for one that's not running
-    for pid in (50000..99999).rev() {
+    for pid in (50000..99999_i32).rev() {
         #[cfg(unix)]
         {
             if nix::sys::signal::kill(
@@ -188,18 +189,20 @@ fn find_unused_pid() -> u32 {
             )
             .is_err()
             {
+                #[allow(clippy::cast_sign_loss)]
                 return pid as u32;
             }
         }
         #[cfg(not(unix))]
         {
+            #[allow(clippy::cast_sign_loss)]
             return pid as u32;
         }
     }
     99998
 }
 
-/// Thin wrapper to access DaemonManager from the daemon crate in tests.
+/// Thin wrapper to access `DaemonManager` from the daemon crate in tests.
 /// We can't directly use the daemon's internal types from workspace tests,
 /// so we replicate the PID file logic here for testing.
 mod sanctum_daemon_test_helpers {
@@ -211,7 +214,7 @@ mod sanctum_daemon_test_helpers {
     }
 
     impl DaemonManagerForTest {
-        pub fn new(pid_file: PathBuf) -> Self {
+        pub const fn new(pid_file: PathBuf) -> Self {
             Self { pid_file }
         }
 
@@ -223,12 +226,9 @@ mod sanctum_daemon_test_helpers {
             }
 
             let pid_str = fs::read_to_string(&self.pid_file)?;
-            let pid: u32 = match pid_str.trim().parse() {
-                Ok(p) => p,
-                Err(_) => {
-                    let _ = fs::remove_file(&self.pid_file);
-                    return Ok(None);
-                }
+            let Ok(pid) = pid_str.trim().parse::<u32>() else {
+                let _ = fs::remove_file(&self.pid_file);
+                return Ok(None);
             };
 
             if is_process_running(pid) {
@@ -260,10 +260,7 @@ mod sanctum_daemon_test_helpers {
     fn is_process_running(pid: u32) -> bool {
         #[cfg(unix)]
         {
-            let raw_pid = match i32::try_from(pid) {
-                Ok(p) => p,
-                Err(_) => return false,
-            };
+            let Ok(raw_pid) = i32::try_from(pid) else { return false };
             nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(raw_pid),
                 None,

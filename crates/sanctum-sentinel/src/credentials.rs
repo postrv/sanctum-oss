@@ -30,19 +30,6 @@ pub fn is_allowed_accessor(process_name: &str) -> bool {
     ALLOWED_ACCESSORS.contains(&process_name)
 }
 
-/// A credential access event.
-#[derive(Debug, Clone)]
-pub struct CredentialAccessEvent {
-    /// The credential file that was accessed.
-    pub file_path: PathBuf,
-    /// PID of the accessing process.
-    pub accessor_pid: u32,
-    /// Name of the accessing process.
-    pub accessor_name: String,
-    /// Whether this accessor is on the allowlist.
-    pub is_allowed: bool,
-}
-
 /// An event emitted by the credential file watcher.
 #[derive(Debug, Clone)]
 pub enum CredentialEvent {
@@ -265,6 +252,7 @@ fn linux_find_accessor(path: &Path) -> (Option<u32>, Option<String>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::match_same_arms, clippy::cloned_ref_to_slice_refs)]
 mod tests {
     use super::*;
 

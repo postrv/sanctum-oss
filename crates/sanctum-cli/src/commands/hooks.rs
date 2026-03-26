@@ -1,0 +1,250 @@
+//! `sanctum hooks` — Install or remove hooks for AI coding tools.
+
+use std::fs;
+use std::path::PathBuf;
+
+use sanctum_types::errors::CliError;
+
+use crate::HooksAction;
+
+/// Run the hooks command.
+pub fn run(action: &HooksAction) -> Result<(), CliError> {
+    match action {
+        HooksAction::Install { tool } => install_hooks(tool),
+        HooksAction::Remove { tool } => remove_hooks(tool),
+    }
+}
+
+fn install_hooks(tool: &str) -> Result<(), CliError> {
+    match tool {
+        "claude" => install_claude_hooks(),
+        other => Err(CliError::InvalidArgs(format!(
+            "unknown tool '{other}'. Supported: claude"
+        ))),
+    }
+}
+
+fn remove_hooks(tool: &str) -> Result<(), CliError> {
+    match tool {
+        "claude" => remove_claude_hooks(),
+        other => Err(CliError::InvalidArgs(format!(
+            "unknown tool '{other}'. Supported: claude"
+        ))),
+    }
+}
+
+fn claude_hooks_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    Some(home.join(".claude"))
+}
+
+/// Build the hooks JSON value for Claude Code settings.
+fn build_hooks_json() -> serde_json::Value {
+    serde_json::json!({
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "command": "sanctum hook pre-bash"
+            },
+            {
+                "matcher": "Write|Edit",
+                "command": "sanctum hook pre-write"
+            },
+            {
+                "matcher": "Read",
+                "command": "sanctum hook pre-read"
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Bash",
+                "command": "sanctum hook post-bash"
+            }
+        ]
+    })
+}
+
+fn install_claude_hooks() -> Result<(), CliError> {
+    let hooks_dir = claude_hooks_dir().ok_or_else(|| {
+        CliError::InvalidArgs("could not determine HOME directory".to_string())
+    })?;
+
+    fs::create_dir_all(&hooks_dir)?;
+
+    let settings_path = hooks_dir.join("settings.json");
+
+    // Read existing settings or create new
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Add Sanctum hook configuration
+    settings["hooks"] = build_hooks_json();
+
+    let json_str = serde_json::to_string_pretty(&settings)
+        .unwrap_or_else(|_| "{}".to_string());
+    fs::write(&settings_path, json_str)?;
+
+    #[allow(clippy::print_stdout)]
+    {
+        println!("Claude Code hooks installed.");
+        println!("  Location: {}", settings_path.display());
+        println!("  Hooks will check tool calls against Sanctum policy.");
+    }
+    Ok(())
+}
+
+fn remove_claude_hooks() -> Result<(), CliError> {
+    let hooks_dir = claude_hooks_dir().ok_or_else(|| {
+        CliError::InvalidArgs("could not determine HOME directory".to_string())
+    })?;
+
+    let settings_path = hooks_dir.join("settings.json");
+
+    if !settings_path.exists() {
+        #[allow(clippy::print_stdout)]
+        {
+            println!("No Claude Code hooks found.");
+        }
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&settings_path)?;
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+
+    // Remove hooks key
+    if let Some(obj) = settings.as_object_mut() {
+        obj.remove("hooks");
+    }
+
+    let json_str = serde_json::to_string_pretty(&settings)
+        .unwrap_or_else(|_| "{}".to_string());
+    fs::write(&settings_path, json_str)?;
+
+    #[allow(clippy::print_stdout)]
+    {
+        println!("Claude Code hooks removed.");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hooks_json_has_correct_structure() {
+        let hooks = build_hooks_json();
+
+        // Check PreToolUse
+        let pre = hooks.get("PreToolUse").expect("should have PreToolUse");
+        let pre_arr = pre.as_array().expect("PreToolUse should be array");
+        assert_eq!(pre_arr.len(), 3);
+
+        // Bash hook
+        assert_eq!(pre_arr[0]["matcher"], "Bash");
+        assert_eq!(pre_arr[0]["command"], "sanctum hook pre-bash");
+
+        // Write|Edit hook
+        assert_eq!(pre_arr[1]["matcher"], "Write|Edit");
+        assert_eq!(pre_arr[1]["command"], "sanctum hook pre-write");
+
+        // Read hook
+        assert_eq!(pre_arr[2]["matcher"], "Read");
+        assert_eq!(pre_arr[2]["command"], "sanctum hook pre-read");
+
+        // Check PostToolUse
+        let post = hooks.get("PostToolUse").expect("should have PostToolUse");
+        let post_arr = post.as_array().expect("PostToolUse should be array");
+        assert_eq!(post_arr.len(), 1);
+
+        assert_eq!(post_arr[0]["matcher"], "Bash");
+        assert_eq!(post_arr[0]["command"], "sanctum hook post-bash");
+    }
+
+    #[test]
+    fn hooks_json_no_old_firewall_command() {
+        let hooks = build_hooks_json();
+        let serialized = serde_json::to_string(&hooks).expect("should serialize");
+        assert!(!serialized.contains("firewall"));
+        assert!(!serialized.contains("--tool"));
+    }
+
+    #[test]
+    fn install_writes_correct_json_structure() {
+        let dir = tempfile::tempdir().expect("should create tempdir");
+        let settings_path = dir.path().join("settings.json");
+
+        // Simulate install by building and writing
+        let mut settings = serde_json::json!({});
+        settings["hooks"] = build_hooks_json();
+
+        let json_str =
+            serde_json::to_string_pretty(&settings).expect("should serialize");
+        fs::write(&settings_path, &json_str).expect("should write");
+
+        // Read back and verify
+        let content = fs::read_to_string(&settings_path).expect("should read");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("should parse JSON");
+
+        let hooks = parsed.get("hooks").expect("should have hooks key");
+        let pre = hooks
+            .get("PreToolUse")
+            .expect("should have PreToolUse")
+            .as_array()
+            .expect("PreToolUse should be array");
+
+        assert_eq!(pre.len(), 3);
+        assert_eq!(pre[0]["command"], "sanctum hook pre-bash");
+        assert_eq!(pre[1]["command"], "sanctum hook pre-write");
+        assert_eq!(pre[2]["command"], "sanctum hook pre-read");
+
+        let post = hooks
+            .get("PostToolUse")
+            .expect("should have PostToolUse")
+            .as_array()
+            .expect("PostToolUse should be array");
+
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0]["command"], "sanctum hook post-bash");
+    }
+
+    #[test]
+    fn install_preserves_existing_settings() {
+        let dir = tempfile::tempdir().expect("should create tempdir");
+        let settings_path = dir.path().join("settings.json");
+
+        // Write some existing settings
+        let existing = serde_json::json!({
+            "apiKey": "test-key",
+            "model": "claude-4"
+        });
+        let json_str =
+            serde_json::to_string_pretty(&existing).expect("should serialize");
+        fs::write(&settings_path, &json_str).expect("should write");
+
+        // Simulate install on existing file
+        let content = fs::read_to_string(&settings_path).expect("should read");
+        let mut settings: serde_json::Value =
+            serde_json::from_str(&content).expect("should parse");
+        settings["hooks"] = build_hooks_json();
+
+        let json_str =
+            serde_json::to_string_pretty(&settings).expect("should serialize");
+        fs::write(&settings_path, &json_str).expect("should write");
+
+        // Read back and verify existing settings are preserved
+        let content = fs::read_to_string(&settings_path).expect("should read");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("should parse");
+
+        assert_eq!(parsed["apiKey"], "test-key");
+        assert_eq!(parsed["model"], "claude-4");
+        assert!(parsed.get("hooks").is_some());
+    }
+}

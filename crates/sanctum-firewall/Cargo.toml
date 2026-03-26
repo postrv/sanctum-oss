@@ -1,0 +1,21 @@
+[package]
+name = "sanctum-firewall"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sanctum-types = { path = "../sanctum-types" }
+regex = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

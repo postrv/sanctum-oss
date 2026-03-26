@@ -1,0 +1,19 @@
+[package]
+name = "sanctum-notify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-platform desktop notification abstraction for Sanctum"
+
+[lints]
+workspace = true
+
+[dependencies]
+sanctum-types = { path = "../sanctum-types" }
+tracing = { workspace = true }
+# NOTE: notify-rust temporarily disabled due to zbus/Rust edition
+# incompatibility upstream. Using shell fallback for now.
+# Uncomment once zbus 5.x compiles on stable Rust:
+# notify-rust = "4"
+
+[dev-dependencies]

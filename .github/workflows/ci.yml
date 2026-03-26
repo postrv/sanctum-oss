@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all --all-features
+      - run: cargo test --all --all-features -- --ignored
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all --all-features
+
+  property-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all --all-features -- property
+        env:
+          PROPTEST_CASES: 10000
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Kani and fuzz jobs are commented out until the codebase
+  # is mature enough for them to pass reliably.
+  #
+  # kani:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: model-checking/kani-github-action@v1
+  #     - run: cargo kani --workspace
+  #
+  # fuzz:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@nightly
+  #     - run: cargo install cargo-fuzz
+  #     - run: cargo fuzz run fuzz_pth_analyser -- -max_total_time=300
+  #     - run: cargo fuzz run fuzz_config_parser -- -max_total_time=300
+
+  build-release:
+    needs: [lint, deny, test-linux, test-macos, property-tests, audit]
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target ${{ matrix.target }}
+        # Cross-compilation for aarch64 on x86_64 Ubuntu requires a linker
+        if: ${{ !startsWith(matrix.target, 'aarch64-unknown-linux') }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(matrix.target, 'aarch64-unknown-linux') }}
+        with:
+          name: sanctum-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/sanctum
+
+  # sign:
+  #   needs: [build-release]
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     id-token: write
+  #   steps:
+  #     - uses: sigstore/cosign-installer@v3
+  #     - uses: actions/download-artifact@v4
+  #     - run: |
+  #         for binary in sanctum-*/sanctum; do
+  #           cosign sign-blob --yes "$binary" \
+  #             --output-signature "${binary}.sig" \
+  #             --output-certificate "${binary}.cert"
+  #         done

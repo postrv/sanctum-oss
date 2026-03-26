@@ -1,0 +1,33 @@
+[package]
+name = "sanctum-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Sanctum background daemon — filesystem watching, IPC server, event processing"
+
+[[bin]]
+name = "sanctum-daemon"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+sanctum-types = { path = "../sanctum-types" }
+sanctum-sentinel = { path = "../sanctum-sentinel" }
+sanctum-notify = { path = "../sanctum-notify" }
+sanctum-budget = { path = "../sanctum-budget" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+nix = { version = "0.29", features = ["process", "signal", "fs"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -1,0 +1,34 @@
+[package]
+name = "sanctum-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Sanctum CLI client — init, status, review, scan, budget commands"
+
+[[bin]]
+name = "sanctum"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+sanctum-types = { path = "../sanctum-types" }
+sanctum-firewall = { path = "../sanctum-firewall" }
+sanctum-budget = { path = "../sanctum-budget" }
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+nix = { version = "0.29", features = ["process", "signal"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_cmd = "2"
+predicates = "3"

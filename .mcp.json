@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "forgemax": {
-      "command": "/Users/laurence/.cargo/bin/forgemax",
-      "args": [],
-      "cwd": "/Users/laurence/RustroverProjects/sanctum/sanctum"
-    }
-  }
-}

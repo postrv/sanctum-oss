@@ -11,13 +11,23 @@ use crate::redaction::redact_credentials;
 const SENSITIVE_READ_PATHS: &[&str] = &[
     "~/.ssh/",
     "~/.aws/",
+    "~/.docker/",
+    "~/.kube/",
     "$HOME/.ssh/",
     "$HOME/.aws/",
+    "$HOME/.docker/",
+    "$HOME/.kube/",
 ];
 
 /// Sensitive file name patterns that should never be read.
 const SENSITIVE_READ_FILES: &[&str] = &[
     ".env",
+    ".netrc",
+    ".pgpass",
+    ".npmrc",
+    ".pypirc",
+    "credentials.json",
+    "token.json",
 ];
 
 /// Sensitive environment variable names whose values should not be echoed.
@@ -57,12 +67,16 @@ const CREDENTIAL_FILE_PATTERNS: &[&str] = &[
 ];
 
 /// Commands that directly read file contents.
-const DIRECT_READ_COMMANDS: &[&str] = &["cat", "less", "head", "tail", "more"];
+const DIRECT_READ_COMMANDS: &[&str] = &[
+    "cat", "less", "head", "tail", "more",
+    "tac", "nl", "strings", "rev", "sort", "od", "hexdump", "xxd",
+    "source", ".",
+];
 
 /// Commands that can be used to extract file contents when combined with
 /// credential file paths.
 const INDIRECT_READ_COMMANDS: &[&str] = &[
-    "grep", "awk", "sed", "python3 -c", "python -c", "base64", "xxd", "cp", "mv",
+    "grep", "awk", "sed", "python3 -c", "python -c", "base64", "xxd", "cp", "mv", "dd",
 ];
 
 /// Environment-dumping commands that unconditionally leak secrets.
@@ -173,11 +187,20 @@ fn is_env_dump(command: &str) -> bool {
         return true;
     }
     // env piped to something: "env | grep", "env | less" etc.
+    // env with non-safe flags: "env -0", "env --null" dump env with NUL separators.
     if let Some(rest) = trimmed.strip_prefix("env ") {
         let rest = rest.trim_start();
         // If it starts with a pipe, it's dumping env
         if rest.starts_with('|') {
             return true;
+        }
+        // Block env with flags that dump variables (e.g. -0, --null).
+        // Allow only known-safe flags: -i (clean env), -u (unset), -S (split).
+        if rest.starts_with('-') {
+            let safe_prefixes: &[&str] = &["-i", "-u", "-S"];
+            if !safe_prefixes.iter().any(|sp| rest.starts_with(sp)) {
+                return true;
+            }
         }
     }
 
@@ -369,15 +392,14 @@ pub fn pre_read(input: &HookInput) -> HookOutput {
         }
     }
 
-    // Block reading .env files (check the filename component)
+    // Block reading sensitive files (check the filename component)
     for pattern in SENSITIVE_READ_FILES {
-        // Match /.env at any depth, or a path that ends with .env
-        if file_path.ends_with(pattern)
+        if file_path.ends_with(&format!("/{pattern}"))
+            || file_path == *pattern
             || file_path.contains(&format!("{pattern}/"))
-            || file_path.contains(&format!("/{pattern}"))
         {
             return HookOutput::block(format!(
-                "Blocked: reading '{file_path}' — .env files may contain secrets"
+                "Blocked: reading '{file_path}' — credential files may contain secrets"
             ));
         }
     }
@@ -1308,6 +1330,132 @@ mod tests {
         let input = bash_input("cat ~/.ssh/id_rsa");
         assert!(input.config.is_none());
         let output = pre_bash(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- Fix 1: pre_read blocks additional credential files ----
+
+    #[test]
+    fn pre_read_blocks_netrc() {
+        let input = make_input("read", json!({ "file_path": "/home/user/.netrc" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_pgpass() {
+        let input = make_input("read", json!({ "file_path": "/home/user/.pgpass" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_docker_config() {
+        let input = make_input("read", json!({ "file_path": "/home/user/.docker/config.json" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_kube_config() {
+        let input = make_input("read", json!({ "file_path": "/home/user/.kube/config" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_npmrc() {
+        let input = make_input("read", json!({ "file_path": "/home/user/.npmrc" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_pypirc() {
+        let input = make_input("read", json!({ "file_path": "/home/user/.pypirc" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_credentials_json() {
+        let input = make_input("read", json!({ "file_path": "/home/user/credentials.json" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_token_json() {
+        let input = make_input("read", json!({ "file_path": "/home/user/token.json" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- Fix 2: pre_bash blocks bypass commands ----
+
+    #[test]
+    fn tac_credential_file_blocked() {
+        let output = pre_bash(&bash_input("tac .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn source_env_file_blocked() {
+        let output = pre_bash(&bash_input("source .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn dot_env_file_blocked() {
+        let output = pre_bash(&bash_input(". .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn nl_credential_file_blocked() {
+        let output = pre_bash(&bash_input("nl .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn strings_credential_file_blocked() {
+        let output = pre_bash(&bash_input("strings .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn rev_credential_file_blocked() {
+        let output = pre_bash(&bash_input("rev .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn sort_credential_file_blocked() {
+        let output = pre_bash(&bash_input("sort .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn od_credential_file_blocked() {
+        let output = pre_bash(&bash_input("od .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn hexdump_credential_file_blocked() {
+        let output = pre_bash(&bash_input("hexdump .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn dd_credential_file_blocked() {
+        let output = pre_bash(&bash_input("dd if=.env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn env_dash_zero_blocked() {
+        let output = pre_bash(&bash_input("env -0"));
         assert_eq!(output.decision, HookDecision::Block);
     }
 }

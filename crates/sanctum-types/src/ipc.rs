@@ -151,6 +151,13 @@ pub async fn read_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Vec<u8>,
 
     let len = u32::from_be_bytes(len_buf) as usize;
 
+    if len == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "zero-length frame is invalid",
+        ));
+    }
+
     if len > MAX_MESSAGE_SIZE {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -196,6 +203,21 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_length_frame_rejected() {
+        // A frame with length prefix 0 should be rejected as invalid
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let data: Vec<u8> = 0u32.to_be_bytes().to_vec();
+            let mut cursor = std::io::Cursor::new(data);
+            let result = read_frame(&mut cursor).await;
+            assert!(result.is_err(), "zero-length frame should be rejected");
+        });
+    }
 
     #[test]
     fn test_record_usage_command_serialises_correctly() {

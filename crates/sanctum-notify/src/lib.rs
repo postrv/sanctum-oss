@@ -11,7 +11,13 @@
 //! of safe characters, preventing command injection through crafted file
 //! paths or descriptions.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use sanctum_types::threat::{ThreatEvent, ThreatLevel};
+
+static LAST_NOTIFICATION: AtomicU64 = AtomicU64::new(0);
+const MIN_NOTIFICATION_INTERVAL_MS: u64 = 1000;
 
 /// Sanitize text before embedding it in an `AppleScript` string literal.
 ///
@@ -60,6 +66,17 @@ fn sanitize_for_applescript(input: &str) -> String {
 /// Non-blocking — if the notification fails, it's logged but doesn't
 /// interrupt the daemon's operation.
 pub fn notify_threat(event: &ThreatEvent) {
+    #[allow(clippy::cast_possible_truncation)] // millis since epoch won't overflow u64 for ~585M years
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let last = LAST_NOTIFICATION.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < MIN_NOTIFICATION_INTERVAL_MS {
+        return;
+    }
+    LAST_NOTIFICATION.store(now_ms, Ordering::Relaxed);
+
     let summary = match event.level {
         ThreatLevel::Critical => format!("Sanctum: CRITICAL - {}", category_display(event)),
         ThreatLevel::Warning => format!("Sanctum: Warning - {}", category_display(event)),
@@ -532,5 +549,31 @@ mod tests {
         let input = "it's a trap";
         let result = sanitize_for_applescript(input);
         assert_eq!(result, "it_s a trap");
+    }
+
+    #[test]
+    fn rapid_notifications_are_rate_limited() {
+        // Reset the atomic to a known state so this test is independent
+        LAST_NOTIFICATION.store(0, Ordering::Relaxed);
+
+        let event = make_event(
+            ThreatLevel::Critical,
+            ThreatCategory::PthInjection,
+            "test rate limit",
+            "/tmp/test.pth",
+        );
+
+        // First call should go through and update the timestamp
+        notify_threat(&event);
+        let after_first = LAST_NOTIFICATION.load(Ordering::Relaxed);
+        assert!(after_first > 0, "timestamp should be set after first notification");
+
+        // Immediate second call should be rate-limited (timestamp unchanged)
+        notify_threat(&event);
+        let after_second = LAST_NOTIFICATION.load(Ordering::Relaxed);
+        assert_eq!(
+            after_first, after_second,
+            "rapid second notification should be rate-limited (timestamp unchanged)"
+        );
     }
 }

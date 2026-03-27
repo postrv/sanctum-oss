@@ -12,7 +12,6 @@ INSTALL_DIR="${SANCTUM_INSTALL_DIR:-/usr/local/bin}"
 
 main() {
     need_cmd curl
-    need_cmd tar
 
     local _arch
     _arch="$(uname -m)"
@@ -45,15 +44,19 @@ main() {
 
     echo "Installing sanctum ${_latest} for ${_target}..."
 
-    local _url="https://github.com/${REPO}/releases/download/${_latest}/sanctum-${_target}.tar.gz"
+    local _base_url="https://github.com/${REPO}/releases/download/${_latest}"
+    local _url="${_base_url}/sanctum-${_target}"
+    local _url_daemon="${_base_url}/sanctum-daemon-${_target}"
     local _tmpdir
     _tmpdir="$(mktemp -d)"
 
-    curl -fsSL "$_url" | tar -xz -C "$_tmpdir"
+    curl -fsSL "${_url}" -o "${_tmpdir}/sanctum"
+    curl -fsSL "${_url_daemon}" -o "${_tmpdir}/sanctum-daemon"
+    chmod +x "${_tmpdir}/sanctum" "${_tmpdir}/sanctum-daemon"
 
     # Download signature and certificate for Sigstore verification
-    local _sig_url="https://github.com/${REPO}/releases/download/${_latest}/sanctum-${_target}.sig"
-    local _cert_url="https://github.com/${REPO}/releases/download/${_latest}/sanctum-${_target}.cert"
+    local _sig_url="${_base_url}/sanctum-${_target}.sig"
+    local _cert_url="${_base_url}/sanctum-${_target}.cert"
 
     curl -fsSL "$_sig_url" -o "${_tmpdir}/sanctum.sig" 2>/dev/null || true
     curl -fsSL "$_cert_url" -o "${_tmpdir}/sanctum.cert" 2>/dev/null || true
@@ -81,10 +84,11 @@ main() {
     fi
 
     install -m 755 "${_tmpdir}/sanctum" "${INSTALL_DIR}/sanctum"
+    install -m 755 "${_tmpdir}/sanctum-daemon" "${INSTALL_DIR}/sanctum-daemon"
     rm -rf "$_tmpdir"
 
     echo ""
-    echo "Sanctum ${_latest} installed to ${INSTALL_DIR}/sanctum"
+    echo "Sanctum ${_latest} installed to ${INSTALL_DIR}/"
     echo ""
     echo "Next steps:"
     echo "  sanctum init      # initialise in current directory"

@@ -15,6 +15,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use chrono::{DateTime, Utc};
 use sanctum_types::errors::SentinelError;
@@ -200,6 +201,9 @@ fn validate_restore_path(path: &Path) -> Result<(), SentinelError> {
     Ok(())
 }
 
+/// Process-wide counter to ensure quarantine ID uniqueness.
+static QUARANTINE_COUNTER: AtomicU32 = AtomicU32::new(0);
+
 /// Quarantine manager.
 pub struct Quarantine {
     /// Directory where quarantined files are stored.
@@ -243,11 +247,13 @@ impl Quarantine {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
+        let counter = QUARANTINE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let id = format!(
-            "{}-{}-{:08x}",
+            "{}-{}-{:08x}-{:04x}",
             now.format("%Y%m%d-%H%M%S"),
             file_stem,
-            nanos
+            nanos,
+            counter
         );
 
         let quarantine_path = self.quarantine_dir.join(&id);
@@ -764,6 +770,32 @@ mod tests {
             .expect("quarantine 2");
 
         assert_ne!(entry1.id, entry2.id, "IDs should differ: {} vs {}", entry1.id, entry2.id);
+    }
+
+    #[test]
+    fn quarantine_ids_unique_same_stem_rapid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let q = Quarantine::new(dir.path().join("quarantine"));
+
+        // Quarantine the same file twice in rapid succession
+        let path1 = dir.path().join("evil.pth");
+        fs::write(&path1, "content1").expect("write");
+
+        let entry1 = q
+            .quarantine_file(&path1, &default_meta(&path1))
+            .expect("quarantine 1");
+
+        // Re-create the file for second quarantine
+        fs::write(&path1, "content2").expect("write");
+        let entry2 = q
+            .quarantine_file(&path1, &default_meta(&path1))
+            .expect("quarantine 2");
+
+        assert_ne!(
+            entry1.id, entry2.id,
+            "IDs for same-stem files quarantined rapidly must differ: {} vs {}",
+            entry1.id, entry2.id
+        );
     }
 
     #[test]

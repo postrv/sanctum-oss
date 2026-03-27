@@ -199,6 +199,8 @@ impl BudgetTracker {
     ///
     /// Returns `BudgetError::Io` or `BudgetError::Serde` on failure.
     pub fn save_to_file(&self, path: &Path) -> Result<(), BudgetError> {
+        use std::io::Write;
+
         let state = PersistedState {
             session_start: self.session_start,
             daily_start: self.daily_start,
@@ -206,7 +208,13 @@ impl BudgetTracker {
             daily_spend: self.daily_spend.clone(),
         };
         let json = serde_json::to_string_pretty(&state)?;
-        std::fs::write(path, json)?;
+
+        let tmp_path = path.with_extension("tmp");
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, path)?;
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -656,6 +664,26 @@ mod tests {
 
         // Daily counters should have been reset.
         assert_eq!(tracker.status(Provider::OpenAI).daily_spent_cents, 0);
+    }
+
+    #[test]
+    fn save_to_file_no_temp_residue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("budget.json");
+
+        let mut tracker = BudgetTracker::new(&test_config());
+        let usage = make_usage(Provider::OpenAI, "gpt-4o", 1_000_000, 0);
+        tracker.record_usage(&usage);
+
+        tracker.save_to_file(&path).expect("save");
+
+        // The final file must exist and be valid JSON
+        let data = std::fs::read_to_string(&path).expect("read saved file");
+        let _: serde_json::Value = serde_json::from_str(&data).expect("saved file must be valid JSON");
+
+        // No .tmp residue should remain
+        let tmp_path = path.with_extension("tmp");
+        assert!(!tmp_path.exists(), "temp file should not remain after save");
     }
 
     #[test]

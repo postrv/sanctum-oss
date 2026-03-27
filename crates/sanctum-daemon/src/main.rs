@@ -18,7 +18,7 @@ use sanctum_sentinel::pth::quarantine::Quarantine;
 use sanctum_sentinel::watcher::{PthWatcher, WatchEvent};
 use sanctum_types::config::SanctumConfig;
 use sanctum_types::paths::WellKnownPaths;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 mod audit;
 mod config;
@@ -187,6 +187,8 @@ async fn run_daemon(
         }
     };
 
+    let ipc_semaphore = Arc::new(Semaphore::new(MAX_IPC_CONNECTIONS));
+
     tracing::info!("daemon ready, entering main event loop");
 
     let mut ctx = EventLoopContext {
@@ -204,6 +206,7 @@ async fn run_daemon(
         sigterm: &mut sigterm,
         sighup: &mut sighup,
         audit_path: &audit_path,
+        ipc_semaphore: &ipc_semaphore,
     };
 
     run_event_loop(&mut ctx).await;
@@ -292,6 +295,10 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
             accept_result = ctx.ipc_server.accept() => {
                 match accept_result {
                     Ok(mut conn) => {
+                        let Ok(permit) = ctx.ipc_semaphore.clone().try_acquire_owned() else {
+                            tracing::warn!("IPC connection limit reached, rejecting");
+                            continue;
+                        };
                         let uptime = ctx.start_time.elapsed().as_secs();
                         let watchers_active = ctx.watcher.map_or(0, |w| u32::from(w.is_alive()));
                         #[allow(clippy::cast_possible_truncation)] // quarantine entries are bounded well below u32::MAX
@@ -301,6 +308,7 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                         let ipc_budget = Arc::clone(ctx.shared_budget);
 
                         tokio::spawn(async move {
+                            let _permit = permit;
                             if let Err(e) = handle_ipc_command(
                                 &mut conn,
                                 uptime,
@@ -601,13 +609,13 @@ async fn handle_record_usage(
 // Threat / fix helpers
 // ============================================================
 
-/// Read all threat events from the audit log.
-fn read_audit_events(paths: &WellKnownPaths) -> Vec<sanctum_types::threat::ThreatEvent> {
+/// Read threat events from the audit log, returning at most `max_events` most recent entries.
+fn read_audit_events(paths: &WellKnownPaths, max_events: usize) -> Vec<sanctum_types::threat::ThreatEvent> {
     let audit_path = paths.data_dir.join("audit.log");
     let Ok(content) = std::fs::read_to_string(&audit_path) else {
         return Vec::new();
     };
-    content
+    let events: Vec<sanctum_types::threat::ThreatEvent> = content
         .lines()
         .filter_map(|line| {
             let line = line.trim();
@@ -622,16 +630,21 @@ fn read_audit_events(paths: &WellKnownPaths) -> Vec<sanctum_types::threat::Threa
                 }
             }
         })
-        .collect()
+        .collect();
+    if events.len() > max_events {
+        events[events.len() - max_events..].to_vec()
+    } else {
+        events
+    }
 }
 
-/// Read resolved threat IDs from the resolution log.
-fn read_resolved_ids(paths: &WellKnownPaths) -> std::collections::HashSet<String> {
+/// Read resolved threat IDs from the resolution log, bounded to `max_entries` most recent.
+fn read_resolved_ids(paths: &WellKnownPaths, max_entries: usize) -> std::collections::HashSet<String> {
     let resolution_path = paths.data_dir.join("resolutions.log");
     let Ok(content) = std::fs::read_to_string(&resolution_path) else {
         return std::collections::HashSet::new();
     };
-    content
+    let resolutions: Vec<String> = content
         .lines()
         .filter_map(|line| {
             let line = line.trim();
@@ -646,7 +659,12 @@ fn read_resolved_ids(paths: &WellKnownPaths) -> std::collections::HashSet<String
                 }
             }
         })
-        .collect()
+        .collect();
+    if resolutions.len() > max_entries {
+        resolutions[resolutions.len() - max_entries..].iter().cloned().collect()
+    } else {
+        resolutions.into_iter().collect()
+    }
 }
 
 /// Append a resolution entry to the resolution log.
@@ -696,8 +714,8 @@ fn handle_list_threats(
     category: Option<&str>,
     level: Option<&str>,
 ) -> IpcResponse {
-    let events = read_audit_events(paths);
-    let resolved = read_resolved_ids(paths);
+    let events = read_audit_events(paths, MAX_AUDIT_EVENTS);
+    let resolved = read_resolved_ids(paths, MAX_AUDIT_EVENTS);
 
     let threats: Vec<ThreatListItem> = events
         .iter()
@@ -746,7 +764,7 @@ fn handle_get_threat_details(
     quarantine: &sanctum_sentinel::pth::quarantine::Quarantine,
     id: &str,
 ) -> IpcResponse {
-    let events = read_audit_events(paths);
+    let events = read_audit_events(paths, MAX_AUDIT_EVENTS);
 
     let Some(event) = events.iter().find(|e| e.threat_id() == id) else {
         return IpcResponse::Error {
@@ -786,7 +804,7 @@ fn handle_resolve_threat(
 ) -> IpcResponse {
     use sanctum_types::threat::{ResolutionAction, ThreatResolution};
 
-    let events = read_audit_events(paths);
+    let events = read_audit_events(paths, MAX_AUDIT_EVENTS);
 
     let Some(event) = events.iter().find(|e| e.threat_id() == id) else {
         return IpcResponse::Error {
@@ -894,6 +912,12 @@ fn handle_stop(paths: &WellKnownPaths) -> ExitCode {
     }
 }
 
+/// Maximum number of audit events to load into memory from the audit log.
+const MAX_AUDIT_EVENTS: usize = 10_000;
+
+/// Maximum number of concurrent IPC connections.
+const MAX_IPC_CONNECTIONS: usize = 64;
+
 fn handle_reload(paths: &WellKnownPaths) -> ExitCode {
     let manager = daemon::DaemonManager::new(paths.pid_file.clone());
     match manager.check_existing() {
@@ -920,5 +944,136 @@ fn handle_reload(paths: &WellKnownPaths) -> ExitCode {
             tracing::error!(%e, "failed to check daemon status");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use sanctum_types::threat::{Action, ThreatCategory, ThreatEvent, ThreatLevel};
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn write_events_to_audit_log(dir: &std::path::Path, count: usize) -> WellKnownPaths {
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let audit_path = data_dir.join("audit.log");
+        let mut file = std::fs::File::create(&audit_path).expect("create audit.log");
+        for i in 0..count {
+            let event = ThreatEvent {
+                timestamp: chrono::Utc::now(),
+                level: ThreatLevel::Critical,
+                category: ThreatCategory::PthInjection,
+                description: format!("event-{i}"),
+                source_path: PathBuf::from(format!("/test/file-{i}.pth")),
+                creator_pid: Some(1234),
+                creator_exe: None,
+                action_taken: Action::Quarantined,
+            };
+            let json = serde_json::to_string(&event).expect("serialize");
+            writeln!(file, "{json}").expect("write");
+        }
+        WellKnownPaths {
+            ssh_dir: dir.join(".ssh"),
+            data_dir,
+            config_dir: dir.join("config"),
+            quarantine_dir: dir.join("quarantine"),
+            log_dir: dir.join("logs"),
+            pid_file: dir.join("sanctum.pid"),
+            socket_path: dir.join("sanctum.sock"),
+        }
+    }
+
+    #[test]
+    fn read_audit_events_returns_all_when_under_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = write_events_to_audit_log(dir.path(), 5);
+        let events = read_audit_events(&paths, 100);
+        assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn read_audit_events_truncates_to_max() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = write_events_to_audit_log(dir.path(), 20);
+        let events = read_audit_events(&paths, 10);
+        assert_eq!(events.len(), 10);
+        // Should keep the most recent (last) events
+        assert_eq!(events[0].description, "event-10");
+        assert_eq!(events[9].description, "event-19");
+    }
+
+    #[test]
+    fn read_audit_events_returns_empty_for_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = WellKnownPaths {
+            ssh_dir: dir.path().join(".ssh"),
+            data_dir: dir.path().join("nonexistent"),
+            config_dir: dir.path().join("config"),
+            quarantine_dir: dir.path().join("quarantine"),
+            log_dir: dir.path().join("logs"),
+            pid_file: dir.path().join("sanctum.pid"),
+            socket_path: dir.path().join("sanctum.sock"),
+        };
+        let events = read_audit_events(&paths, 100);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn read_audit_events_with_zero_max_returns_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = write_events_to_audit_log(dir.path(), 5);
+        let events = read_audit_events(&paths, 0);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn read_resolved_ids_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let resolution_path = data_dir.join("resolutions.log");
+        let mut file = std::fs::File::create(&resolution_path).expect("create resolutions.log");
+        for i in 0..20 {
+            let resolution = sanctum_types::threat::ThreatResolution {
+                threat_id: format!("threat-{i}"),
+                resolved_at: chrono::Utc::now(),
+                resolution: sanctum_types::threat::ResolutionAction::Dismissed,
+                note: "test".to_string(),
+            };
+            let json = serde_json::to_string(&resolution).expect("serialize");
+            writeln!(file, "{json}").expect("write");
+        }
+        let paths = WellKnownPaths {
+            ssh_dir: dir.path().join(".ssh"),
+            data_dir,
+            config_dir: dir.path().join("config"),
+            quarantine_dir: dir.path().join("quarantine"),
+            log_dir: dir.path().join("logs"),
+            pid_file: dir.path().join("sanctum.pid"),
+            socket_path: dir.path().join("sanctum.sock"),
+        };
+        let ids = read_resolved_ids(&paths, 10);
+        assert_eq!(ids.len(), 10);
+        // Should contain the most recent IDs (10-19)
+        for i in 10..20 {
+            assert!(ids.contains(&format!("threat-{i}")));
+        }
+    }
+
+    #[test]
+    #[allow(clippy::significant_drop_tightening)]
+    fn ipc_semaphore_limits_permits() {
+        let sem = Arc::new(Semaphore::new(2));
+        let p1 = sem.clone().try_acquire_owned();
+        assert!(p1.is_ok());
+        let p2 = sem.clone().try_acquire_owned();
+        assert!(p2.is_ok());
+        let p3 = sem.clone().try_acquire_owned();
+        assert!(p3.is_err(), "third permit should be rejected");
+        drop(p1);
+        let p4 = sem.try_acquire_owned();
+        assert!(p4.is_ok(), "permit should be available after drop");
     }
 }

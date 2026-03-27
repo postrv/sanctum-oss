@@ -10,7 +10,7 @@ use sanctum_sentinel::network::NetworkEvent;
 use sanctum_sentinel::pth::quarantine::Quarantine;
 use sanctum_sentinel::watcher::{PthWatcher, WatchEvent};
 use sanctum_types::config::SanctumConfig;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 /// Bundles all state and channels needed by the main event loop.
 ///
@@ -32,6 +32,7 @@ pub struct EventLoopContext<'a> {
     pub sigterm: &'a mut tokio::signal::unix::Signal,
     pub sighup: &'a mut tokio::signal::unix::Signal,
     pub audit_path: &'a Path,
+    pub ipc_semaphore: &'a Arc<Semaphore>,
 }
 
 /// Bundles the common parameters shared across verdict handlers.

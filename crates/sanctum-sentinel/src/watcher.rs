@@ -5,6 +5,7 @@
 //! `.pth` files and `sitecustomize.py` / `usercustomize.py`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
@@ -141,20 +142,25 @@ pub fn is_watched_file(path: &Path) -> bool {
 ///
 /// Returns an empty vec if Python is not found or the command fails.
 pub async fn discover_site_packages() -> Vec<PathBuf> {
-    let output = tokio::process::Command::new("python3")
-        .args(["-c", "import site; print('\\n'.join(site.getsitepackages()))"])
-        .output()
-        .await;
+    let Ok(Ok(output)) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new("python3")
+            .args(["-c", "import site; print('\\n'.join(site.getsitepackages()))"])
+            .output(),
+    )
+    .await
+    else {
+        return Vec::new();
+    };
 
-    match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(|l| PathBuf::from(l.trim()))
-                .filter(|p| p.exists())
-                .collect()
-        }
-        _ => Vec::new(),
+    if output.status.success() {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|l| PathBuf::from(l.trim()))
+            .filter(|p| p.exists())
+            .collect()
+    } else {
+        Vec::new()
     }
 }
 

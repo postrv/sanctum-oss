@@ -183,7 +183,7 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
                 return path.ends_with(after_star);
             }
         }
-        return path.ends_with(suffix) || path.contains(&format!("/{suffix}"));
+        return path.ends_with(&format!("/{suffix}")) || path == suffix;
     }
 
     // Handle single-star within a pattern: "/foo/*/bar"
@@ -398,6 +398,12 @@ mod tests {
         assert!(glob_matches("/usr/*/bin", "/usr/local/bin"));
         assert!(glob_matches("/etc/*", "/etc/passwd"));
         assert!(!glob_matches("/foo/*/bar", "/baz/anything/bar"));
+    }
+
+    #[test]
+    fn glob_double_star_env_does_not_match_envrc() {
+        assert!(!glob_matches("**/.env", "/home/user/.envrc"));
+        assert!(glob_matches("**/.env", "/home/user/.env"));
     }
 
     #[test]

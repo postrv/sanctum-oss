@@ -4,11 +4,6 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
-  id-token: write
-  checks: read
-
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -16,7 +11,9 @@ env:
 jobs:
   # ── Verify CI passed for the tagged commit ───────────────────────────────────
   verify-ci:
+    permissions: { checks: read }
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Verify CI workflow passed for this commit
@@ -64,7 +61,9 @@ jobs:
 
   # ── Build binaries for all targets ──────────────────────────────────────────
   build-release:
+    permissions: {}
     needs: [verify-ci]
+    timeout-minutes: 30
     strategy:
       matrix:
         include:
@@ -93,8 +92,10 @@ jobs:
 
   # ── Sign all binaries with Sigstore (keyless OIDC) ─────────────────────────
   sign:
+    permissions: { id-token: write }
     needs: [build-release]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: sigstore/cosign-installer@v3
       - uses: actions/download-artifact@v4
@@ -127,8 +128,10 @@ jobs:
 
   # ── Generate and sign SBOM ─────────────────────────────────────────────────
   sbom:
+    permissions: { id-token: write }
     needs: [build-release]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
@@ -152,8 +155,10 @@ jobs:
 
   # ── Create GitHub Release with all signed artifacts ────────────────────────
   release:
+    permissions: { contents: write }
     needs: [sign, sbom]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

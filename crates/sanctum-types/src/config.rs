@@ -254,12 +254,24 @@ impl<'de> Deserialize<'de> for BudgetAmount {
             serde::de::Error::custom(format!("invalid budget format: {s}"))
         })?;
 
+        if !amount.is_finite() {
+            return Err(serde::de::Error::custom("budget must be a finite number"));
+        }
+
         if amount < 0.0 {
             return Err(serde::de::Error::custom("budget cannot be negative"));
         }
 
+        let cents_f = (amount * 100.0).round();
+        // u64::MAX as f64 rounds up to 2^64, so any cents_f at or above
+        // that value would overflow the u64 cast.
+        #[allow(clippy::cast_precision_loss)]
+        if cents_f >= u64::MAX as f64 {
+            return Err(serde::de::Error::custom("budget amount too large"));
+        }
+
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let cents = (amount * 100.0).round() as u64;
+        let cents = cents_f as u64;
         Ok(Self { cents })
     }
 }
@@ -492,6 +504,36 @@ mod tests {
         assert!(!config.proxy.enabled);
         assert_eq!(config.proxy.listen_port, 9847);
         assert!(config.proxy.enforce_budget);
+    }
+
+    #[test]
+    fn budget_rejects_infinity() {
+        let toml_str = r#"
+            [budgets]
+            default_session = "$inf"
+        "#;
+        let result: Result<SanctumConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_err(), "infinity should be rejected");
+    }
+
+    #[test]
+    fn budget_rejects_nan() {
+        let toml_str = r#"
+            [budgets]
+            default_session = "$NaN"
+        "#;
+        let result: Result<SanctumConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_err(), "NaN should be rejected");
+    }
+
+    #[test]
+    fn budget_rejects_overflow() {
+        let toml_str = r#"
+            [budgets]
+            default_session = "$184467440737095517.00"
+        "#;
+        let result: Result<SanctumConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_err(), "amount that overflows u64 cents should be rejected");
     }
 
     #[test]

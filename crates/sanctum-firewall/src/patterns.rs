@@ -41,7 +41,7 @@ macro_rules! static_regex {
     };
 }
 
-static_regex!(OPENAI_RE, r"sk-[a-zA-Z0-9]{20,}");
+static_regex!(OPENAI_RE, r"sk-[a-zA-Z0-9\-_]{20,}");
 static_regex!(ANTHROPIC_RE, r"sk-ant-[a-zA-Z0-9\-]{20,}");
 static_regex!(GOOGLE_AI_RE, r"AIza[a-zA-Z0-9_\-]{35}");
 static_regex!(AWS_ACCESS_KEY_RE, r"AKIA[A-Z0-9]{16}");
@@ -64,7 +64,7 @@ static_regex!(
     r"[Aa]uthorization[=: ]+Bearer [A-Za-z0-9_\-]{20,}"
 );
 static_regex!(PRIVATE_KEY_RE, r"-----BEGIN[A-Z ]*PRIVATE KEY-----");
-static_regex!(CONNECTION_STRING_RE, r"(postgresql|mongodb|redis|mysql)://[^\s@]+@[^\s]+");
+static_regex!(CONNECTION_STRING_RE, r"(postgresql|postgres|mongodb|redis|mysql)://[^\s@]+@[^\s]+");
 static_regex!(SLACK_USER_RE, r"xoxp-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,34}");
 static_regex!(SLACK_APP_RE, r"xapp-[0-9]-[A-Z0-9]{10,13}-[0-9]{13}-[a-zA-Z0-9]{64}");
 static_regex!(NPM_TOKEN_RE, r"npm_[a-zA-Z0-9]{36}");
@@ -179,6 +179,20 @@ mod tests {
     }
 
     #[test]
+    fn openai_pattern_matches_proj_key() {
+        // sk-proj-* is the most common modern OpenAI key format
+        let key = "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890";
+        assert!(OPENAI_RE.is_match(key));
+    }
+
+    #[test]
+    fn openai_pattern_matches_svcacct_key() {
+        // sk-svcacct-* is OpenAI's service account key format
+        let key = "sk-svcacct-abcdefghijklmnopqrstuvwxyz1234567890";
+        assert!(OPENAI_RE.is_match(key));
+    }
+
+    #[test]
     fn openai_pattern_rejects_short_key() {
         let key = "sk-short";
         assert!(!OPENAI_RE.is_match(key));
@@ -269,6 +283,13 @@ mod tests {
     #[test]
     fn connection_string_matches_postgres() {
         let conn = "postgresql://user:password@localhost:5432/db";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    #[test]
+    fn connection_string_matches_postgres_short_scheme() {
+        // postgres:// is the most common alias used by ORMs and connection libraries
+        let conn = "postgres://user:password@localhost:5432/db";
         assert!(CONNECTION_STRING_RE.is_match(conn));
     }
 

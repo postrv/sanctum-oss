@@ -67,11 +67,23 @@ impl Default for SentinelConfig {
     }
 }
 
+/// Deserialise a poll interval, clamping to a minimum of 1 second.
+/// `tokio::time::interval(Duration::ZERO)` panics, so we must prevent
+/// a user from setting `poll_interval_secs = 0` in their config.
+fn deserialize_poll_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    Ok(value.max(1))
+}
+
 /// Network monitoring configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NetworkConfig {
-    /// Polling interval in seconds.
+    /// Polling interval in seconds (minimum 1, to avoid tokio panic).
+    #[serde(deserialize_with = "deserialize_poll_interval")]
     pub poll_interval_secs: u64,
     /// Baseline learning period in days.
     pub learning_period_days: u32,
@@ -480,5 +492,23 @@ mod tests {
         assert!(!config.proxy.enabled);
         assert_eq!(config.proxy.listen_port, 9847);
         assert!(config.proxy.enforce_budget);
+    }
+
+    #[test]
+    fn poll_interval_zero_clamped_to_minimum() {
+        let toml_str = r"
+            [sentinel]
+            watch_network = true
+
+            [sentinel.network]
+            poll_interval_secs = 0
+        ";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("config should parse");
+        // Zero interval would panic tokio — must be clamped to at least 1
+        assert!(
+            config.sentinel.network.poll_interval_secs >= 1,
+            "poll_interval_secs must be at least 1 to avoid tokio panic"
+        );
     }
 }

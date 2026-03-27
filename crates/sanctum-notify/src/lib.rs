@@ -94,10 +94,18 @@ fn send_notification(summary: &str, body: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         // Linux: notify-send passes arguments safely (no shell interpolation).
-        std::process::Command::new("notify-send")
+        match std::process::Command::new("notify-send")
             .args(["--urgency=critical", "--app-name=Sanctum", summary, body])
             .spawn()
-            .map_err(|e| format!("notify-send failed: {e}"))?;
+        {
+            Ok(mut child) => {
+                // Reap the child in a background thread to prevent zombie accumulation.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(e) => return Err(format!("notify-send failed: {e}")),
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -110,10 +118,18 @@ fn send_notification(summary: &str, body: &str) -> Result<(), String> {
         let script = format!(
             "display notification \"{safe_body}\" with title \"{safe_summary}\"",
         );
-        std::process::Command::new("osascript")
+        match std::process::Command::new("osascript")
             .args(["-e", &script])
             .spawn()
-            .map_err(|e| format!("osascript failed: {e}"))?;
+        {
+            Ok(mut child) => {
+                // Reap the child in a background thread to prevent zombie accumulation.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(e) => return Err(format!("osascript failed: {e}")),
+        }
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

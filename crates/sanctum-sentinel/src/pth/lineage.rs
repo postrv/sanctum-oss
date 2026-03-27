@@ -259,6 +259,14 @@ fn platform_get_process_info(pid: u32) -> Option<ProcessInfo> {
         return None;
     }
 
+    // NOTE: These `ps` calls use `std::process::Command::output()` which blocks
+    // without a timeout. This is acceptable because:
+    //   1. `ps` queries local kernel state and completes in <10ms.
+    //   2. Lineage traversal is depth-limited to 64 iterations (see `trace()`).
+    //   3. The caller runs in `spawn_blocking` or a bounded async context.
+    // If `ps` were to hang (kernel bug, system under extreme load), the worst
+    // case is a stalled lineage trace — the daemon's main event loop is not blocked.
+
     // Use two separate ps calls for reliable parsing:
     // 1. Get the process command (may contain spaces)
     let comm_output = std::process::Command::new("ps")

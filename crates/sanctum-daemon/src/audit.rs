@@ -49,6 +49,7 @@ fn append_audit_event_inner(
         .map_err(std::io::Error::other)?;
 
     writeln!(file, "{json}")?;
+    file.sync_all()?;
     Ok(())
 }
 

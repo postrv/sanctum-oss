@@ -11,11 +11,10 @@ use std::net::SocketAddr;
 use super::ConnectionInfo;
 
 /// Collect current network connections.
-#[must_use]
-pub fn collect_connections() -> HashSet<ConnectionInfo> {
+pub async fn collect_connections() -> HashSet<ConnectionInfo> {
     #[cfg(target_os = "macos")]
     {
-        collect_macos()
+        collect_macos().await
     }
     #[cfg(target_os = "linux")]
     {
@@ -28,19 +27,35 @@ pub fn collect_connections() -> HashSet<ConnectionInfo> {
 }
 
 /// Collect network connections on macOS using `lsof`.
+///
+/// Uses `tokio::process::Command` with a 30-second timeout to prevent
+/// the daemon from hanging indefinitely if `lsof` stalls.
 #[cfg(target_os = "macos")]
-fn collect_macos() -> HashSet<ConnectionInfo> {
-    let output = std::process::Command::new("lsof")
-        .args(["-i", "-n", "-P", "-F", "pcnPt"])
-        .output();
+async fn collect_macos() -> HashSet<ConnectionInfo> {
+    use tokio::process::Command;
+    use tokio::time::{timeout, Duration};
 
-    match output {
-        Ok(out) => {
+    let result = timeout(
+        Duration::from_secs(30),
+        Command::new("lsof")
+            .args(["-i", "-n", "-P", "-F", "pcnPt"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(out)) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             parse_lsof_output(&stdout)
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!(%e, "failed to run lsof for network collection");
+            HashSet::new()
+        }
+        Err(_elapsed) => {
+            tracing::warn!("lsof timed out after 30s during network collection");
             HashSet::new()
         }
     }

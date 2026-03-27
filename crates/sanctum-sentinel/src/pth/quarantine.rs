@@ -13,6 +13,7 @@
 //! ```
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -263,28 +264,56 @@ impl Quarantine {
             .map(|m| m.permissions())
             .ok();
 
-        // Write content to quarantine
-        fs::write(&quarantine_path, &content).map_err(|e| {
-            SentinelError::Quarantine {
-                path: quarantine_path.clone(),
-                source: e,
-            }
-        })?;
+        // Write content to quarantine and fsync to ensure durability
+        {
+            let mut qfile = fs::File::create(&quarantine_path).map_err(|e| {
+                SentinelError::Quarantine {
+                    path: quarantine_path.clone(),
+                    source: e,
+                }
+            })?;
+            qfile.write_all(&content).map_err(|e| {
+                SentinelError::Quarantine {
+                    path: quarantine_path.clone(),
+                    source: e,
+                }
+            })?;
+            qfile.sync_all().map_err(|e| {
+                SentinelError::Quarantine {
+                    path: quarantine_path.clone(),
+                    source: e,
+                }
+            })?;
+        }
 
         // Store the quarantine timestamp in metadata
         let mut metadata_with_time = metadata.clone();
         metadata_with_time.quarantined_at = Utc::now();
 
-        // Write metadata alongside
+        // Write metadata alongside and fsync to ensure durability
         let meta_path = quarantine_path.with_extension("json");
         let meta_json = serde_json::to_string_pretty(&metadata_with_time)
             .unwrap_or_else(|_| "{}".to_string());
-        fs::write(&meta_path, meta_json).map_err(|e| {
-            SentinelError::Quarantine {
-                path: meta_path,
-                source: e,
-            }
-        })?;
+        {
+            let mut mfile = fs::File::create(&meta_path).map_err(|e| {
+                SentinelError::Quarantine {
+                    path: meta_path.clone(),
+                    source: e,
+                }
+            })?;
+            mfile.write_all(meta_json.as_bytes()).map_err(|e| {
+                SentinelError::Quarantine {
+                    path: meta_path.clone(),
+                    source: e,
+                }
+            })?;
+            mfile.sync_all().map_err(|e| {
+                SentinelError::Quarantine {
+                    path: meta_path.clone(),
+                    source: e,
+                }
+            })?;
+        }
 
         // Replace original with empty stub
         fs::write(path, "").map_err(|e| SentinelError::Quarantine {

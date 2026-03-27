@@ -94,7 +94,7 @@ impl NetworkWatcher {
                     break;
                 }
 
-                let current = collector::collect_connections();
+                let current = collector::collect_connections().await;
 
                 // Find new connections (not in previous snapshot)
                 for conn in &current {

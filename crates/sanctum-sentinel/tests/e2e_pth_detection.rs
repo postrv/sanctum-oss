@@ -246,3 +246,208 @@ async fn e2e_multiple_malicious_files_all_detected() {
     let entries = quarantine.list().expect("list");
     assert_eq!(entries.len(), 3, "all three files should be quarantined");
 }
+
+// ============================================================
+// FIXTURE-BASED TESTS
+//
+// Each test loads a real `.pth` fixture file from `tests/fixtures/`
+// and verifies the analyser classifies it correctly.
+// ============================================================
+
+use sanctum_sentinel::pth::analyser::analyse_pth_line;
+use sanctum_types::threat::ThreatLevel;
+
+// ---------- Benign fixtures ----------
+
+#[test]
+fn fixture_benign_path_entry() {
+    let content = include_str!("../../../tests/fixtures/benign_path_entry.pth");
+    let analysis = analyse_pth_file(content);
+    assert_eq!(
+        analysis.verdict,
+        FileVerdict::Safe,
+        "benign_path_entry.pth should be classified as Safe"
+    );
+    // Every non-empty, non-comment line must be Info
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let verdict = analyse_pth_line(line);
+        assert_eq!(
+            verdict.level(),
+            ThreatLevel::Info,
+            "line {trimmed:?} in benign_path_entry.pth should be Info"
+        );
+    }
+}
+
+#[test]
+fn fixture_benign_setuptools() {
+    let content = include_str!("../../../tests/fixtures/benign_setuptools.pth");
+    let analysis = analyse_pth_file(content);
+    // This file contains `import _virtualenv` which is a legitimate import
+    // statement. The analyser correctly flags imports at Warning level;
+    // in production the allowlist would suppress this for known packages.
+    // The key assertion is that it is NOT Critical.
+    assert_ne!(
+        analysis.verdict,
+        FileVerdict::Critical,
+        "benign_setuptools.pth must not be classified as Critical"
+    );
+    assert!(
+        analysis.critical_lines.is_empty(),
+        "benign_setuptools.pth should have no critical lines"
+    );
+}
+
+// ---------- Malicious fixtures ----------
+
+#[test]
+fn fixture_malicious_exec() {
+    let content = include_str!("../../../tests/fixtures/malicious_exec.pth");
+    let analysis = analyse_pth_file(content);
+    assert_eq!(
+        analysis.verdict,
+        FileVerdict::Critical,
+        "malicious_exec.pth should be Critical"
+    );
+    assert!(
+        !analysis.critical_lines.is_empty(),
+        "malicious_exec.pth should have at least one critical line"
+    );
+    // Verify the specific patterns are detected
+    let all_reasons: Vec<&str> = analysis
+        .critical_lines
+        .iter()
+        .flat_map(|l| l.reasons.iter().map(String::as_str))
+        .collect();
+    assert!(
+        all_reasons.iter().any(|r| r.contains("exec") || r.contains("compile")),
+        "should detect exec/compile in malicious_exec.pth, got: {all_reasons:?}"
+    );
+}
+
+#[test]
+fn fixture_malicious_base64() {
+    let content = include_str!("../../../tests/fixtures/malicious_base64.pth");
+    let analysis = analyse_pth_file(content);
+    assert_eq!(
+        analysis.verdict,
+        FileVerdict::Critical,
+        "malicious_base64.pth should be Critical"
+    );
+    let all_reasons: Vec<&str> = analysis
+        .critical_lines
+        .iter()
+        .flat_map(|l| l.reasons.iter().map(String::as_str))
+        .collect();
+    assert!(
+        all_reasons.iter().any(|r| r.contains("base64")),
+        "should detect base64 in malicious_base64.pth, got: {all_reasons:?}"
+    );
+    assert!(
+        all_reasons.iter().any(|r| r.contains("exec")),
+        "should detect exec in malicious_base64.pth, got: {all_reasons:?}"
+    );
+}
+
+#[test]
+fn fixture_malicious_import() {
+    let content = include_str!("../../../tests/fixtures/malicious_import.pth");
+    let analysis = analyse_pth_file(content);
+    assert_eq!(
+        analysis.verdict,
+        FileVerdict::Critical,
+        "malicious_import.pth should be Critical"
+    );
+    let all_reasons: Vec<&str> = analysis
+        .critical_lines
+        .iter()
+        .flat_map(|l| l.reasons.iter().map(String::as_str))
+        .collect();
+    assert!(
+        all_reasons.iter().any(|r| r.contains("os.system")),
+        "should detect os.system in malicious_import.pth, got: {all_reasons:?}"
+    );
+}
+
+#[test]
+fn fixture_malicious_subprocess() {
+    let content = include_str!("../../../tests/fixtures/malicious_subprocess.pth");
+    let analysis = analyse_pth_file(content);
+    assert_eq!(
+        analysis.verdict,
+        FileVerdict::Critical,
+        "malicious_subprocess.pth should be Critical"
+    );
+    let all_reasons: Vec<&str> = analysis
+        .critical_lines
+        .iter()
+        .flat_map(|l| l.reasons.iter().map(String::as_str))
+        .collect();
+    assert!(
+        all_reasons.iter().any(|r| r.contains("subprocess")),
+        "should detect subprocess in malicious_subprocess.pth, got: {all_reasons:?}"
+    );
+}
+
+// ---------- Edge-case fixtures ----------
+
+#[test]
+fn fixture_edge_case_unicode() {
+    // Contains a Cyrillic homoglyph of "import" — must not panic
+    let content = include_str!("../../../tests/fixtures/edge_case_unicode.pth");
+    let analysis = analyse_pth_file(content);
+    // The homoglyph evasion should be detected as at least Warning
+    assert!(
+        analysis.verdict.level() >= ThreatLevel::Warning,
+        "edge_case_unicode.pth should be at least Warning (homoglyph evasion), got: {:?}",
+        analysis.verdict
+    );
+}
+
+#[test]
+fn fixture_edge_case_comments() {
+    let content = include_str!("../../../tests/fixtures/edge_case_comments.pth");
+    let analysis = analyse_pth_file(content);
+    assert_eq!(
+        analysis.verdict,
+        FileVerdict::Safe,
+        "edge_case_comments.pth (only comments) should be Safe"
+    );
+    assert!(analysis.critical_lines.is_empty());
+    assert!(analysis.warning_lines.is_empty());
+}
+
+#[test]
+fn fixture_edge_case_very_long() {
+    // This fixture is ~1MB, so we read it at runtime instead of include_str!
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/edge_case_very_long.pth");
+    let content = std::fs::read_to_string(&fixture_path)
+        .expect("should be able to read edge_case_very_long.pth");
+    // Main assertion: the analyser completes without panicking on a ~1MB line
+    let analysis = analyse_pth_file(&content);
+    // A line of only 'a' characters is a path entry — should be safe
+    assert_eq!(
+        analysis.verdict,
+        FileVerdict::Safe,
+        "edge_case_very_long.pth (all 'a' chars) should be Safe"
+    );
+}
+
+#[test]
+fn fixture_edge_case_empty() {
+    let content = include_str!("../../../tests/fixtures/edge_case_empty.pth");
+    assert!(content.is_empty(), "edge_case_empty.pth should be empty");
+    let analysis = analyse_pth_file(content);
+    assert_eq!(
+        analysis.verdict,
+        FileVerdict::Safe,
+        "edge_case_empty.pth should be Safe"
+    );
+    assert!(analysis.critical_lines.is_empty());
+    assert!(analysis.warning_lines.is_empty());
+}

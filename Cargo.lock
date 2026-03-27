@@ -1016,6 +1016,7 @@ dependencies = [
 name = "sanctum-notify"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "sanctum-types",
  "tracing",
 ]

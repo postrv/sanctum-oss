@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 sanctum-sentinel = { path = "../crates/sanctum-sentinel" }
 sanctum-types = { path = "../crates/sanctum-types" }
+toml = "0.8"
 
 [[bin]]
 name = "fuzz_pth_analyser"

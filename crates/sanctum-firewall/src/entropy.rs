@@ -12,7 +12,7 @@ use std::collections::HashMap;
 /// Returns 0.0 for empty strings. The theoretical maximum for printable ASCII
 /// is approximately 6.57 bits/char.
 #[must_use]
-pub fn shannon_entropy(s: &str) -> f64 {
+pub(crate) fn shannon_entropy(s: &str) -> f64 {
     if s.is_empty() {
         return 0.0;
     }
@@ -145,5 +145,96 @@ mod tests {
             (e1 - e2).abs() < 1e-10,
             "Entropy should be deterministic: {e1} vs {e2}"
         );
+    }
+
+    // ---- Boundary tests ----
+
+    #[test]
+    fn exact_min_length_high_entropy_detected() {
+        // 20 unique alphanumeric chars — max entropy for 20 unique bytes is log2(20) ≈ 4.32.
+        // Use a threshold just below that so the string is detected as a secret.
+        let s = "aB3dE7fG9hJ2kL5mN8pQ";
+        assert_eq!(s.len(), 20);
+        let entropy = shannon_entropy(s);
+        assert!(
+            entropy > 4.0,
+            "Expected entropy > 4.0 for 20 unique chars, got {entropy}"
+        );
+        // With a threshold just below the actual entropy, it should be detected
+        assert!(is_high_entropy_secret(s, entropy - 0.1, 20));
+        // With a threshold above the actual entropy, it should not be detected
+        assert!(!is_high_entropy_secret(s, entropy + 0.1, 20));
+    }
+
+    #[test]
+    fn exactly_seventy_percent_alphanumeric_boundary() {
+        // 20-char string with exactly 14 alphanumeric (70%) and 6 non-alphanumeric
+        // 14 unique alnum + 6 unique non-alnum = 20 unique bytes → entropy = log2(20) ≈ 4.32
+        let s = "aB3dE7fG9hJ2kL!@#$%^";
+        assert_eq!(s.len(), 20);
+        let alnum = s.chars().filter(|c| c.is_alphanumeric()).count();
+        let total = s.chars().count();
+        assert_eq!(alnum, 14);
+        assert_eq!(total, 20);
+        // 14/20 = 0.70 — exactly at the boundary
+        // The code uses `< 0.7` (strict less-than), so exactly 0.70 should pass
+        let entropy = shannon_entropy(s);
+        assert!(is_high_entropy_secret(s, entropy - 0.1, 20));
+    }
+
+    #[test]
+    fn multi_byte_utf8_handled_correctly() {
+        // Multi-byte UTF-8: each char is 2+ bytes, so len() > chars().count().
+        // The function uses len() for the min_length check but chars().count() for
+        // the alphanumeric ratio. Verify it doesn't panic or produce wrong results.
+        // "ÄÖÜäöüßÀÈÌ" — 11 chars, each 2 bytes = 22 bytes
+        let s = "ÄÖÜäöüßÀÈÌÒ";
+        assert!(
+            s.len() > s.chars().count(),
+            "byte length {} should exceed char count {}",
+            s.len(),
+            s.chars().count()
+        );
+        // These are alphabetic, so they pass the alphanumeric check.
+        // With min_length = s.len(), the len() check passes (bytes >= min_length).
+        // With min_length = s.len() + 1, it should fail.
+        let entropy = shannon_entropy(s);
+        assert!(is_high_entropy_secret(s, entropy - 0.1, s.len()));
+        assert!(!is_high_entropy_secret(s, entropy - 0.1, s.len() + 1));
+    }
+}
+
+#[cfg(kani)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod kani_proofs {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn shannon_entropy_never_panics() {
+        // Prove that shannon_entropy never panics for any input up to 8 bytes.
+        let len: usize = kani::any();
+        kani::assume(len <= 8);
+
+        let bytes: [u8; 8] = kani::any();
+        // Construct a valid UTF-8 string from the bytes
+        if let Ok(s) = std::str::from_utf8(&bytes[..len]) {
+            let result = shannon_entropy(s);
+            // Entropy must be non-negative
+            assert!(result >= 0.0, "entropy must be non-negative");
+            // Empty string must have zero entropy
+            if s.is_empty() {
+                assert!(result == 0.0, "empty string must have zero entropy");
+            }
+            // Single-character repeated strings must have zero entropy
+            if !s.is_empty() && s.bytes().all(|b| b == s.as_bytes()[0]) {
+                assert!(result == 0.0, "uniform string must have zero entropy");
+            }
+
+            // Verify key paths are reachable
+            kani::cover!(s.is_empty(), "empty string path reachable");
+            kani::cover!(s.len() == 1, "single char path reachable");
+            kani::cover!(s.len() >= 2, "multi char path reachable");
+        }
     }
 }

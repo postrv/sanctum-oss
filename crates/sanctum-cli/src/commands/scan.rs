@@ -66,6 +66,9 @@ const SECRET_ENV_VARS: &[&str] = &[
     "STRIPE_SECRET_KEY",
     "SENDGRID_API_KEY",
     "TWILIO_AUTH_TOKEN",
+    "DATADOG_API_KEY",
+    "DATADOG_APP_KEY",
+    "AZURE_STORAGE_KEY",
 ];
 
 /// A scan finding.

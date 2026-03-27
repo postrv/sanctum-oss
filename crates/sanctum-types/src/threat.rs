@@ -34,6 +34,10 @@ pub enum ThreatCategory {
     CredentialAccess,
     /// Anomalous network activity from a developer process.
     NetworkAnomaly,
+    /// MCP tool policy violation.
+    McpViolation,
+    /// LLM spend budget exceeded.
+    BudgetOverrun,
 }
 
 /// Action taken in response to a detected threat.
@@ -70,10 +74,57 @@ pub struct ThreatEvent {
     pub action_taken: Action,
 }
 
+impl ThreatEvent {
+    /// Compute a short content-addressed ID for this event.
+    ///
+    /// Format: first 12 hex chars of SHA-256(timestamp || category || `source_path`).
+    #[must_use]
+    pub fn threat_id(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.timestamp.to_rfc3339().as_bytes());
+        hasher.update(format!("{:?}", self.category).as_bytes());
+        hasher.update(self.source_path.to_string_lossy().as_bytes());
+        let hash = hasher.finalize();
+        hex::encode(&hash[..6])
+    }
+}
+
+/// A record that a threat has been resolved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatResolution {
+    /// The threat ID that was resolved.
+    pub threat_id: String,
+    /// When the resolution was applied.
+    pub resolved_at: DateTime<Utc>,
+    /// What action was taken.
+    pub resolution: ResolutionAction,
+    /// Human-readable note.
+    pub note: String,
+}
+
+/// Actions that can resolve a threat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolutionAction {
+    /// Quarantined file was restored.
+    Restored,
+    /// Quarantined file was permanently deleted.
+    Deleted,
+    /// Threat was acknowledged without action.
+    Dismissed,
+    /// Process was added to credential access allowlist.
+    Allowlisted,
+    /// MCP policy rules were updated.
+    PolicyUpdated,
+    /// Budget limits were adjusted.
+    BudgetAdjusted,
+}
+
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn threat_level_has_correct_ordering() {
@@ -97,5 +148,85 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialisation should succeed");
         assert!(json.contains("PthInjection"));
         assert!(json.contains("Quarantined"));
+    }
+
+    #[test]
+    fn threat_id_is_deterministic() {
+        let ts = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let event = ThreatEvent {
+            timestamp: ts,
+            level: ThreatLevel::Critical,
+            category: ThreatCategory::PthInjection,
+            description: "test".into(),
+            source_path: PathBuf::from("/tmp/evil.pth"),
+            creator_pid: None,
+            creator_exe: None,
+            action_taken: Action::Quarantined,
+        };
+        let id1 = event.threat_id();
+        let id2 = event.threat_id();
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 12);
+    }
+
+    #[test]
+    fn threat_id_differs_for_different_events() {
+        let ts = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let event_a = ThreatEvent {
+            timestamp: ts,
+            level: ThreatLevel::Critical,
+            category: ThreatCategory::PthInjection,
+            description: "a".into(),
+            source_path: PathBuf::from("/tmp/evil.pth"),
+            creator_pid: None,
+            creator_exe: None,
+            action_taken: Action::Quarantined,
+        };
+        let event_b = ThreatEvent {
+            timestamp: ts,
+            level: ThreatLevel::Warning,
+            category: ThreatCategory::CredentialAccess,
+            description: "b".into(),
+            source_path: PathBuf::from("/home/user/.ssh/id_rsa"),
+            creator_pid: None,
+            creator_exe: None,
+            action_taken: Action::Alerted,
+        };
+        assert_ne!(event_a.threat_id(), event_b.threat_id());
+    }
+
+    #[test]
+    fn threat_resolution_serialises_roundtrip() {
+        let resolution = ThreatResolution {
+            threat_id: "abcdef012345".to_string(),
+            resolved_at: Utc::now(),
+            resolution: ResolutionAction::Restored,
+            note: "File verified safe by developer".to_string(),
+        };
+        let json = serde_json::to_string(&resolution).expect("serialise");
+        let roundtripped: ThreatResolution =
+            serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(roundtripped.threat_id, "abcdef012345");
+        assert_eq!(roundtripped.resolution, ResolutionAction::Restored);
+        assert_eq!(roundtripped.note, "File verified safe by developer");
+    }
+
+    #[test]
+    fn new_threat_categories_serialise() {
+        // McpViolation
+        let json = serde_json::to_string(&ThreatCategory::McpViolation)
+            .expect("serialise McpViolation");
+        assert_eq!(json, "\"McpViolation\"");
+        let roundtripped: ThreatCategory =
+            serde_json::from_str(&json).expect("deserialise McpViolation");
+        assert_eq!(roundtripped, ThreatCategory::McpViolation);
+
+        // BudgetOverrun
+        let json = serde_json::to_string(&ThreatCategory::BudgetOverrun)
+            .expect("serialise BudgetOverrun");
+        assert_eq!(json, "\"BudgetOverrun\"");
+        let roundtripped: ThreatCategory =
+            serde_json::from_str(&json).expect("deserialise BudgetOverrun");
+        assert_eq!(roundtripped, ThreatCategory::BudgetOverrun);
     }
 }

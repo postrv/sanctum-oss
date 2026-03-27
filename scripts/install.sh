@@ -7,7 +7,7 @@
 
 set -e
 
-REPO="arbiter-security/sanctum"
+REPO="postrv/sanctum"
 INSTALL_DIR="${SANCTUM_INSTALL_DIR:-/usr/local/bin}"
 
 main() {
@@ -51,9 +51,34 @@ main() {
 
     curl -fsSL "$_url" | tar -xz -C "$_tmpdir"
 
-    # TODO: Verify Sigstore signature
-    # cosign verify-blob --signature "${_tmpdir}/sanctum.sig" \
-    #   --certificate "${_tmpdir}/sanctum.cert" "${_tmpdir}/sanctum"
+    # Download signature and certificate for Sigstore verification
+    local _sig_url="https://github.com/${REPO}/releases/download/${_latest}/sanctum-${_target}.sig"
+    local _cert_url="https://github.com/${REPO}/releases/download/${_latest}/sanctum-${_target}.cert"
+
+    curl -fsSL "$_sig_url" -o "${_tmpdir}/sanctum.sig" 2>/dev/null || true
+    curl -fsSL "$_cert_url" -o "${_tmpdir}/sanctum.cert" 2>/dev/null || true
+
+    # Verify Sigstore signature if cosign is available
+    if command -v cosign > /dev/null 2>&1; then
+        if [ -f "${_tmpdir}/sanctum.sig" ] && [ -f "${_tmpdir}/sanctum.cert" ]; then
+            echo "Verifying Sigstore signature..."
+            if cosign verify-blob \
+                --signature "${_tmpdir}/sanctum.sig" \
+                --certificate "${_tmpdir}/sanctum.cert" \
+                --certificate-identity-regexp "^https://github\\.com/postrv/sanctum/" \
+                --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+                "${_tmpdir}/sanctum"; then
+                echo "Signature verified."
+            else
+                err "signature verification failed -- binary may be tampered with"
+            fi
+        else
+            echo "warning: signature files not found in release, skipping verification" >&2
+        fi
+    else
+        echo "warning: cosign not installed, skipping signature verification" >&2
+        echo "  Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/" >&2
+    fi
 
     install -m 755 "${_tmpdir}/sanctum" "${INSTALL_DIR}/sanctum"
     rm -rf "$_tmpdir"

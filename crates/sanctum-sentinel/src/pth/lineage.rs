@@ -23,7 +23,7 @@ const KNOWN_PACKAGE_MANAGERS: &[&str] = &[
 
 /// Check if a process name is a known package manager.
 #[must_use]
-pub fn is_known_package_manager(name: &str) -> bool {
+pub(crate) fn is_known_package_manager(name: &str) -> bool {
     KNOWN_PACKAGE_MANAGERS.contains(&name)
 }
 
@@ -107,8 +107,9 @@ impl ProcessLineage {
     }
 
     /// Check if any ancestor has the given name.
+    #[cfg(test)]
     #[must_use]
-    pub fn has_ancestor_named(&self, name: &str) -> bool {
+    pub(crate) fn has_ancestor_named(&self, name: &str) -> bool {
         self.chain.iter().any(|p| p.name == name)
     }
 
@@ -121,8 +122,9 @@ impl ProcessLineage {
     }
 
     /// Depth of the process chain.
+    #[cfg(test)]
     #[must_use]
-    pub fn depth(&self) -> usize {
+    pub(crate) const fn depth(&self) -> usize {
         self.chain.len()
     }
 

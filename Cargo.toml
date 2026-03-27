@@ -8,17 +8,20 @@ members = [
     "crates/sanctum-notify",
     "crates/sanctum-firewall",
     "crates/sanctum-budget",
+    "crates/sanctum-proxy",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85.0"
+rust-version = "1.94.0"
 license = "MIT"
-repository = "https://github.com/arbiter-security/sanctum"
+repository = "https://github.com/postrv/sanctum"
 homepage = "https://sanctum.dev"
 description = "The developer security daemon for the AI coding era"
-authors = ["Arbiter Security"]
+keywords = ["security", "supply-chain", "daemon", "ai", "credentials"]
+categories = ["command-line-utilities", "development-tools"]
+authors = ["Sanctum Contributors"]
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -33,6 +36,7 @@ print_stderr = { level = "deny" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.dependencies]
 # Shared across crates — single version source of truth

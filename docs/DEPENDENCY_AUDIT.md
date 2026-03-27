@@ -85,6 +85,20 @@ Note: `notify-rust` is commented out due to upstream zbus/Rust edition incompati
 | `chrono` | 0.4.x | Timestamp handling | RustSec clean. Well-established. |
 | `thiserror` | 2.x | Derive macro for error types | RustSec clean. Zero runtime cost (proc macro only). |
 
+## Proxy foundation: sanctum-proxy
+
+| Crate | Version | Purpose | Audit notes |
+|---|---|---|---|
+| `sanctum-types` | workspace | Shared IPC/config types | Internal crate. |
+| `sanctum-budget` | workspace | Budget enforcement logic | Internal crate. |
+| `serde` | 1.x | Serialisation for proxy config | RustSec clean. Ubiquitous. |
+| `serde_json` | 1.x | JSON serialisation for API payloads | RustSec clean. Ubiquitous. |
+| `tracing` | 0.1.x | Structured logging | RustSec clean. Tokio project. |
+| `tokio` | 1.x | Async runtime for proxy server | RustSec clean. Industry standard. |
+| `thiserror` | 2.x | Derive macro for error types | RustSec clean. Zero runtime cost. |
+
+Note: This crate currently implements provider identification and config schema only. TLS MITM dependencies (hyper, rustls, rcgen) will be added and audited when the proxy intercept phase begins.
+
 ## Dev/test only
 
 | Crate | Version | Purpose | Used by |

@@ -17,5 +17,6 @@
 
 pub mod allowlist;
 pub mod credentials;
+pub mod network;
 pub mod pth;
 pub mod watcher;

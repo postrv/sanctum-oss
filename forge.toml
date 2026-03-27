@@ -14,6 +14,19 @@ recovery_timeout_secs = 15  # Faster recovery probes after transport death
 reconnect = true            # Auto-reconnect on transport death
 max_reconnect_backoff_secs = 15
 
+# ─── Security Intelligence ────────────────────────────────────────────
+
+[servers.arbiter]
+command = "/Users/laurence/.cargo/bin/arbiter"
+args = ["serve", "--stdio"]
+transport = "stdio"
+timeout_secs = 300          # Security scans (fuzzing, race conditions, SSRF oracles) need time
+circuit_breaker = true
+failure_threshold = 12      # Must exceed max_parallel (8) to survive reconnection cascades
+recovery_timeout_secs = 15  # Faster recovery probes after transport death
+reconnect = true            # Auto-reconnect on transport death
+max_reconnect_backoff_secs = 30
+
 # ─── Sandbox Settings ────────────────────────────────────────────────
 
 [sandbox]
@@ -39,4 +52,8 @@ max_ttl_secs = 86400        # 24 hours max
 
 [groups.code-intel]
 servers = ["narsil"]
+isolation = "open"
+
+[groups.security]
+servers = ["arbiter"]
 isolation = "open"

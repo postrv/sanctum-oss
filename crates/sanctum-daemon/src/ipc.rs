@@ -14,7 +14,75 @@ use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
 
 use sanctum_types::errors::DaemonError;
-pub use sanctum_types::ipc::{IpcCommand, IpcResponse, ProviderBudgetInfo, QuarantineListItem};
+pub use sanctum_types::ipc::{
+    IpcCommand, IpcResponse, ProviderBudgetInfo, QuarantineListItem, ThreatListItem,
+};
+
+// ============================================================
+// Rate limiter (per-connection token bucket)
+// ============================================================
+
+/// Default messages per second allowed per IPC connection.
+const DEFAULT_RATE_LIMIT: u32 = 100;
+
+/// Token-bucket rate limiter for IPC connections.
+///
+/// Each connection starts with `max_tokens` tokens. One token is consumed per
+/// message. Tokens refill at `refill_rate` per second. If the bucket is empty,
+/// the message is rejected with an error response.
+pub struct RateLimiter {
+    available: u32,
+    max_tokens: u32,
+    refill_rate: u32,
+    last_refill: std::time::Instant,
+}
+
+impl RateLimiter {
+    /// Create a new rate limiter with the given capacity and refill rate.
+    #[must_use]
+    pub fn new(max_tokens: u32, refill_rate: u32) -> Self {
+        Self {
+            available: max_tokens,
+            max_tokens,
+            refill_rate,
+            last_refill: std::time::Instant::now(),
+        }
+    }
+
+    /// Create a rate limiter with default settings (100 msgs/sec).
+    #[must_use]
+    pub fn default_limit() -> Self {
+        Self::new(DEFAULT_RATE_LIMIT, DEFAULT_RATE_LIMIT)
+    }
+
+    /// Try to acquire a token. Returns `true` if allowed, `false` if rate-limited.
+    pub fn try_acquire(&mut self) -> bool {
+        self.refill();
+        if self.available > 0 {
+            self.available -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Refill tokens based on elapsed time since last refill.
+    fn refill(&mut self) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill);
+        let elapsed_secs = elapsed.as_secs_f64();
+
+        // Only refill if at least some time has passed
+        if elapsed_secs > 0.0 {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let new_tokens = (elapsed_secs * f64::from(self.refill_rate)) as u32;
+            if new_tokens > 0 {
+                self.available = self.available.saturating_add(new_tokens).min(self.max_tokens);
+                self.last_refill = now;
+            }
+        }
+    }
+}
 
 // ============================================================
 // IPC Server (daemon side)
@@ -95,15 +163,12 @@ impl IpcServer {
         let (stream, _) = self.listener.accept().await.map_err(|e| {
             DaemonError::Ipc(format!("failed to accept connection: {e}"))
         })?;
-        Ok(IpcConnection { stream })
+        Ok(IpcConnection {
+            stream,
+            rate_limiter: RateLimiter::default_limit(),
+        })
     }
 
-    /// Get the socket path.
-    #[must_use]
-    #[allow(dead_code)] // kept as public API for future use
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
-    }
 }
 
 impl Drop for IpcServer {
@@ -115,15 +180,24 @@ impl Drop for IpcServer {
 /// A single IPC connection (one CLI client).
 pub struct IpcConnection {
     stream: UnixStream,
+    rate_limiter: RateLimiter,
 }
 
 impl IpcConnection {
     /// Read a command from the client.
     ///
+    /// Enforces a per-connection rate limit. If the client exceeds the allowed
+    /// message rate, returns an error.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the message is too large or malformed.
+    /// Returns an error if the message is too large, malformed, or rate-limited.
     pub async fn read_command(&mut self) -> Result<IpcCommand, DaemonError> {
+        if !self.rate_limiter.try_acquire() {
+            return Err(DaemonError::Ipc(
+                "rate limit exceeded: too many messages per second".to_string(),
+            ));
+        }
         let payload = sanctum_types::ipc::read_frame(&mut self.stream).await?;
         serde_json::from_slice(&payload).map_err(|e| {
             DaemonError::Ipc(format!("invalid command JSON: {e}"))
@@ -406,5 +480,54 @@ mod tests {
         assert_eq!(roundtrip.daily_limit_cents, Some(50000));
         assert!(roundtrip.alert_triggered);
         assert!(!roundtrip.session_exceeded);
+    }
+
+    // ---- Rate limiter tests ----
+
+    #[test]
+    fn rate_limiter_allows_within_capacity() {
+        let mut rl = RateLimiter::new(10, 10);
+        for _ in 0..10 {
+            assert!(rl.try_acquire());
+        }
+    }
+
+    #[test]
+    fn rate_limiter_rejects_when_exhausted() {
+        let mut rl = RateLimiter::new(5, 5);
+        for _ in 0..5 {
+            assert!(rl.try_acquire());
+        }
+        assert!(!rl.try_acquire());
+    }
+
+    #[test]
+    fn rate_limiter_refills_over_time() {
+        let mut rl = RateLimiter::new(5, 5);
+        // Exhaust all tokens
+        for _ in 0..5 {
+            assert!(rl.try_acquire());
+        }
+        assert!(!rl.try_acquire());
+
+        // Simulate time passing (1 second = 5 tokens refilled at rate 5/sec)
+        rl.last_refill -= std::time::Duration::from_secs(1);
+        assert!(rl.try_acquire());
+    }
+
+    #[test]
+    fn rate_limiter_does_not_exceed_max_tokens() {
+        let mut rl = RateLimiter::new(10, 10);
+        // Simulate lots of time passing — tokens should cap at max
+        rl.last_refill -= std::time::Duration::from_secs(100);
+        // First call refills, but should cap at max_tokens
+        assert!(rl.try_acquire());
+        assert_eq!(rl.available, 9); // 10 refilled (capped at max), minus 1
+    }
+
+    #[test]
+    fn rate_limiter_zero_capacity_always_rejects() {
+        let mut rl = RateLimiter::new(0, 0);
+        assert!(!rl.try_acquire());
     }
 }

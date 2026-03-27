@@ -16,6 +16,8 @@ pub struct SanctumConfig {
     pub ai_firewall: AiFirewallConfig,
     /// Budget controller configuration.
     pub budgets: BudgetConfig,
+    /// HTTP Budget Proxy configuration.
+    pub proxy: ProxyConfig,
 }
 
 
@@ -45,6 +47,10 @@ pub struct SentinelConfig {
     pub pth_response: PthResponse,
     /// Known-safe `.pth` files by package name and content hash.
     pub pth_allowlist: Vec<PthAllowlistEntry>,
+    /// Executables allowed to access credential files without triggering alerts.
+    pub credential_allowlist: Vec<String>,
+    /// Network monitoring configuration.
+    pub network: NetworkConfig,
 }
 
 impl Default for SentinelConfig {
@@ -55,6 +61,48 @@ impl Default for SentinelConfig {
             watch_network: false,
             pth_response: PthResponse::Quarantine,
             pth_allowlist: Vec::new(),
+            credential_allowlist: Vec::new(),
+            network: NetworkConfig::default(),
+        }
+    }
+}
+
+/// Network monitoring configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkConfig {
+    /// Polling interval in seconds.
+    pub poll_interval_secs: u64,
+    /// Baseline learning period in days.
+    pub learning_period_days: u32,
+    /// Outbound transfer alert threshold in bytes per hour.
+    pub transfer_threshold_bytes: u64,
+    /// Processes to exclude from monitoring.
+    pub process_allowlist: Vec<String>,
+    /// Known-safe destination networks (CIDR notation or IP addresses).
+    pub destination_allowlist: Vec<String>,
+    /// Known-bad destination IPs or domains.
+    pub destination_blocklist: Vec<String>,
+    /// Ports that should never trigger "unusual port" alerts.
+    pub safe_ports: Vec<u16>,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: 30,
+            learning_period_days: 7,
+            transfer_threshold_bytes: 100 * 1024 * 1024,
+            process_allowlist: vec![
+                "Dropbox".to_owned(),
+                "rsync".to_owned(),
+                "rclone".to_owned(),
+                "TimeMachine".to_owned(),
+                "backupd".to_owned(),
+            ],
+            destination_allowlist: Vec::new(),
+            destination_blocklist: Vec::new(),
+            safe_ports: vec![80, 443, 22, 53, 8080, 8443, 3000, 5000, 5432, 3306, 6379],
         }
     }
 }
@@ -68,6 +116,15 @@ pub struct PthAllowlistEntry {
     pub hash: String,
 }
 
+/// Configuration for a single MCP policy rule.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpPolicyRuleConfig {
+    /// The MCP tool name this rule applies to.
+    pub tool: String,
+    /// Glob patterns for paths that are restricted for this tool.
+    pub restricted_paths: Vec<String>,
+}
+
 /// AI Firewall configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -78,6 +135,8 @@ pub struct AiFirewallConfig {
     pub claude_hooks: bool,
     /// Whether to audit MCP tool calls.
     pub mcp_audit: bool,
+    /// MCP tool policy rules. Each rule restricts specific tools from accessing certain paths.
+    pub mcp_rules: Vec<McpPolicyRuleConfig>,
 }
 
 impl Default for AiFirewallConfig {
@@ -86,6 +145,38 @@ impl Default for AiFirewallConfig {
             redact_credentials: true,
             claude_hooks: true,
             mcp_audit: true,
+            mcp_rules: Vec::new(),
+        }
+    }
+}
+
+/// HTTP Budget Proxy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// Whether the proxy is enabled.
+    pub enabled: bool,
+    /// Listen port (binds to 127.0.0.1 only).
+    pub listen_port: u16,
+    /// Whether to block requests when budget is exceeded.
+    pub enforce_budget: bool,
+    /// Whether to enforce model allowlists.
+    pub enforce_allowed_models: bool,
+    /// CA certificate validity in days.
+    pub ca_validity_days: u32,
+    /// Maximum response body size to buffer for usage extraction (bytes).
+    pub max_response_body_bytes: usize,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_port: 9847,
+            enforce_budget: true,
+            enforce_allowed_models: true,
+            ca_validity_days: 365,
+            max_response_body_bytes: 10 * 1024 * 1024, // 10 MB
         }
     }
 }
@@ -245,5 +336,149 @@ mod tests {
         assert!(config.sentinel.watch_pth);
         assert!(!config.sentinel.watch_network);
         assert_eq!(config.budgets.alert_at_percent, 75);
+    }
+
+    #[test]
+    fn credential_allowlist_deserialises_from_toml() {
+        let toml_str = r#"
+            [sentinel]
+            watch_pth = true
+            credential_allowlist = ["/usr/bin/git", "/usr/bin/ssh"]
+        "#;
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("credential_allowlist config should parse");
+        assert_eq!(config.sentinel.credential_allowlist.len(), 2);
+        assert_eq!(config.sentinel.credential_allowlist[0], "/usr/bin/git");
+        assert_eq!(config.sentinel.credential_allowlist[1], "/usr/bin/ssh");
+    }
+
+    #[test]
+    fn credential_allowlist_defaults_to_empty() {
+        let toml_str = "";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("empty config should use defaults");
+        assert!(config.sentinel.credential_allowlist.is_empty());
+    }
+
+    #[test]
+    fn network_config_defaults_are_correct() {
+        let config = NetworkConfig::default();
+        assert_eq!(config.poll_interval_secs, 30);
+        assert_eq!(config.learning_period_days, 7);
+        assert_eq!(config.transfer_threshold_bytes, 100 * 1024 * 1024);
+        assert_eq!(config.process_allowlist.len(), 5);
+        assert!(config.process_allowlist.contains(&"Dropbox".to_owned()));
+        assert!(config.destination_allowlist.is_empty());
+        assert!(config.destination_blocklist.is_empty());
+        assert_eq!(config.safe_ports.len(), 11);
+        assert!(config.safe_ports.contains(&443));
+        assert!(config.safe_ports.contains(&22));
+    }
+
+    #[test]
+    fn network_config_deserialises_from_toml() {
+        let toml_str = r#"
+            [sentinel.network]
+            poll_interval_secs = 10
+            learning_period_days = 14
+            transfer_threshold_bytes = 50000000
+            process_allowlist = ["myapp"]
+            destination_blocklist = ["10.0.0.1"]
+            safe_ports = [80, 443]
+        "#;
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("network config should parse");
+        assert_eq!(config.sentinel.network.poll_interval_secs, 10);
+        assert_eq!(config.sentinel.network.learning_period_days, 14);
+        assert_eq!(config.sentinel.network.transfer_threshold_bytes, 50_000_000);
+        assert_eq!(config.sentinel.network.process_allowlist, vec!["myapp"]);
+        assert_eq!(config.sentinel.network.destination_blocklist, vec!["10.0.0.1"]);
+        assert_eq!(config.sentinel.network.safe_ports, vec![80, 443]);
+    }
+
+    #[test]
+    fn network_config_uses_defaults_when_omitted() {
+        let toml_str = "";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("empty config should use defaults");
+        assert_eq!(config.sentinel.network.poll_interval_secs, 30);
+        assert!(!config.sentinel.network.safe_ports.is_empty());
+    }
+
+    #[test]
+    fn test_mcp_rules_default_empty() {
+        assert!(AiFirewallConfig::default().mcp_rules.is_empty());
+    }
+
+    #[test]
+    fn test_mcp_rules_deserialize() {
+        let toml_str = r#"
+            [ai_firewall]
+            redact_credentials = true
+
+            [[ai_firewall.mcp_rules]]
+            tool = "read_file"
+            restricted_paths = ["/home/user/.ssh/**", "/home/user/.aws/**"]
+
+            [[ai_firewall.mcp_rules]]
+            tool = "write_file"
+            restricted_paths = ["**/*.pth"]
+        "#;
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("mcp_rules config should parse");
+        assert_eq!(config.ai_firewall.mcp_rules.len(), 2);
+
+        let rule0 = &config.ai_firewall.mcp_rules[0];
+        assert_eq!(rule0.tool, "read_file");
+        assert_eq!(rule0.restricted_paths.len(), 2);
+        assert_eq!(rule0.restricted_paths[0], "/home/user/.ssh/**");
+        assert_eq!(rule0.restricted_paths[1], "/home/user/.aws/**");
+
+        let rule1 = &config.ai_firewall.mcp_rules[1];
+        assert_eq!(rule1.tool, "write_file");
+        assert_eq!(rule1.restricted_paths.len(), 1);
+        assert_eq!(rule1.restricted_paths[0], "**/*.pth");
+    }
+
+    #[test]
+    fn proxy_config_defaults_are_correct() {
+        let config = ProxyConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.listen_port, 9847);
+        assert!(config.enforce_budget);
+        assert!(config.enforce_allowed_models);
+        assert_eq!(config.ca_validity_days, 365);
+        assert_eq!(config.max_response_body_bytes, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn proxy_config_deserialises_from_toml() {
+        let toml_str = r"
+            [proxy]
+            enabled = true
+            listen_port = 8080
+            enforce_budget = false
+            enforce_allowed_models = false
+            ca_validity_days = 30
+            max_response_body_bytes = 5242880
+        ";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("proxy config should parse");
+        assert!(config.proxy.enabled);
+        assert_eq!(config.proxy.listen_port, 8080);
+        assert!(!config.proxy.enforce_budget);
+        assert!(!config.proxy.enforce_allowed_models);
+        assert_eq!(config.proxy.ca_validity_days, 30);
+        assert_eq!(config.proxy.max_response_body_bytes, 5_242_880);
+    }
+
+    #[test]
+    fn proxy_config_uses_defaults_when_omitted() {
+        let toml_str = "";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("empty config should use defaults");
+        assert!(!config.proxy.enabled);
+        assert_eq!(config.proxy.listen_port, 9847);
+        assert!(config.proxy.enforce_budget);
     }
 }

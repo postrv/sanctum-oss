@@ -84,6 +84,8 @@ const fn category_display(event: &ThreatEvent) -> &'static str {
         sanctum_types::threat::ThreatCategory::SiteCustomize => "sitecustomize.py modified",
         sanctum_types::threat::ThreatCategory::CredentialAccess => "Credential file accessed",
         sanctum_types::threat::ThreatCategory::NetworkAnomaly => "Network anomaly detected",
+        sanctum_types::threat::ThreatCategory::McpViolation => "MCP tool policy violation",
+        sanctum_types::threat::ThreatCategory::BudgetOverrun => "LLM budget exceeded",
     }
 }
 

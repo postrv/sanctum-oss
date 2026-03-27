@@ -379,4 +379,25 @@ mod tests {
             );
         }
     }
+
+    // ---- Edge case tests ----
+
+    #[test]
+    fn empty_string_returns_empty_with_no_events() {
+        let (output, events) = redact_credentials("");
+        assert_eq!(output, "");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn entirely_credential_string_is_fully_redacted() {
+        // The input is nothing but a credential — the entire string should be replaced
+        let secret = "sk-ant-api03-realkey12345678901234567890123456789012345678";
+        let (output, events) = redact_credentials(secret);
+        assert!(!output.contains(secret));
+        assert!(output.starts_with("[REDACTED:"));
+        assert_eq!(events.len(), 1);
+        // The output should consist solely of the redaction placeholder (no leftover text)
+        assert!(output.ends_with(']'));
+    }
 }

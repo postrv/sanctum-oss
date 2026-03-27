@@ -1022,6 +1022,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sanctum-proxy"
+version = "0.1.0"
+dependencies = [
+ "sanctum-budget",
+ "sanctum-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sanctum-sentinel"
 version = "0.1.0"
 dependencies = [
@@ -1044,9 +1058,11 @@ name = "sanctum-types"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hex",
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",

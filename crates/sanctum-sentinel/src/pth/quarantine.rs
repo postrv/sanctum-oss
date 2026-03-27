@@ -52,6 +52,7 @@ pub struct QuarantineEntry {
 
 /// State of a quarantine entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
 pub enum QuarantineState {
     /// File is in quarantine, awaiting review.
     Active,
@@ -63,6 +64,7 @@ pub enum QuarantineState {
 
 /// Actions that can be taken on a quarantine entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
 pub enum QuarantineAction {
     /// Approve: restore the file to its original location.
     Approve,
@@ -733,5 +735,131 @@ mod tests {
             .expect("quarantine 2");
 
         assert_ne!(entry1.id, entry2.id, "IDs should differ: {} vs {}", entry1.id, entry2.id);
+    }
+
+    #[test]
+    fn restore_fails_when_quarantined_content_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("victim.pth");
+        fs::write(&pth_path, "original content").expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine");
+
+        // Delete the quarantined content file (but leave the .json metadata).
+        fs::remove_file(&entry.quarantine_path).expect("delete quarantine content");
+        assert!(!entry.quarantine_path.exists());
+
+        // Restore should fail because the quarantined content is gone.
+        let result = q.restore(&entry.id);
+        assert!(result.is_err(), "restore should fail when quarantined file is deleted");
+    }
+
+    #[test]
+    fn restore_fails_when_parent_directory_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Create a nested directory structure and a file inside it.
+        let nested_dir = dir.path().join("subdir").join("nested");
+        fs::create_dir_all(&nested_dir).expect("create dirs");
+        let pth_path = nested_dir.join("target.pth");
+        fs::write(&pth_path, "payload").expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine");
+
+        // Remove the entire parent directory tree so the original path
+        // can no longer be written to.
+        fs::remove_dir_all(dir.path().join("subdir")).expect("remove parent dir");
+        assert!(!nested_dir.exists());
+
+        // Restore should fail because the parent directory is gone.
+        let result = q.restore(&entry.id);
+        assert!(result.is_err(), "restore should fail when parent directory is deleted");
+    }
+}
+
+// ── Kani bounded model checking proofs ──────────────────────────────────────
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Proof: quarantine state machine transitions are valid.
+    ///
+    /// Verifies:
+    /// 1. From `Active`, `Approve` -> `Restored`, `Delete` -> `Deleted`, `Report` -> `Active`
+    /// 2. `Deleted` is a terminal state — applying any action returns `Err`.
+    /// 3. `Restored` is not terminal — actions can still be applied.
+    #[kani::proof]
+    fn quarantine_state_transitions() {
+        let state: QuarantineState = kani::any();
+        let action: QuarantineAction = kani::any();
+
+        let result = state.apply(action);
+
+        match state {
+            QuarantineState::Deleted => {
+                // Terminal state: all actions must fail.
+                assert!(result.is_err());
+            }
+            QuarantineState::Active | QuarantineState::Restored => {
+                // Non-terminal: all actions must succeed.
+                assert!(result.is_ok());
+
+                let new_state = result.unwrap();
+                match action {
+                    QuarantineAction::Approve => {
+                        assert_eq!(new_state, QuarantineState::Restored);
+                    }
+                    QuarantineAction::Delete => {
+                        assert_eq!(new_state, QuarantineState::Deleted);
+                    }
+                    QuarantineAction::Report => {
+                        // Report does not change state.
+                        assert_eq!(new_state, state);
+                    }
+                }
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn validate_id_rejects_traversal() {
+        // Verify that validate_id always rejects:
+        // 1. Empty strings
+        // 2. Strings containing '/'
+        // 3. Strings containing '\'
+        // 4. Strings containing ".."
+        let bytes: [u8; 4] = kani::any();
+        // Only test valid UTF-8
+        if let Ok(id) = std::str::from_utf8(&bytes) {
+            let quarantine_dir = std::path::Path::new("/tmp/quarantine");
+            let result = validate_id(id, quarantine_dir);
+
+            // If the string is empty, must be rejected
+            if id.is_empty() {
+                assert!(result.is_err());
+            }
+            // If the string contains path separators, must be rejected
+            if id.contains('/') || id.contains('\\') {
+                assert!(result.is_err());
+            }
+            // If the string contains "..", must be rejected
+            if id.contains("..") {
+                assert!(result.is_err());
+            }
+
+            // Verify that the rejection and acceptance paths are both reachable.
+            kani::cover!(result.is_err(), "rejection path reachable");
+            kani::cover!(result.is_ok(), "acceptance path reachable");
+            kani::cover!(id.is_empty(), "empty string path reachable");
+            kani::cover!(id.contains('/'), "slash path reachable");
+        }
     }
 }

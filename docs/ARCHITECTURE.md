@@ -13,11 +13,11 @@
 - Single binary = no runtime dependencies = no supply chain for the tool itself
 - `panic = "abort"` prevents unwinding-based attacks and reduces binary size
 
-### ADR-002: Workspace with seven crates
+### ADR-002: Workspace with eight crates
 
 **Context**: The project has clear module boundaries with different dependency needs.
 
-**Decision**: Cargo workspace with `sanctum-types`, `sanctum-sentinel`, `sanctum-daemon`, `sanctum-cli`, `sanctum-notify`, `sanctum-firewall`, `sanctum-budget`.
+**Decision**: Cargo workspace with `sanctum-types`, `sanctum-sentinel`, `sanctum-daemon`, `sanctum-cli`, `sanctum-notify`, `sanctum-firewall`, `sanctum-budget`, `sanctum-proxy`.
 
 **Rationale**:
 - `sanctum-types` has no heavy dependencies (just serde, thiserror)
@@ -135,3 +135,38 @@
 - Single source of truth prevents serialisation mismatches between daemon and CLI
 - Frame helpers enforce the 64KB message cap in one place
 - Adding a new IPC command only requires changing `sanctum-types`; both ends pick it up automatically
+
+### ADR-013: `compile_regex` uses `abort()` instead of `panic!()`
+
+**Context**: Workspace lints deny `panic!`, `unwrap_used`, and `expect_used`. The `compile_regex` helper in `sanctum-firewall/src/patterns.rs` compiles credential regexes from compile-time literal patterns. On failure (unreachable in practice), it needs to terminate the process.
+
+**Decision**: Use `std::process::abort()` instead of `panic!()`. Print a diagnostic message to stderr (with an `#[allow(clippy::print_stderr)]` annotation) before aborting.
+
+**Rationale**:
+- `panic!()` is denied by workspace lints; `abort()` respects the lint constraint
+- All 22 patterns are compile-time string literals — the error branch is unreachable
+- `abort()` is semantically correct for a "this should never happen" invariant violation
+- The `#[allow]` annotation is scoped to the single `eprintln!` call, not the entire function
+
+### ADR-014: `secrecy` crate deferred to proxy phase
+
+**Context**: The development plan (`sanctum-development-plan.md:146`) lists the `secrecy` crate for wrapping credential values in `SecretString` (zeroize-on-drop). The current firewall receives strings from Claude Code hooks, redacts them, and returns — there is no persistent credential storage.
+
+**Decision**: Defer adding `secrecy` until the `sanctum-proxy` crate implements TLS MITM interception. The proxy will handle raw API keys in transit, which is where memory-safe secret types provide the most value.
+
+**Rationale**:
+- The firewall processes strings transiently: receive from stdin, scan, redact, return via stdout. No credential value persists in memory beyond a single hook invocation.
+- The proxy will hold API keys (from intercepted `Authorization` headers) in memory for the duration of each request. `SecretString` with zeroize-on-drop is directly valuable there.
+- Adding `secrecy` to the firewall now would add complexity without meaningfully reducing risk, since the hook process exits after each invocation.
+- When `secrecy` is added to the proxy, it should also wrap the CA private key material.
+
+### ADR-015: Glob matcher intentionally minimal
+
+**Context**: The MCP policy engine uses a `glob_matches` function to evaluate restricted paths against policy rules. A full glob implementation (e.g., the `glob` crate) would introduce ReDoS risk and unnecessary complexity.
+
+**Decision**: Support only three glob forms: `prefix/**` (directory tree), `**/suffix` (extension/filename match), and `prefix*suffix` (single wildcard). Patterns with multiple wildcards beyond these forms return `false` with a `tracing::warn!`. Patterns without wildcards use exact match.
+
+**Rationale**:
+- All real-world policy rules use `/**` or `**/*` forms (e.g., `/home/user/.ssh/**`, `**/*.pth`)
+- The single-star form matches any substring (not just a single path segment), which is the safe direction for a security blocklist — it blocks more paths, not fewer
+- Unsupported patterns returning `false` (with a warning) is safer than silently falling through to exact match, which would make glob patterns appear to work but never actually match real paths

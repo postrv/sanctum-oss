@@ -5,9 +5,6 @@
 
 use crate::provider::Provider;
 
-/// Date the pricing table was last updated.
-pub const PRICING_UPDATED: &str = "2026-03-26";
-
 /// Price entry for a model: (`input_cents_per_million`, `output_cents_per_million`).
 struct ModelPrice {
     model_prefix: &'static str,
@@ -108,6 +105,7 @@ pub fn calculate_cost(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -298,5 +296,73 @@ mod tests {
     fn model_name_case_insensitive() {
         let cost = calculate_cost(Provider::OpenAI, "GPT-4o", 1_000_000, 1_000_000);
         assert_eq!(cost, 1250);
+    }
+
+    #[test]
+    fn u64_max_tokens_does_not_panic() {
+        // With u64::MAX input tokens and a known model, the saturating
+        // arithmetic in ceiling_cost must produce a valid u64 — no panic
+        // or overflow.
+        let cost = calculate_cost(Provider::OpenAI, "gpt-4o", u64::MAX, u64::MAX);
+
+        // ceiling_cost(u64::MAX, 250) saturates the multiply to u64::MAX,
+        // then saturating_add(999_999) stays at u64::MAX, divided by 1M
+        // gives 18_446_744_073_709.  Two of those saturating_add → still
+        // a valid u64.  The exact value is less important than "no panic".
+        assert!(cost > 0);
+    }
+
+    #[test]
+    fn zero_tokens_zero_price() {
+        // Explicitly verify that 0 input + 0 output = 0 cost for every provider.
+        assert_eq!(calculate_cost(Provider::OpenAI, "gpt-4o", 0, 0), 0);
+        assert_eq!(
+            calculate_cost(Provider::Anthropic, "claude-sonnet-4-6", 0, 0),
+            0
+        );
+        assert_eq!(
+            calculate_cost(Provider::Google, "gemini-2.5-pro", 0, 0),
+            0
+        );
+    }
+}
+
+#[cfg(kani)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod kani_proofs {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn ceiling_cost_no_overflow() {
+        let tokens: u64 = kani::any();
+        let price: u64 = kani::any();
+
+        let result = ceiling_cost(tokens, price);
+
+        // Zero tokens or zero price must yield zero cost.
+        if tokens == 0 || price == 0 {
+            assert!(result == 0, "zero input must yield zero cost");
+        }
+
+        // Non-zero case: result must be at least 1 cent (ceiling division
+        // rounds up, so any non-zero usage produces a non-zero cost).
+        if tokens > 0 && price > 0 {
+            assert!(result >= 1, "non-zero usage must produce at least 1 cent");
+        }
+
+        // Ceiling property: result * 1_000_000 >= tokens * price (before saturation).
+        // When the multiplication doesn't saturate, this proves we never undercount.
+        if tokens <= 1_000_000 && price <= 1_000_000 {
+            // Safe range — no saturation occurs.
+            assert!(
+                result.saturating_mul(1_000_000) >= tokens * price,
+                "ceiling division must never undercount"
+            );
+        }
+
+        // Verify both paths are reachable.
+        kani::cover!(tokens == 0, "zero tokens path reachable");
+        kani::cover!(tokens > 0 && price > 0, "non-zero path reachable");
     }
 }

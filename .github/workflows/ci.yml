@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: '0 3 * * *'  # 03:00 UTC daily — triggers kani-full and fuzz-extended
 
 permissions:
   contents: read
@@ -17,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -34,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all --all-features
       - run: cargo test --all --all-features -- --ignored
@@ -43,7 +45,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all --all-features
 
@@ -51,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all --all-features -- property
         env:
@@ -65,15 +67,26 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Kani harnesses exist in proofs/kani/ but are not yet wired into the crate
-  # structure. Enable once harnesses are integrated as #[cfg(kani)] modules.
-  #
-  # kani:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: model-checking/kani-github-action@v1
-  #     - run: cargo kani --workspace
+  kani-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: model-checking/kani-github-action@v1
+      - run: cargo kani --harness quarantine_state_transitions -p sanctum-sentinel
+      - run: cargo kani --harness pure_path_is_always_benign -p sanctum-sentinel
+      - run: cargo kani --harness validate_id_rejects_traversal -p sanctum-sentinel
+      - run: cargo kani --harness ceiling_cost_no_overflow -p sanctum-budget
+      - run: cargo kani --harness glob_matches_exact_match_works -p sanctum-firewall
+
+  kani-full:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: model-checking/kani-github-action@v1
+      - run: cargo kani --workspace
 
   fuzz:
     runs-on: ubuntu-latest
@@ -84,8 +97,38 @@ jobs:
       - run: cargo fuzz run fuzz_pth_analyser -- -max_total_time=30
       - run: cargo fuzz run fuzz_config_parser -- -max_total_time=30
 
+  fuzz-extended:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz
+      - run: cargo fuzz run fuzz_pth_analyser -- -max_total_time=9000
+      - run: cargo fuzz run fuzz_config_parser -- -max_total_time=9000
+
+  reproducible-build:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: First build
+        run: |
+          cargo build --release --target x86_64-unknown-linux-gnu
+          sha256sum target/x86_64-unknown-linux-gnu/release/sanctum target/x86_64-unknown-linux-gnu/release/sanctum-daemon > /tmp/build1.sha256
+      - name: Clean and rebuild
+        run: |
+          cargo clean
+          cargo build --release --target x86_64-unknown-linux-gnu
+          sha256sum target/x86_64-unknown-linux-gnu/release/sanctum target/x86_64-unknown-linux-gnu/release/sanctum-daemon > /tmp/build2.sha256
+      - name: Verify identical hashes
+        run: diff /tmp/build1.sha256 /tmp/build2.sha256
+
   build-release:
-    needs: [lint, deny, test-linux, test-macos, property-tests, audit]
+    needs: [lint, deny, test-linux, test-macos, property-tests, audit, fuzz, kani-core]
     strategy:
       matrix:
         include:
@@ -100,7 +143,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -108,20 +151,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: sanctum-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/sanctum
+          path: |
+            target/${{ matrix.target }}/release/sanctum
+            target/${{ matrix.target }}/release/sanctum-daemon
 
-  # Enable for release builds. Requires COSIGN_KEY secret and cosign installation.
-  # sign:
-  #   needs: [build-release]
-  #   runs-on: ubuntu-latest
-  #   permissions:
-  #     id-token: write
-  #   steps:
-  #     - uses: sigstore/cosign-installer@v3
-  #     - uses: actions/download-artifact@v4
-  #     - run: |
-  #         for binary in sanctum-*/sanctum; do
-  #           cosign sign-blob --yes "$binary" \
-  #             --output-signature "${binary}.sig" \
-  #             --output-certificate "${binary}.cert"
-  #         done
+  # Binary signing is handled by .github/workflows/release.yml (tag-triggered).
+  # It uses keyless Sigstore OIDC signing — no COSIGN_KEY secret needed.

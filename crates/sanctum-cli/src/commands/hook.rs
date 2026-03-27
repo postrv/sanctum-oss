@@ -25,8 +25,32 @@ pub fn run(action: &str) -> Result<(), CliError> {
         .read_to_string(&mut input_str)
         .map_err(|e| CliError::InvalidArgs(format!("failed to read stdin: {e}")))?;
 
-    let input: HookInput = serde_json::from_str(&input_str)
+    let mut input: HookInput = serde_json::from_str(&input_str)
         .map_err(|e| CliError::InvalidArgs(format!("invalid hook input JSON: {e}")))?;
+
+    // Load config to respect ai_firewall settings.
+    // Try local (.sanctum/config.toml) then global config, falling back to None.
+    let ai_config = {
+        let local = std::path::PathBuf::from(".sanctum/config.toml");
+        let config_path = if local.exists() {
+            Some(local)
+        } else {
+            let paths = sanctum_types::paths::WellKnownPaths::default();
+            let global = paths.config_dir.join("config.toml");
+            if global.exists() {
+                Some(global)
+            } else {
+                None
+            }
+        };
+        config_path.and_then(|p| {
+            std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|s| toml::from_str::<sanctum_types::config::SanctumConfig>(&s).ok())
+                .map(|c| c.ai_firewall)
+        })
+    };
+    input.config = ai_config;
 
     let output: HookOutput = match action {
         "pre-bash" => claude::pre_bash(&input),
@@ -78,6 +102,7 @@ mod tests {
         HookInput {
             tool_name: tool_name.to_owned(),
             tool_input,
+            config: None,
         }
     }
 

@@ -33,6 +33,10 @@ const SENSITIVE_ENV_VARS: &[&str] = &[
     "PRIVATE_KEY",
     "API_KEY",
     "API_SECRET",
+    "TWILIO_AUTH_TOKEN",
+    "DATADOG_API_KEY",
+    "DATADOG_APP_KEY",
+    "AZURE_STORAGE_KEY",
 ];
 
 /// Credential file patterns that should not be read via cat/less/head.
@@ -207,6 +211,12 @@ fn is_env_dump(command: &str) -> bool {
 /// - **ALLOW**: Everything else.
 #[must_use]
 pub fn pre_bash(input: &HookInput) -> HookOutput {
+    if let Some(ref cfg) = input.config {
+        if !cfg.claude_hooks {
+            return HookOutput::allow();
+        }
+    }
+
     let command = input
         .tool_input
         .get("command")
@@ -276,6 +286,12 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
 /// - **ALLOW**: Everything else.
 #[must_use]
 pub fn pre_write(input: &HookInput) -> HookOutput {
+    if let Some(ref cfg) = input.config {
+        if !cfg.claude_hooks {
+            return HookOutput::allow();
+        }
+    }
+
     let file_path = input
         .tool_input
         .get("file_path")
@@ -307,7 +323,11 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
 
-    if !content.is_empty() {
+    let should_redact = input
+        .config
+        .as_ref()
+        .is_none_or(|c| c.redact_credentials);
+    if should_redact && !content.is_empty() {
         let (_, events) = redact_credentials(content);
         if !events.is_empty() {
             let types: Vec<&str> = events.iter().map(|e| e.credential_type.as_str()).collect();
@@ -327,6 +347,12 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
 /// - **ALLOW**: Everything else.
 #[must_use]
 pub fn pre_read(input: &HookInput) -> HookOutput {
+    if let Some(ref cfg) = input.config {
+        if !cfg.claude_hooks {
+            return HookOutput::allow();
+        }
+    }
+
     let file_path = input
         .tool_input
         .get("file_path")
@@ -394,6 +420,12 @@ const LISTENER_PATTERNS: &[&str] = &[
 /// - **Network listeners**: If the output mentions binding to a port or starting a server.
 #[must_use]
 pub fn post_bash(input: &HookInput) -> HookOutput {
+    if let Some(ref cfg) = input.config {
+        if !cfg.claude_hooks {
+            return HookOutput::allow();
+        }
+    }
+
     let command = input
         .tool_input
         .get("command")
@@ -476,6 +508,7 @@ mod tests {
         HookInput {
             tool_name: tool_name.to_owned(),
             tool_input,
+            config: None,
         }
     }
 
@@ -1198,5 +1231,83 @@ mod tests {
         let input = make_input("bash", json!({}));
         let output = post_bash(&input);
         assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- Edge case tests: empty / missing / malformed tool_input ----
+
+    #[test]
+    fn pre_bash_allows_empty_tool_input() {
+        // Empty object has no "command" key — pre_bash falls back to ""
+        let input = make_input("bash", json!({}));
+        let output = pre_bash(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_write_allows_missing_file_path_and_content() {
+        // Empty object has neither "file_path"/"path" nor "content"
+        let input = make_input("write", json!({}));
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_read_blocks_path_key_ssh() {
+        // pre_read falls back to "path" when "file_path" is absent
+        let input = make_input("read", json!({"path": "~/.ssh/id_rsa"}));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_allows_array_tool_input() {
+        // Malformed tool_input (array instead of object) — should not panic,
+        // .get("command") returns None on non-object Values so command becomes ""
+        let input = make_input("bash", json!([]));
+        let output = pre_bash(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- config flag tests ----
+
+    fn disabled_hooks_config() -> sanctum_types::config::AiFirewallConfig {
+        sanctum_types::config::AiFirewallConfig {
+            claude_hooks: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_hooks_disabled_by_config() {
+        let mut input = bash_input("cat ~/.ssh/id_rsa");
+        input.config = Some(disabled_hooks_config());
+        let output = pre_bash(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn test_redaction_disabled_by_config() {
+        let mut input = make_input(
+            "write",
+            json!({
+                "file_path": "/tmp/config.yaml",
+                "content": "api_key: sk-abcdefghijklmnopqrstuvwxyz"
+            }),
+        );
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            redact_credentials: false,
+            ..Default::default()
+        });
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn test_hooks_enabled_by_default() {
+        // config: None means all checks are active (backward-compatible default)
+        let input = bash_input("cat ~/.ssh/id_rsa");
+        assert!(input.config.is_none());
+        let output = pre_bash(&input);
+        assert_eq!(output.decision, HookDecision::Block);
     }
 }

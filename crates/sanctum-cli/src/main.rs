@@ -9,6 +9,7 @@
 //! - `sanctum config`   — View/edit configuration
 //! - `sanctum budget`   — View/manage LLM spend budgets
 //! - `sanctum audit`    — View the threat event audit log
+//! - `sanctum fix`      — Guided threat remediation
 //! - `sanctum hook`     — Claude Code hook handler (pre-bash, pre-write, etc.)
 //! - `sanctum hooks`    — Install/remove Claude Code hooks
 //! - `sanctum daemon`   — Daemon management (start/stop/restart)
@@ -88,6 +89,17 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Guided threat remediation.
+    Fix {
+        #[command(subcommand)]
+        action: Option<FixAction>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Non-interactive mode: apply actions without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Claude Code hook handler (called by PreToolUse/PostToolUse hooks).
     Hook {
         /// Hook action: pre-bash, pre-write, pre-read, post-bash.
@@ -121,6 +133,33 @@ enum BudgetAction {
     },
     /// Reset budget counters.
     Reset,
+}
+
+#[derive(Subcommand)]
+pub enum FixAction {
+    /// List all unresolved threats.
+    List {
+        /// Filter by category (pth, credential, mcp, budget).
+        #[arg(long)]
+        category: Option<String>,
+        /// Filter by threat level (info, warning, critical).
+        #[arg(long)]
+        level: Option<String>,
+    },
+    /// Remediate a specific threat by ID.
+    Resolve {
+        /// Threat ID from the audit log.
+        id: String,
+        /// Action: restore, delete, dismiss, allowlist.
+        #[arg(long)]
+        action: Option<String>,
+    },
+    /// Batch-remediate all unresolved threats.
+    All {
+        /// Only process threats of a specific category.
+        #[arg(long)]
+        category: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,6 +203,9 @@ fn main() -> ExitCode {
         Commands::Budget { action } => commands::budget::run(action.as_ref()),
         Commands::Audit { last, level, json } => {
             commands::audit::run(last.as_deref(), level.as_deref(), json)
+        }
+        Commands::Fix { action, json, yes } => {
+            commands::fix::run(action.as_ref(), json, yes)
         }
         Commands::Hook { action } => commands::hook::run(&action),
         Commands::Hooks { action } => commands::hooks::run(&action),

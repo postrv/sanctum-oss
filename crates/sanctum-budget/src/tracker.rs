@@ -253,6 +253,7 @@ impl BudgetTracker {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use sanctum_types::config::BudgetAmount;
@@ -574,5 +575,98 @@ mod tests {
         assert!(!status.alert_triggered);
         assert!(status.session_limit_cents.is_none());
         assert!(status.daily_limit_cents.is_none());
+    }
+
+    #[test]
+    fn u64_max_overflow_saturates() {
+        let config = BudgetConfig {
+            default_session: None,
+            default_daily: None,
+            alert_at_percent: 75,
+            ..BudgetConfig::default()
+        };
+        let mut tracker = BudgetTracker::new(&config);
+
+        // Pre-seed spend to just below u64::MAX so the next record_usage
+        // triggers saturating_add overflow.
+        tracker.session_spend.insert(Provider::OpenAI, u64::MAX - 1);
+        tracker.daily_spend.insert(Provider::OpenAI, u64::MAX - 1);
+
+        // Any non-zero usage will push past u64::MAX.
+        let usage = make_usage(Provider::OpenAI, "gpt-4o", 1_000_000, 0);
+        let status = tracker.record_usage(&usage);
+
+        // Spend must saturate at u64::MAX, not wrap around to a small value.
+        assert_eq!(
+            status.session_spent_cents,
+            u64::MAX,
+            "session spend should saturate at u64::MAX"
+        );
+        assert_eq!(
+            status.daily_spent_cents,
+            u64::MAX,
+            "daily spend should saturate at u64::MAX"
+        );
+
+        // A second record should remain pinned at u64::MAX.
+        let status2 = tracker.record_usage(&usage);
+        assert_eq!(status2.session_spent_cents, u64::MAX);
+        assert_eq!(status2.daily_spent_cents, u64::MAX);
+    }
+
+    #[test]
+    fn zero_budget_limit_immediately_exceeded() {
+        let config = BudgetConfig {
+            default_session: Some(BudgetAmount { cents: 0 }),
+            default_daily: None,
+            alert_at_percent: 75,
+            ..BudgetConfig::default()
+        };
+        let mut tracker = BudgetTracker::new(&config);
+
+        // Any usage at all should exceed a zero-cent session limit.
+        let usage = make_usage(Provider::OpenAI, "gpt-4o", 1, 0);
+        let status = tracker.record_usage(&usage);
+
+        assert!(status.session_exceeded);
+        assert_eq!(status.session_limit_cents, Some(0));
+        assert!(status.session_spent_cents > 0);
+    }
+
+    #[test]
+    fn year_boundary_daily_reset() {
+        let config = test_config();
+        let mut tracker = BudgetTracker::new(&config);
+
+        // Record some usage so daily spend is non-zero.
+        let usage = make_usage(Provider::OpenAI, "gpt-4o", 1_000_000, 0);
+        tracker.record_usage(&usage);
+        assert!(tracker.status(Provider::OpenAI).daily_spent_cents > 0);
+
+        // Set daily_start to Dec 31 of a previous year.
+        // `maybe_reset_daily()` compares ordinal and year, so crossing
+        // into Jan 1 of the next year triggers a reset.
+        tracker.daily_start = chrono::NaiveDate::from_ymd_opt(2024, 12, 31)
+            .expect("valid date")
+            .and_hms_opt(23, 59, 0)
+            .expect("valid time")
+            .and_utc();
+
+        tracker.maybe_reset_daily();
+
+        // Daily counters should have been reset.
+        assert_eq!(tracker.status(Provider::OpenAI).daily_spent_cents, 0);
+    }
+
+    #[test]
+    fn corrupted_state_file_returns_err() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("budget.json");
+
+        // Write invalid JSON.
+        std::fs::write(&path, "this is not valid json {{{{").expect("write");
+
+        let result = BudgetTracker::load_from_file(&path, &test_config());
+        assert!(result.is_err(), "corrupted JSON should produce an error");
     }
 }

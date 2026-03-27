@@ -29,7 +29,7 @@ sanctum init
 
 ### Phase 2: AI Firewall (current)
 
-- **Credential redaction** -- Scans outbound content against 20 credential patterns (OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, and more) before data leaves your machine.
+- **Credential redaction** -- Scans outbound content against 22 credential patterns (OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, and more) before data leaves your machine.
 - **Shannon entropy analysis** -- Detects high-entropy strings that look like randomly-generated secrets, even when they don't match a known pattern.
 - **Claude Code hook handlers** -- PreToolUse/PostToolUse hooks for pre-bash, pre-write, pre-read, and post-bash actions.
 - **MCP policy engine** -- Audits MCP tool calls with policy-based restrictions.
@@ -40,6 +40,14 @@ sanctum init
 - **3 provider parsers** -- Extracts cost data from OpenAI, Anthropic, and Google API responses.
 - **Model allowlists** -- Restrict which models each provider may use.
 - **Budget extend and reset** -- Extend a session budget or reset counters without reconfiguring limits.
+- **HTTP budget proxy** (foundation) -- `sanctum-proxy` crate with provider identification for transparent API interception (TLS MITM implementation in progress).
+
+### Phase 4: Production Hardening (current)
+
+- **Guided threat remediation** -- `sanctum fix list/resolve/all` with content-addressed threat IDs and a separate resolution log.
+- **Network anomaly detection** -- Monitors outbound connections for unusual ports, blocklisted destinations, and unexpected processes. Platform-specific collection (macOS `lsof`, Linux `/proc/net/tcp`).
+- **Formal verification** -- 8 Kani bounded model checking proofs (analyser panic-freedom, path classification, exec detection, quarantine state machine) with CI enforcement.
+- **Sigstore binary signing** -- Keyless OIDC signing via GitHub Actions, signed SBOM, Rekor transparency log.
 
 ## Usage
 
@@ -55,6 +63,9 @@ sanctum budget set        # Set session/daily limits
 sanctum budget extend     # Extend current session budget
 sanctum budget reset      # Reset budget counters
 sanctum audit             # View threat event audit log (--last, --level, --json)
+sanctum fix list          # List unresolved threats (--category, --level, --json)
+sanctum fix resolve <id>  # Remediate a specific threat (--action restore|delete|dismiss)
+sanctum fix all --yes     # Batch-remediate all unresolved threats
 sanctum hook <action>     # Claude Code hook handler (pre-bash, pre-write, etc.)
 sanctum hooks install     # Install Claude Code hooks
 sanctum hooks remove      # Remove Claude Code hooks
@@ -71,13 +82,26 @@ sanctum daemon restart    # Restart the daemon
 [sentinel]
 watch_pth = true
 watch_credentials = true
-watch_network = false
-pth_response = "quarantine"   # quarantine | alert | log
+watch_network = false           # enable network anomaly detection
+pth_response = "quarantine"     # quarantine | alert | log
+credential_allowlist = []       # process names to trust with credential access
+
+[sentinel.network]
+poll_interval_secs = 30
+learning_period_days = 7
+transfer_threshold_bytes = 104857600  # 100 MB
+process_allowlist = ["Dropbox", "rsync", "TimeMachine"]
+destination_blocklist = []
+safe_ports = [80, 443, 22, 53, 8080, 3000, 5432, 3306, 6379]
 
 [ai_firewall]
 redact_credentials = true
 claude_hooks = true
 mcp_audit = true
+
+[[ai_firewall.mcp_rules]]
+tool = "filesystem_write"
+restricted_paths = ["/etc/*", "/usr/*"]
 
 [budgets]
 default_session = "$50"
@@ -88,7 +112,15 @@ alert_at_percent = 75
 session = "$30"
 daily = "$100"
 allowed_models = ["gpt-4o", "o3-mini"]
+
+[proxy]
+enabled = false
+listen_port = 9847
+enforce_budget = true
+enforce_allowed_models = true
 ```
+
+Budget tracking is wired into Claude Code hooks -- API usage detected in `post-bash` responses is automatically recorded via IPC.
 
 ## Composable architecture
 
@@ -105,7 +137,7 @@ Sanctum does **not** require nono. It provides independent value as a runtime mo
 ## Building from source
 
 ```bash
-# Requires Rust 1.93.0+ (see rust-toolchain.toml)
+# Requires Rust 1.94.0+ (see rust-toolchain.toml)
 git clone https://github.com/postrv/sanctum
 cd sanctum
 cargo build --release
@@ -114,17 +146,18 @@ cargo build --release
 
 ## Architecture
 
-A workspace of 7 crates:
+A workspace of 8 crates (~17,400 lines of Rust):
 
 | Crate | Purpose |
 |-------|---------|
-| `sanctum-cli` | CLI interface (clap) |
-| `sanctum-daemon` | Background daemon and IPC |
-| `sanctum-sentinel` | `.pth` monitoring and quarantine |
-| `sanctum-firewall` | Credential redaction, entropy analysis, MCP policy |
-| `sanctum-budget` | Spend tracking and provider parsers |
-| `sanctum-types` | Shared types and configuration |
-| `sanctum-notify` | Desktop notifications |
+| `sanctum-cli` | CLI interface (12 commands, clap) |
+| `sanctum-daemon` | Background daemon, IPC server (14 commands), event loop |
+| `sanctum-sentinel` | `.pth` monitoring, quarantine, credential watching, network anomaly detection |
+| `sanctum-firewall` | Credential redaction (22 patterns), entropy analysis, MCP policy engine |
+| `sanctum-budget` | Spend tracking, 3 provider parsers, budget enforcement |
+| `sanctum-proxy` | HTTP budget proxy foundation (provider identification) |
+| `sanctum-types` | Shared types, config schema (10 structs), threat model (6 categories) |
+| `sanctum-notify` | Cross-platform desktop notifications |
 
 ## Security
 
@@ -139,8 +172,12 @@ Key guarantees:
 
 - **Zero `unsafe` code** in the entire codebase (denied by workspace lint)
 - **No panics on any input** (`unwrap` and `expect` are denied by clippy)
-- **All dependencies audited** and version-pinned
-- **456 tests**, 0 clippy warnings (pedantic + nursery)
+- **All dependencies audited** and version-pinned (193 deps, 0 known CVEs)
+- **580 tests**, 0 clippy warnings (pedantic + nursery)
+- **8 Kani bounded model checking proofs** with CI enforcement
+- **2 fuzz targets** for security-critical parsers
+- **9 property-based tests** verifying core invariants
+- **Sigstore-signed release binaries** with SBOM and Rekor transparency log
 
 ## License
 

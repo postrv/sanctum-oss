@@ -26,7 +26,7 @@ const ALLOWED_ACCESSORS: &[&str] = &[
 
 /// Check if a process name is an expected credential file accessor.
 #[must_use]
-pub fn is_allowed_accessor(process_name: &str) -> bool {
+pub(crate) fn is_allowed_accessor(process_name: &str) -> bool {
     ALLOWED_ACCESSORS.contains(&process_name)
 }
 

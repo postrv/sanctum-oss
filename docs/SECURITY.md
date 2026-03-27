@@ -49,8 +49,8 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 
 - **Zero `unsafe` code** in the entire codebase
 - **No `unwrap`/`expect`/`panic`** outside test code (enforced by workspace-level clippy lints)
-- **Zero clippy warnings** across 456 tests
-- **Rust toolchain pinned** to 1.93.0 via `rust-toolchain.toml` for reproducible builds
+- **Zero clippy warnings** across 580 tests
+- **Rust toolchain pinned** to 1.94.0 via `rust-toolchain.toml` for reproducible builds
 
 ### Dependency management
 
@@ -75,7 +75,36 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 
 ### Testing
 
-- **456 tests** covering all five workspace crates
+- **580 tests** covering all eight workspace crates
 - **Fuzz testing targets** for security-critical parsers (PTH file analyser, config parser) in `fuzz/fuzz_targets/`
 - **9 property-based tests** using proptest (6 sentinel + 3 budget) that verify invariants such as analyser totality, determinism, quarantine roundtrip identity, pricing overflow safety, and spend monotonicity
-- **Kani proof harnesses** for bounded model checking on core algorithms in `proofs/kani/` (analyser panic-freedom, path classification correctness, exec detection, state machine validity)
+- **8 Kani bounded model checking proofs** for core algorithms (analyser panic-freedom, path classification correctness, exec detection, quarantine state machine validity) — integrated as `#[cfg(kani)]` modules with CI enforcement
+
+### Binary verification
+
+Release binaries are signed with [Sigstore](https://sigstore.dev) using keyless OIDC signing via GitHub Actions. Each release includes `.sig` (signature) and `.cert` (certificate) files alongside the binaries, plus a signed `SHA256SUMS` file and a signed CycloneDX SBOM.
+
+**Verify a binary:**
+
+```bash
+cosign verify-blob \
+  --signature sanctum-x86_64-unknown-linux-gnu.sig \
+  --certificate sanctum-x86_64-unknown-linux-gnu.cert \
+  --certificate-identity-regexp "^https://github\\.com/postrv/sanctum/" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  sanctum-x86_64-unknown-linux-gnu
+```
+
+**Verify the checksums file:**
+
+```bash
+cosign verify-blob \
+  --signature SHA256SUMS.sig \
+  --certificate SHA256SUMS.cert \
+  --certificate-identity-regexp "^https://github\\.com/postrv/sanctum/" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+No private signing keys exist. The signing identity is the GitHub Actions release workflow itself, verified via Fulcio certificate and logged to the Rekor transparency log.

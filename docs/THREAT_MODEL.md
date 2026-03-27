@@ -24,7 +24,7 @@
 
 **Mitigation**: The AI Firewall provides layered credential detection:
 
-- **Pattern-based detection**: 20 compiled regex patterns covering API keys from major providers (OpenAI, Anthropic, Google, AWS, GitHub, GitLab, Stripe, Slack, SendGrid, npm, PyPI, DigitalOcean, and others), plus JWTs, Bearer tokens, private key headers, and database connection strings. Patterns are ordered from most specific to least specific to avoid misclassification.
+- **Pattern-based detection**: 22 compiled regex patterns covering API keys from major providers (OpenAI, Anthropic, Google, AWS, GitHub, GitLab, Stripe, Slack, SendGrid, npm, PyPI, DigitalOcean, Datadog, Azure SAS, and others), plus JWTs, Bearer tokens, private key headers, and database connection strings. Patterns are ordered from most specific to least specific to avoid misclassification.
 - **Shannon entropy detection**: Strings not matching known patterns are evaluated by an entropy calculator (`entropy.rs`). Strings at least N characters long with entropy above a configurable threshold and at least 70% alphanumeric characters are flagged as potential secrets.
 - **Claude Code hooks** enforce security policy across four interception points:
   - **pre-bash**: Blocks reading credential files via direct commands (cat, less, head, tail, more) and indirect commands (grep, awk, sed, python, base64, xxd, cp, mv), including tab-delimited bypass attempts and shell input redirections (`<`). Blocks echoing/printing sensitive environment variables. Blocks environment-dumping commands: bare `env`, `printenv`, `env | grep`, `set | grep`, `export | grep`, and `printf` referencing sensitive vars. Warns on `pip install` (typosquatting risk) and outbound `curl POST` (exfiltration risk).
@@ -32,7 +32,7 @@
   - **pre-read**: Blocks reading files under `~/.ssh/`, `~/.aws/`, and `.env` files at any path depth.
   - **post-bash**: Warns (never blocks) on suspicious side effects observed after command execution: `.pth` file creation during package installs, crontab modifications, systemd user service creation, and network listener activity in command output.
 
-**Residual risk**: Novel credential formats not matching any of the 20 known patterns and falling below the entropy threshold may not be detected.
+**Residual risk**: Novel credential formats not matching any of the 22 known patterns and falling below the entropy threshold may not be detected.
 
 ### 4. Runaway LLM spend
 
@@ -45,8 +45,9 @@
 - **Model allowlists**: Per-provider `allowed_models` lists restrict which models can be used (case-insensitive matching).
 - **Session management**: Budgets can be extended, reset, queried, and configured via IPC commands (`BudgetStatus`, `BudgetSet`, `BudgetExtend`, `BudgetReset`).
 - **Persistence**: Tracker state is serialized to disk as JSON with 0o600 permissions, allowing recovery across daemon restarts.
+- **Budget recording via hooks**: Budget tracking is wired into Claude Code hooks -- API usage detected in `post-bash` responses is automatically recorded via the `RecordUsage` IPC command.
 
-**Residual risk**: Cost tracking relies on token-based pricing tables, which must be kept in sync with provider pricing. Budget tracking works via IPC between the CLI and daemon -- there is no transparent HTTP proxy intercepting API calls, so enforcement requires the AI tool to participate via IPC integration.
+**Residual risk**: Cost tracking relies on token-based pricing tables, which must be kept in sync with provider pricing. The `sanctum-proxy` crate provides the foundation for transparent API interception; until the full MITM proxy is active, enforcement requires the AI tool to participate via hook-based IPC integration.
 
 ### 5. Quarantine metadata tampering
 
@@ -70,7 +71,7 @@
 
 **Mitigation**: All IPC communication uses a length-prefixed framing protocol (`[4 bytes big-endian length][JSON payload]`). Both `read_frame()` and `write_frame()` enforce a `MAX_MESSAGE_SIZE` of 64KB. Messages exceeding this limit are rejected with an error before any payload allocation occurs.
 
-**Residual risk**: A rapid flood of valid-sized messages could still consume CPU; rate limiting is not implemented at the IPC layer.
+**Residual risk**: Rate limiting is enforced at the IPC layer via a per-connection token-bucket limiter (100 messages/second). A sustained flood from multiple connections could still consume CPU.
 
 ### 8. Audit log tampering
 
@@ -80,14 +81,29 @@
 
 **Residual risk**: A process running as the same user can still modify the file. For tamper-evident logging, an external log collector would be needed.
 
+### 9. Network-based data exfiltration and C2 beaconing
+
+**Threat**: Malicious code establishes outbound connections to exfiltrate data or communicate with command-and-control servers.
+
+**Mitigation**: The network anomaly detection module (`sanctum-sentinel/src/network/`) monitors outbound connections via platform-specific collection (macOS: `lsof -i`, Linux: `/proc/net/tcp`). Detection heuristics flag connections to unusual ports, blocklisted destinations, and connections from unexpected processes. The system learns a baseline of normal behaviour over a configurable period (default 7 days) and alerts on deviations.
+
+**Residual risk**: The polling-based approach (default 30-second interval) cannot detect very short-lived connections. Detection is metadata-only (IP, port, process) -- packet contents are not inspected. An attacker using standard ports (80, 443) to known CDN endpoints would not be flagged.
+
+### 10. Unresolved threats accumulating without remediation
+
+**Threat**: Threats are detected and logged but never reviewed, leading to alert fatigue and unaddressed security events.
+
+**Mitigation**: The `sanctum fix` command provides guided remediation with content-addressed threat IDs. Each threat in the audit log receives a deterministic ID (SHA-256 of timestamp, category, and source path). Resolutions are tracked in a separate `resolutions.log` (NDJSON, 0o600 permissions), preserving the audit log's append-only integrity. Remediation actions include restore, delete, dismiss, allowlist, and policy update.
+
+**Residual risk**: The `--yes` flag in batch mode defaults to "dismiss", which resolves threats without addressing root causes. Critical threat restoration requires explicit confirmation.
+
 ## What Sanctum does NOT protect against
 
 1. **Pre-existing compromise** -- If credentials were already stolen, monitoring cannot undo that.
 2. **Kernel-level rootkits** -- A userspace daemon cannot detect kernel-level tampering.
-3. **Network-level exfiltration** -- Without a kernel sandbox, Sanctum alerts but cannot prevent network access.
+3. **Network-level blocking** -- Without a kernel sandbox, Sanctum alerts on suspicious connections but cannot block them. Network anomaly detection is observe-only.
 4. **Hardware-level attacks** -- Out of scope for a software daemon.
 5. **Social engineering** -- Sanctum protects against automated attacks, not human deception.
-6. **Transparent API cost enforcement** -- Budget enforcement requires manual IPC integration. There is no transparent HTTP proxy intercepting API calls.
 
 ## Trust boundaries
 

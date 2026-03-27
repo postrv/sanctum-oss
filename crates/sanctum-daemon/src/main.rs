@@ -11,21 +11,24 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use sanctum_budget::BudgetTracker;
+use sanctum_budget::{BudgetTracker, Provider, UsageData};
 use sanctum_sentinel::credentials::{CredentialEvent, CredentialWatcher};
-use sanctum_sentinel::pth::lineage::{LineageAssessment, ProcessLineage, SystemProcSource};
-use sanctum_sentinel::pth::quarantine::{Quarantine, QuarantineMetadata};
-use sanctum_sentinel::watcher::{PthWatcher, WatchEvent, WatchEventKind};
+use sanctum_sentinel::network::{NetworkEvent, NetworkWatcher};
+use sanctum_sentinel::pth::quarantine::Quarantine;
+use sanctum_sentinel::watcher::{PthWatcher, WatchEvent};
 use sanctum_types::config::SanctumConfig;
 use sanctum_types::paths::WellKnownPaths;
 use tokio::sync::{Mutex, RwLock};
 
 mod audit;
 mod config;
+mod context;
 mod daemon;
+mod event_handler;
 mod ipc;
 
-use ipc::{IpcCommand, IpcResponse, IpcServer, ProviderBudgetInfo, QuarantineListItem};
+use context::EventLoopContext;
+use ipc::{IpcCommand, IpcResponse, IpcServer, ProviderBudgetInfo, QuarantineListItem, ThreatListItem};
 
 fn main() -> ExitCode {
     // Initialise tracing subscriber
@@ -150,6 +153,20 @@ async fn run_daemon(
     let quarantine = Quarantine::new(paths.quarantine_dir.clone());
     let (_cred_watcher, mut cred_rx) = start_credential_watcher(&shared_config).await;
 
+    // Start network watcher if configured
+    let (net_tx, mut net_rx) = tokio::sync::mpsc::channel::<NetworkEvent>(256);
+    let _net_watcher = if shared_config.read().await.sentinel.watch_network {
+        tracing::info!("starting network watcher");
+        Some(NetworkWatcher::start(
+            shared_config.read().await.sentinel.network.clone(),
+            net_tx,
+        ))
+    } else {
+        tracing::info!("network monitoring disabled (watch_network = false)");
+        drop(net_tx);
+        None
+    };
+
     // Register signal handlers
     let mut sigterm = match tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::terminate(),
@@ -172,11 +189,24 @@ async fn run_daemon(
 
     tracing::info!("daemon ready, entering main event loop");
 
-    run_event_loop(
-        &start_time, &shared_config, &shared_budget, &ipc_server,
-        &shutdown_tx, &mut shutdown_rx, watcher.as_ref(), &mut watch_rx,
-        &quarantine, &mut cred_rx, &mut sigterm, &mut sighup, &audit_path,
-    ).await;
+    let mut ctx = EventLoopContext {
+        start_time: &start_time,
+        shared_config: &shared_config,
+        shared_budget: &shared_budget,
+        ipc_server: &ipc_server,
+        shutdown_tx: &shutdown_tx,
+        shutdown_rx: &mut shutdown_rx,
+        watcher: watcher.as_ref(),
+        watch_rx: &mut watch_rx,
+        quarantine: &quarantine,
+        cred_rx: &mut cred_rx,
+        net_rx: &mut net_rx,
+        sigterm: &mut sigterm,
+        sighup: &mut sighup,
+        audit_path: &audit_path,
+    };
+
+    run_event_loop(&mut ctx).await;
 
     // Save budget tracker state to disk on shutdown
     save_budget_state(&shared_budget, &paths.data_dir, &budget_state_path).await;
@@ -252,38 +282,23 @@ async fn start_credential_watcher(
 }
 
 /// Main event loop: handle IPC, filesystem, credential, and signal events.
-#[allow(clippy::too_many_arguments)]
-async fn run_event_loop(
-    start_time: &Instant,
-    shared_config: &Arc<RwLock<SanctumConfig>>,
-    shared_budget: &Arc<Mutex<BudgetTracker>>,
-    ipc_server: &IpcServer,
-    shutdown_tx: &tokio::sync::mpsc::Sender<()>,
-    shutdown_rx: &mut tokio::sync::mpsc::Receiver<()>,
-    watcher: Option<&PthWatcher>,
-    watch_rx: &mut tokio::sync::mpsc::Receiver<WatchEvent>,
-    quarantine: &Quarantine,
-    cred_rx: &mut tokio::sync::mpsc::Receiver<CredentialEvent>,
-    sigterm: &mut tokio::signal::unix::Signal,
-    sighup: &mut tokio::signal::unix::Signal,
-    audit_path: &Path,
-) {
+async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
     loop {
         // Check for day-boundary daily budget resets on each iteration
-        shared_budget.lock().await.maybe_reset_daily();
+        ctx.shared_budget.lock().await.maybe_reset_daily();
 
         tokio::select! {
             // Handle IPC connections
-            accept_result = ipc_server.accept() => {
+            accept_result = ctx.ipc_server.accept() => {
                 match accept_result {
                     Ok(mut conn) => {
-                        let uptime = start_time.elapsed().as_secs();
-                        let watchers_active = watcher.map_or(0, |w| u32::from(w.is_alive()));
+                        let uptime = ctx.start_time.elapsed().as_secs();
+                        let watchers_active = ctx.watcher.map_or(0, |w| u32::from(w.is_alive()));
                         #[allow(clippy::cast_possible_truncation)] // quarantine entries are bounded well below u32::MAX
-                        let quarantine_count = quarantine.list().map_or(0, |l| l.len() as u32);
-                        let shutdown_tx = shutdown_tx.clone();
-                        let ipc_config = Arc::clone(shared_config);
-                        let ipc_budget = Arc::clone(shared_budget);
+                        let quarantine_count = ctx.quarantine.list().map_or(0, |l| l.len() as u32);
+                        let shutdown_tx = ctx.shutdown_tx.clone();
+                        let ipc_config = Arc::clone(ctx.shared_config);
+                        let ipc_budget = Arc::clone(ctx.shared_budget);
 
                         tokio::spawn(async move {
                             if let Err(e) = handle_ipc_command(
@@ -306,30 +321,35 @@ async fn run_event_loop(
             }
 
             // Handle filesystem events
-            Some(event) = watch_rx.recv() => {
-                let config_snapshot = shared_config.read().await.clone();
-                handle_watch_event(&event, quarantine, &config_snapshot, audit_path);
+            Some(event) = ctx.watch_rx.recv() => {
+                let config_snapshot = ctx.shared_config.read().await.clone();
+                event_handler::handle_watch_event(&event, ctx.quarantine, &config_snapshot, ctx.audit_path);
             }
 
             // Handle credential file events
-            Some(cred_event) = cred_rx.recv() => {
-                handle_credential_event(&cred_event, audit_path);
+            Some(cred_event) = ctx.cred_rx.recv() => {
+                event_handler::handle_credential_event(&cred_event, ctx.audit_path);
+            }
+
+            // Handle network anomaly events
+            Some(net_event) = ctx.net_rx.recv() => {
+                event_handler::handle_network_event(&net_event, ctx.audit_path);
             }
 
             // Handle SIGTERM (graceful shutdown)
-            _ = sigterm.recv() => {
+            _ = ctx.sigterm.recv() => {
                 tracing::info!("received SIGTERM, shutting down");
                 break;
             }
 
             // Handle SIGHUP (reload config)
-            _ = sighup.recv() => {
+            _ = ctx.sighup.recv() => {
                 tracing::info!("received SIGHUP, reloading configuration");
-                reload_shared_config(shared_config).await;
+                reload_shared_config(ctx.shared_config).await;
             }
 
             // Handle IPC-initiated shutdown (C1)
-            _ = shutdown_rx.recv() => {
+            _ = ctx.shutdown_rx.recv() => {
                 tracing::info!("received shutdown command via IPC, shutting down");
                 break;
             }
@@ -367,7 +387,7 @@ async fn handle_ipc_command(
     let command = conn.read_command().await?;
 
     let paths = WellKnownPaths::default();
-    let quarantine = Quarantine::new(paths.quarantine_dir);
+    let quarantine = Quarantine::new(paths.quarantine_dir.clone());
 
     let mut should_shutdown = false;
     let mut should_reload = false;
@@ -406,6 +426,24 @@ async fn handle_ipc_command(
             IpcResponse::Ok {
                 message: "session budget counters reset".to_string(),
             }
+        }
+        IpcCommand::RecordUsage {
+            provider,
+            model,
+            input_tokens,
+            output_tokens,
+        } => {
+            handle_record_usage(&shared_budget, &provider, &model, input_tokens, output_tokens)
+                .await
+        }
+        IpcCommand::ListThreats { category, level } => {
+            handle_list_threats(&paths, category.as_deref(), level.as_deref())
+        }
+        IpcCommand::GetThreatDetails { id } => {
+            handle_get_threat_details(&paths, &quarantine, &id)
+        }
+        IpcCommand::ResolveThreat { id, action, note } => {
+            handle_resolve_threat(&paths, &quarantine, &id, &action, &note)
         }
     };
 
@@ -516,6 +554,296 @@ async fn handle_budget_extend(
     }
 }
 
+/// Parse a provider string and record token usage, returning the budget status.
+async fn handle_record_usage(
+    shared_budget: &Arc<Mutex<BudgetTracker>>,
+    provider_str: &str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> IpcResponse {
+    let provider = match provider_str.to_lowercase().as_str() {
+        "openai" => Provider::OpenAI,
+        "anthropic" => Provider::Anthropic,
+        "google" => Provider::Google,
+        _ => {
+            return IpcResponse::Error {
+                message: format!("unknown provider: {provider_str}"),
+            };
+        }
+    };
+
+    let usage = UsageData {
+        provider,
+        model: model.to_string(),
+        input_tokens,
+        output_tokens,
+    };
+
+    let status = shared_budget.lock().await.record_usage(&usage);
+
+    IpcResponse::Ok {
+        message: format!(
+            "{provider}: session {session}c/{session_limit}, daily {daily}c/{daily_limit}",
+            session = status.session_spent_cents,
+            session_limit = status
+                .session_limit_cents
+                .map_or_else(|| "unlimited".to_string(), |c| format!("{c}c")),
+            daily = status.daily_spent_cents,
+            daily_limit = status
+                .daily_limit_cents
+                .map_or_else(|| "unlimited".to_string(), |c| format!("{c}c")),
+        ),
+    }
+}
+
+// ============================================================
+// Threat / fix helpers
+// ============================================================
+
+/// Read all threat events from the audit log.
+fn read_audit_events(paths: &WellKnownPaths) -> Vec<sanctum_types::threat::ThreatEvent> {
+    let audit_path = paths.data_dir.join("audit.log");
+    let Ok(content) = std::fs::read_to_string(&audit_path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            match serde_json::from_str::<sanctum_types::threat::ThreatEvent>(line) {
+                Ok(event) => Some(event),
+                Err(e) => {
+                    tracing::warn!(%e, "skipping malformed audit log line");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Read resolved threat IDs from the resolution log.
+fn read_resolved_ids(paths: &WellKnownPaths) -> std::collections::HashSet<String> {
+    let resolution_path = paths.data_dir.join("resolutions.log");
+    let Ok(content) = std::fs::read_to_string(&resolution_path) else {
+        return std::collections::HashSet::new();
+    };
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            match serde_json::from_str::<sanctum_types::threat::ThreatResolution>(line) {
+                Ok(r) => Some(r.threat_id),
+                Err(e) => {
+                    tracing::warn!(%e, "skipping malformed resolution log line");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Append a resolution entry to the resolution log.
+fn append_resolution(
+    paths: &WellKnownPaths,
+    resolution: &sanctum_types::threat::ThreatResolution,
+) {
+    if let Err(e) = append_resolution_inner(paths, resolution) {
+        tracing::warn!("failed to write resolution log entry: {e}");
+    }
+}
+
+fn append_resolution_inner(
+    paths: &WellKnownPaths,
+    resolution: &sanctum_types::threat::ThreatResolution,
+) -> Result<(), std::io::Error> {
+    use std::io::Write;
+
+    let resolution_path = paths.data_dir.join("resolutions.log");
+
+    // Ensure parent directory exists
+    if let Some(parent) = resolution_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&resolution_path)?;
+
+    // Set restrictive permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&resolution_path, perms)?;
+    }
+
+    let json = serde_json::to_string(resolution).map_err(std::io::Error::other)?;
+    writeln!(file, "{json}")?;
+    Ok(())
+}
+
+/// List unresolved threats, optionally filtered by category and level.
+fn handle_list_threats(
+    paths: &WellKnownPaths,
+    category: Option<&str>,
+    level: Option<&str>,
+) -> IpcResponse {
+    let events = read_audit_events(paths);
+    let resolved = read_resolved_ids(paths);
+
+    let threats: Vec<ThreatListItem> = events
+        .iter()
+        .filter_map(|event| {
+            let id = event.threat_id();
+
+            // Skip resolved threats
+            if resolved.contains(&id) {
+                return None;
+            }
+
+            // Apply category filter
+            if let Some(cat) = category {
+                let event_cat = format!("{:?}", event.category);
+                if !event_cat.eq_ignore_ascii_case(cat) {
+                    return None;
+                }
+            }
+
+            // Apply level filter
+            if let Some(lvl) = level {
+                let event_lvl = format!("{:?}", event.level);
+                if !event_lvl.eq_ignore_ascii_case(lvl) {
+                    return None;
+                }
+            }
+
+            Some(ThreatListItem {
+                id,
+                timestamp: event.timestamp.to_rfc3339(),
+                level: format!("{:?}", event.level),
+                category: format!("{:?}", event.category),
+                description: event.description.clone(),
+                source_path: event.source_path.display().to_string(),
+                action_taken: format!("{:?}", event.action_taken),
+            })
+        })
+        .collect();
+
+    IpcResponse::ThreatList { threats }
+}
+
+/// Get detailed information about a specific threat.
+fn handle_get_threat_details(
+    paths: &WellKnownPaths,
+    quarantine: &sanctum_sentinel::pth::quarantine::Quarantine,
+    id: &str,
+) -> IpcResponse {
+    let events = read_audit_events(paths);
+
+    let Some(event) = events.iter().find(|e| e.threat_id() == id) else {
+        return IpcResponse::Error {
+            message: format!("threat not found: {id}"),
+        };
+    };
+
+    // Check for a matching quarantine entry by comparing source_path
+    let quarantine_id = quarantine.list().ok().and_then(|entries| {
+        entries
+            .into_iter()
+            .find(|entry| entry.metadata.original_path == event.source_path)
+            .map(|entry| entry.id)
+    });
+
+    IpcResponse::ThreatDetails {
+        id: id.to_string(),
+        timestamp: event.timestamp.to_rfc3339(),
+        level: format!("{:?}", event.level),
+        category: format!("{:?}", event.category),
+        description: event.description.clone(),
+        source_path: event.source_path.display().to_string(),
+        creator_pid: event.creator_pid,
+        creator_exe: event.creator_exe.as_ref().map(|p| p.display().to_string()),
+        action_taken: format!("{:?}", event.action_taken),
+        quarantine_id,
+    }
+}
+
+/// Resolve a threat by performing the specified action.
+fn handle_resolve_threat(
+    paths: &WellKnownPaths,
+    quarantine: &sanctum_sentinel::pth::quarantine::Quarantine,
+    id: &str,
+    action: &str,
+    note: &str,
+) -> IpcResponse {
+    use sanctum_types::threat::{ResolutionAction, ThreatResolution};
+
+    let events = read_audit_events(paths);
+
+    let Some(event) = events.iter().find(|e| e.threat_id() == id) else {
+        return IpcResponse::Error {
+            message: format!("threat not found: {id}"),
+        };
+    };
+
+    // Find matching quarantine entry by source_path
+    let quarantine_entry = quarantine.list().ok().and_then(|entries| {
+        entries
+            .into_iter()
+            .find(|entry| entry.metadata.original_path == event.source_path)
+    });
+
+    let resolution_action = match action {
+        "restore" => {
+            if let Some(ref entry) = quarantine_entry {
+                if let Err(e) = quarantine.restore(&entry.id) {
+                    return IpcResponse::Error {
+                        message: format!("failed to restore quarantined file: {e}"),
+                    };
+                }
+            }
+            ResolutionAction::Restored
+        }
+        "delete" => {
+            if let Some(ref entry) = quarantine_entry {
+                if let Err(e) = quarantine.delete(&entry.id) {
+                    return IpcResponse::Error {
+                        message: format!("failed to delete quarantined file: {e}"),
+                    };
+                }
+            }
+            ResolutionAction::Deleted
+        }
+        "dismiss" => ResolutionAction::Dismissed,
+        other => {
+            return IpcResponse::Error {
+                message: format!("unknown resolution action: {other}"),
+            };
+        }
+    };
+
+    let resolution = ThreatResolution {
+        threat_id: id.to_string(),
+        resolved_at: chrono::Utc::now(),
+        resolution: resolution_action,
+        note: note.to_string(),
+    };
+
+    append_resolution(paths, &resolution);
+
+    IpcResponse::Ok {
+        message: format!("threat {id} resolved with action: {action}"),
+    }
+}
+
 /// Reload configuration from disk into the shared config.
 /// Best-effort: logs errors but does not propagate them.
 async fn reload_shared_config(shared_config: &Arc<RwLock<SanctumConfig>>) {
@@ -533,379 +861,6 @@ async fn reload_shared_config(shared_config: &Arc<RwLock<SanctumConfig>>) {
         }
         None => {
             tracing::info!("no config file found, keeping current config");
-        }
-    }
-}
-
-/// Best-effort attempt to find the PID of the process that created or modified a file.
-///
-/// On Linux, scans `/proc/*/fd/` for open file descriptors pointing to the given path.
-/// On macOS, this is extremely difficult without elevated privileges, so we skip it.
-///
-/// This is inherently racy: the creating process may have already closed the file
-/// descriptor by the time we scan. The result is best-effort and may return `None`.
-const fn try_find_creator_pid(_path: &Path) -> Option<u32> {
-    #[cfg(target_os = "linux")]
-    {
-        linux_find_creator_pid(_path)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-/// Linux-specific: scan `/proc/*/fd/` to find a process with the given file open.
-#[cfg(target_os = "linux")]
-fn linux_find_creator_pid(path: &Path) -> Option<u32> {
-    use std::fs;
-
-    let proc_entries = fs::read_dir("/proc").ok()?;
-
-    for entry in proc_entries.flatten() {
-        let pid_str = entry.file_name();
-        let pid_str = pid_str.to_str()?;
-        let pid: u32 = match pid_str.parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        let fd_dir = format!("/proc/{pid}/fd");
-        let Ok(fds) = fs::read_dir(&fd_dir) else {
-            continue;
-        };
-
-        for fd_entry in fds.flatten() {
-            if let Ok(link_target) = fs::read_link(fd_entry.path()) {
-                if link_target == path {
-                    return Some(pid);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Trace process lineage for a given PID and return the assessment,
-/// creator PID, and creator executable path.
-///
-/// Returns `(creator_pid, creator_exe, assessment)`. If lineage tracing
-/// fails (process already exited, etc.), returns the PID with `None` exe
-/// and `Undetermined` assessment.
-fn trace_creator_lineage(
-    pid: u32,
-) -> (Option<u32>, Option<std::path::PathBuf>, LineageAssessment) {
-    match ProcessLineage::trace(pid, &SystemProcSource) {
-        Ok(lineage) => {
-            let assessment = lineage.assess_pth_creation();
-            let creator_exe = lineage
-                .root_ancestor()
-                .exe
-                .clone();
-            tracing::info!(
-                pid,
-                assessment = ?assessment,
-                "process lineage traced"
-            );
-            (Some(pid), creator_exe, assessment)
-        }
-        Err(e) => {
-            tracing::debug!(
-                pid,
-                %e,
-                "failed to trace process lineage (process may have exited)"
-            );
-            (Some(pid), None, LineageAssessment::Undetermined)
-        }
-    }
-}
-
-/// Handle a credential file event by creating a threat event and sending notification.
-fn handle_credential_event(event: &CredentialEvent, audit_path: &Path) {
-    match event {
-        CredentialEvent::AccessDetected {
-            path,
-            accessor_pid,
-            accessor_name,
-            allowed,
-        } => {
-            if *allowed {
-                tracing::debug!(
-                    path = %path.display(),
-                    accessor = accessor_name.as_deref().unwrap_or("unknown"),
-                    "credential file accessed by allowed process"
-                );
-                return;
-            }
-
-            let accessor_desc = match (accessor_pid, accessor_name.as_deref()) {
-                (Some(pid), Some(name)) => format!("{name} (PID {pid})"),
-                (Some(pid), None) => format!("unknown (PID {pid})"),
-                (None, Some(name)) => name.to_string(),
-                (None, None) => "unknown process".to_string(),
-            };
-
-            tracing::warn!(
-                path = %path.display(),
-                accessor = %accessor_desc,
-                "credential file accessed by unexpected process"
-            );
-
-            let threat_event = sanctum_types::threat::ThreatEvent {
-                timestamp: chrono::Utc::now(),
-                level: sanctum_types::threat::ThreatLevel::Warning,
-                category: sanctum_types::threat::ThreatCategory::CredentialAccess,
-                description: format!(
-                    "Credential file {} accessed by {}",
-                    path.display(),
-                    accessor_desc,
-                ),
-                source_path: path.clone(),
-                creator_pid: *accessor_pid,
-                creator_exe: None,
-                action_taken: sanctum_types::threat::Action::Alerted,
-            };
-            sanctum_notify::notify_threat(&threat_event);
-            audit::append_audit_event(&threat_event, audit_path);
-        }
-        CredentialEvent::Modified { path } => {
-            tracing::info!(
-                path = %path.display(),
-                "credential file modified"
-            );
-        }
-    }
-}
-
-fn handle_watch_event(
-    event: &WatchEvent,
-    quarantine: &Quarantine,
-    config: &SanctumConfig,
-    audit_path: &Path,
-) {
-    use sanctum_sentinel::pth::analyser::{analyse_pth_file_with_context, content_hash, FileVerdict};
-
-    match event.kind {
-        WatchEventKind::Created | WatchEventKind::Modified => {
-            tracing::info!(path = %event.path.display(), "detected .pth file change");
-
-            // Read the file content
-            let content = match std::fs::read_to_string(&event.path) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(path = %event.path.display(), %e, "failed to read file");
-                    return;
-                }
-            };
-
-            // Extract package name from the .pth file stem (e.g. "setuptools.pth" -> "setuptools")
-            let package_name = event
-                .path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown");
-
-            let hash = content_hash(content.as_bytes());
-            let analysis = analyse_pth_file_with_context(&content, package_name, &hash);
-
-            // Attempt to determine the creator process (best-effort)
-            let (creator_pid, creator_exe, lineage_assessment) =
-                try_find_creator_pid(&event.path).map_or(
-                    (None, None, LineageAssessment::Undetermined),
-                    trace_creator_lineage,
-                );
-
-            // Determine the effective threat level, escalating if lineage is suspicious
-            let escalate_for_lineage =
-                lineage_assessment == LineageAssessment::SuspiciousPythonStartup;
-
-            match analysis.verdict {
-                FileVerdict::Safe | FileVerdict::AllowlistedKnownPackage => {
-                    handle_safe_verdict(event, escalate_for_lineage, creator_pid, creator_exe, audit_path);
-                }
-                FileVerdict::Warning => {
-                    handle_warning_verdict(event, &analysis, escalate_for_lineage, creator_pid, creator_exe, audit_path);
-                }
-                FileVerdict::Critical => {
-                    handle_critical_verdict(event, &analysis, &hash, config, quarantine, creator_pid, creator_exe, audit_path);
-                }
-            }
-        }
-        WatchEventKind::Deleted => {
-            tracing::info!(path = %event.path.display(), "watched file deleted");
-        }
-    }
-}
-
-/// Handle a safe or allowlisted .pth file verdict, escalating if lineage is suspicious.
-fn handle_safe_verdict(
-    event: &WatchEvent,
-    escalate_for_lineage: bool,
-    creator_pid: Option<u32>,
-    creator_exe: Option<std::path::PathBuf>,
-    audit_path: &Path,
-) {
-    if escalate_for_lineage {
-        // File content looks safe but was created by Python startup --
-        // this is unusual and worth alerting on.
-        tracing::warn!(
-            path = %event.path.display(),
-            creator_pid = ?creator_pid,
-            "safe .pth file created during suspicious Python startup"
-        );
-        let threat_event = sanctum_types::threat::ThreatEvent {
-            timestamp: chrono::Utc::now(),
-            level: sanctum_types::threat::ThreatLevel::Warning,
-            category: sanctum_types::threat::ThreatCategory::PthInjection,
-            description: format!(
-                "Safe .pth file created during suspicious Python startup: {}",
-                event.path.display()
-            ),
-            source_path: event.path.clone(),
-            creator_pid,
-            creator_exe,
-            action_taken: sanctum_types::threat::Action::Alerted,
-        };
-        sanctum_notify::notify_threat(&threat_event);
-        audit::append_audit_event(&threat_event, audit_path);
-    } else {
-        tracing::debug!(path = %event.path.display(), "file is safe");
-    }
-}
-
-/// Handle a warning-level .pth file verdict, escalating if lineage is suspicious.
-fn handle_warning_verdict(
-    event: &WatchEvent,
-    analysis: &sanctum_sentinel::pth::analyser::FileAnalysis,
-    escalate_for_lineage: bool,
-    creator_pid: Option<u32>,
-    creator_exe: Option<std::path::PathBuf>,
-    audit_path: &Path,
-) {
-    // Escalate to Critical if the lineage is suspicious
-    let level = if escalate_for_lineage {
-        sanctum_types::threat::ThreatLevel::Critical
-    } else {
-        sanctum_types::threat::ThreatLevel::Warning
-    };
-
-    tracing::warn!(
-        path = %event.path.display(),
-        warnings = analysis.warning_lines.len(),
-        ?level,
-        "file contains suspicious imports"
-    );
-    // For warning-level findings, notify but don't quarantine
-    let threat_event = sanctum_types::threat::ThreatEvent {
-        timestamp: chrono::Utc::now(),
-        level,
-        category: sanctum_types::threat::ThreatCategory::PthInjection,
-        description: format!(
-            "Suspicious import found in {}",
-            event.path.display()
-        ),
-        source_path: event.path.clone(),
-        creator_pid,
-        creator_exe,
-        action_taken: sanctum_types::threat::Action::Alerted,
-    };
-    sanctum_notify::notify_threat(&threat_event);
-    audit::append_audit_event(&threat_event, audit_path);
-}
-
-/// Handle a critical .pth file verdict by quarantining, alerting, or logging based on config.
-#[allow(clippy::too_many_arguments)]
-fn handle_critical_verdict(
-    event: &WatchEvent,
-    analysis: &sanctum_sentinel::pth::analyser::FileAnalysis,
-    hash: &str,
-    config: &SanctumConfig,
-    quarantine: &Quarantine,
-    creator_pid: Option<u32>,
-    creator_exe: Option<std::path::PathBuf>,
-    audit_path: &Path,
-) {
-    tracing::error!(
-        path = %event.path.display(),
-        critical_lines = analysis.critical_lines.len(),
-        creator_pid = ?creator_pid,
-        "CRITICAL: malicious .pth file detected"
-    );
-
-    match config.sentinel.pth_response {
-        sanctum_types::config::PthResponse::Quarantine => {
-            let metadata = QuarantineMetadata {
-                original_path: event.path.clone(),
-                content_hash: hash.to_string(),
-                creator_pid,
-                reason: analysis
-                    .critical_lines
-                    .iter()
-                    .flat_map(|l| l.reasons.iter())
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                quarantined_at: chrono::Utc::now(),
-            };
-
-            match quarantine.quarantine_file(&event.path, &metadata) {
-                Ok(entry) => {
-                    tracing::info!(
-                        id = entry.id,
-                        path = %event.path.display(),
-                        "file quarantined"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        path = %event.path.display(),
-                        %e,
-                        "failed to quarantine file"
-                    );
-                }
-            }
-
-            let threat_event = sanctum_types::threat::ThreatEvent {
-                timestamp: chrono::Utc::now(),
-                level: sanctum_types::threat::ThreatLevel::Critical,
-                category: sanctum_types::threat::ThreatCategory::PthInjection,
-                description: format!(
-                    "Malicious .pth file quarantined: {}",
-                    event.path.display()
-                ),
-                source_path: event.path.clone(),
-                creator_pid,
-                creator_exe,
-                action_taken: sanctum_types::threat::Action::Quarantined,
-            };
-            sanctum_notify::notify_threat(&threat_event);
-            audit::append_audit_event(&threat_event, audit_path);
-        }
-        sanctum_types::config::PthResponse::Alert => {
-            let threat_event = sanctum_types::threat::ThreatEvent {
-                timestamp: chrono::Utc::now(),
-                level: sanctum_types::threat::ThreatLevel::Critical,
-                category: sanctum_types::threat::ThreatCategory::PthInjection,
-                description: format!(
-                    "Malicious .pth file detected: {}",
-                    event.path.display()
-                ),
-                source_path: event.path.clone(),
-                creator_pid,
-                creator_exe,
-                action_taken: sanctum_types::threat::Action::Alerted,
-            };
-            sanctum_notify::notify_threat(&threat_event);
-            audit::append_audit_event(&threat_event, audit_path);
-        }
-        sanctum_types::config::PthResponse::Log => {
-            tracing::error!(
-                path = %event.path.display(),
-                creator_pid = ?creator_pid,
-                "malicious .pth detected (log-only mode)"
-            );
         }
     }
 }

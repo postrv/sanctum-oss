@@ -7,7 +7,7 @@ use std::path::Path;
 use tokio::net::UnixStream;
 
 use sanctum_types::errors::CliError;
-pub use sanctum_types::ipc::{IpcCommand, IpcResponse, ProviderBudgetInfo};
+pub use sanctum_types::ipc::{IpcCommand, IpcResponse, ProviderBudgetInfo, ThreatListItem};
 
 /// Send a command to the daemon and receive the response.
 ///

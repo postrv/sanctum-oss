@@ -70,6 +70,8 @@ static_regex!(SLACK_APP_RE, r"xapp-[0-9]-[A-Z0-9]{10,13}-[0-9]{13}-[a-zA-Z0-9]{6
 static_regex!(NPM_TOKEN_RE, r"npm_[a-zA-Z0-9]{36}");
 static_regex!(PYPI_TOKEN_RE, r"pypi-[A-Za-z0-9_\-]{16,}");
 static_regex!(DIGITALOCEAN_RE, r"dop_v1_[a-f0-9]{64}");
+static_regex!(DATADOG_RE, r"dd(?:api|app)_[a-z0-9]{32,}");
+static_regex!(AZURE_SAS_RE, r"\bsig=[A-Za-z0-9%+/=]{20,}\b");
 
 /// All registered credential patterns.
 ///
@@ -155,6 +157,14 @@ pub static PATTERNS: &[CredentialPattern] = &[
     CredentialPattern {
         name: "DigitalOcean PAT",
         regex: &DIGITALOCEAN_RE,
+    },
+    CredentialPattern {
+        name: "Datadog API Key",
+        regex: &DATADOG_RE,
+    },
+    CredentialPattern {
+        name: "Azure SAS Token",
+        regex: &AZURE_SAS_RE,
     },
 ];
 
@@ -491,5 +501,121 @@ mod tests {
             secret_idx < access_idx,
             "AWS Secret Access Key must precede AWS Access Key for specificity"
         );
+    }
+
+    // ---- Negative tests: patterns must NOT match invalid inputs ----
+
+    #[test]
+    fn anthropic_pattern_rejects_no_ant_prefix() {
+        // Has sk- but not sk-ant- so should not match ANTHROPIC_RE
+        let key = "sk-notanthropickey12345678901234567890";
+        assert!(!ANTHROPIC_RE.is_match(key));
+    }
+
+    #[test]
+    fn gitlab_pattern_rejects_short_token() {
+        // Only 5 chars after prefix — needs 20+
+        let key = "glpat-short";
+        assert!(!GITLAB_RE.is_match(key));
+    }
+
+    #[test]
+    fn slack_bot_pattern_rejects_short_token() {
+        // Missing the numeric segment and hyphenated suffix
+        let key = "xoxb-short";
+        assert!(!SLACK_BOT_RE.is_match(key));
+    }
+
+    #[test]
+    fn stripe_secret_pattern_rejects_short_key() {
+        // Only 5 chars after prefix — needs 24+
+        let key = "sk_live_short";
+        assert!(!STRIPE_SECRET_RE.is_match(key));
+    }
+
+    #[test]
+    fn sendgrid_pattern_rejects_short_key() {
+        // Missing the two dot-separated segments of required length
+        let key = "SG.short";
+        assert!(!SENDGRID_RE.is_match(key));
+    }
+
+    #[test]
+    fn private_key_pattern_rejects_public_key() {
+        // PUBLIC KEY header must not match PRIVATE KEY pattern
+        let key = "-----BEGIN PUBLIC KEY-----";
+        assert!(!PRIVATE_KEY_RE.is_match(key));
+    }
+
+    #[test]
+    fn connection_string_rejects_https_scheme() {
+        // Only postgresql/mongodb/redis/mysql schemes should match
+        let conn = "https://user:pass@host/db";
+        assert!(!CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    // ---- New patterns: Datadog API Key ----
+
+    #[test]
+    fn datadog_api_key_matches_valid_key() {
+        let key = format!("ddapi_{}", "a".repeat(40));
+        assert!(DATADOG_RE.is_match(&key));
+    }
+
+    #[test]
+    fn datadog_api_key_matches_app_key() {
+        let key = format!("ddapp_{}", "b".repeat(40));
+        assert!(DATADOG_RE.is_match(&key));
+    }
+
+    #[test]
+    fn datadog_api_key_rejects_short_key() {
+        let key = "ddapi_short";
+        assert!(!DATADOG_RE.is_match(key));
+    }
+
+    #[test]
+    fn datadog_api_key_rejects_normal_text() {
+        assert!(!DATADOG_RE.is_match("datadog monitoring setup"));
+    }
+
+    // ---- New patterns: Azure SAS Token ----
+
+    #[test]
+    fn azure_sas_matches_valid_token() {
+        let input = "sig=dGVzdHNpZ25hdHVyZXZhbHVl%2BMoreBase64Content";
+        assert!(AZURE_SAS_RE.is_match(input));
+    }
+
+    #[test]
+    fn azure_sas_rejects_short_sig() {
+        let input = "sig=short";
+        assert!(!AZURE_SAS_RE.is_match(input));
+    }
+
+    #[test]
+    fn azure_sas_rejects_normal_text() {
+        assert!(!AZURE_SAS_RE.is_match("signal processing algorithm"));
+    }
+
+    #[test]
+    fn azure_sas_matches_url_encoded_token() {
+        // Real SAS tokens in URLs have percent-encoding throughout.
+        // The pattern must not break at % characters.
+        let input = "sig=abc%2Bdef%2Bghi%2Bjkl%2Bmno%2Bpqr%2Bstu";
+        assert!(AZURE_SAS_RE.is_match(input));
+    }
+
+    #[test]
+    fn azure_sas_matches_in_full_url_context() {
+        let input = "https://storage.blob.core.windows.net/container?sv=2021-06-08&sig=dGVzdHNpZ25hdHVyZXZhbHVlMTIzNDU2Nzg5MA%3D%3D&se=2024-01-01";
+        assert!(AZURE_SAS_RE.is_match(input));
+    }
+
+    // ---- Pattern count and ordering ----
+
+    #[test]
+    fn pattern_count_is_correct() {
+        assert_eq!(PATTERNS.len(), 22, "Expected 22 credential patterns");
     }
 }

@@ -520,3 +520,83 @@ mod tests {
         assert_eq!(result.verdict, FileVerdict::Critical);
     }
 }
+
+// ── Kani bounded model checking proofs ──────────────────────────────────────
+//
+// These proofs are compiled ONLY by the Kani verifier (`cargo kani`).
+// They are invisible to normal `cargo build` and `cargo test`.
+//
+// Run individual proofs:   cargo kani --harness pth_analyser_never_panics
+// Run all proofs:          cargo kani --workspace
+
+#[cfg(kani)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod kani_proofs {
+    use super::*;
+
+    /// Proof 1: `analyse_pth_line` never panics on any UTF-8 input up to 32 bytes.
+    ///
+    /// This proves the totality contract from the module doc (line 8).
+    /// PR CI uses unwind(32); nightly CI uses unwind(256) for deeper coverage.
+    #[kani::proof]
+    #[kani::unwind(34)]
+    fn pth_analyser_never_panics() {
+        let len: usize = kani::any();
+        kani::assume(len <= 32);
+        let bytes: Vec<u8> = (0..len).map(|_| kani::any()).collect();
+        if let Ok(line) = std::str::from_utf8(&bytes) {
+            let _ = analyse_pth_line(line);
+        }
+    }
+
+    /// Proof 2: A line composed entirely of path-safe characters (`[a-z0-9/._-]`)
+    /// always receives `ThreatLevel::Info` (benign).
+    ///
+    /// This proves the contract from the module doc (line 10).
+    #[kani::proof]
+    #[kani::unwind(18)]
+    fn pure_path_is_always_benign() {
+        let len: usize = kani::any();
+        kani::assume(len > 0 && len <= 16);
+        let path_chars = b"abcdefghijklmnopqrstuvwxyz0123456789/._-";
+        let bytes: Vec<u8> = (0..len)
+            .map(|_| {
+                let idx: usize = kani::any();
+                kani::assume(idx < path_chars.len());
+                path_chars[idx]
+            })
+            .collect();
+        let line = std::str::from_utf8(&bytes).unwrap();
+        let result = analyse_pth_line(line);
+        assert_eq!(result.level(), sanctum_types::threat::ThreatLevel::Info);
+    }
+
+    /// Proof 3: Any ASCII line containing `exec(` is classified at least `Warning`.
+    ///
+    /// This proves part of the contract from the module doc (line 11).
+    #[kani::proof]
+    #[kani::unwind(22)]
+    fn exec_is_never_benign() {
+        let prefix_len: usize = kani::any();
+        let suffix_len: usize = kani::any();
+        kani::assume(prefix_len <= 8);
+        kani::assume(suffix_len <= 8);
+        let prefix: String = (0..prefix_len)
+            .map(|_| {
+                let c: u8 = kani::any();
+                kani::assume(c.is_ascii());
+                c as char
+            })
+            .collect();
+        let suffix: String = (0..suffix_len)
+            .map(|_| {
+                let c: u8 = kani::any();
+                kani::assume(c.is_ascii());
+                c as char
+            })
+            .collect();
+        let line = format!("{prefix}exec({suffix}");
+        let result = analyse_pth_line(&line);
+        assert!(result.level() >= sanctum_types::threat::ThreatLevel::Warning);
+    }
+}

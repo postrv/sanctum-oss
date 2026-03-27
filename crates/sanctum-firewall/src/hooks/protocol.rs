@@ -12,6 +12,10 @@ pub struct HookInput {
     pub tool_name: String,
     /// The JSON arguments passed to the tool.
     pub tool_input: serde_json::Value,
+    /// Optional AI firewall configuration. When `None`, all checks are active.
+    /// Injected by the CLI before calling hook functions — not deserialized from JSON.
+    #[serde(skip)]
+    pub config: Option<sanctum_types::config::AiFirewallConfig>,
 }
 
 /// Output from a hook handler, containing the policy decision and optional message.

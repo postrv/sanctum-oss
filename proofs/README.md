@@ -1,6 +1,6 @@
 # Formal Verification Proofs
 
-This directory contains bounded model checking harnesses for [Kani](https://model-checking.github.io/kani/), a Rust verification tool backed by CBMC.
+This directory documents the bounded model checking proofs for [Kani](https://model-checking.github.io/kani/), a Rust verification tool backed by CBMC.
 
 ## What Kani proves (vs. what tests check)
 
@@ -11,13 +11,22 @@ This directory contains bounded model checking harnesses for [Kani](https://mode
 | Fuzz testing | Millions of random inputs | High confidence, not proof |
 | **Kani proofs** | **All inputs within bounds** | **Mathematical certainty** |
 
-## CI status
+## Architecture
 
-Kani proofs are not yet integrated into CI. They can be run manually.
+Proof harnesses live **inline** in the crate source files, gated by `#[cfg(kani)]`. This is the Kani project's recommended approach. The `#[cfg(kani)]` blocks are completely invisible to normal `cargo build` and `cargo test`.
+
+The `proofs/kani/pth_analyser.rs` file is retained as a historical specification document.
+
+## CI integration
+
+| Job | Trigger | Proofs | Timeout |
+|-----|---------|--------|---------|
+| `kani-core` | Every PR | 5 fast proofs (see below) | 10 min |
+| `kani-full` | Push to `main` / nightly schedule | All 8 proofs (`cargo kani --workspace`) | 60 min |
+
+`kani-core` gates the `build-release` job.
 
 ## Running proofs
-
-Once harnesses are uncommented and wired into the crate structure:
 
 ```bash
 # Install Kani
@@ -28,24 +37,55 @@ cargo kani setup
 cargo kani --workspace
 
 # Run a specific proof
-cargo kani --harness pth_analyser_never_panics
+cargo kani --harness pth_analyser_never_panics -p sanctum-sentinel
+cargo kani --harness ceiling_cost_no_overflow -p sanctum-budget
 ```
 
-## Current status
+## Active proofs (8 total)
 
-There are no active proof harnesses yet. The file `proofs/kani/pth_analyser.rs` contains commented-out specifications for future proofs. These are blocked on wiring the harnesses into the crate structure so that Kani's compilation model can resolve the `sanctum-sentinel` imports.
+### In `sanctum-sentinel/src/pth/analyser.rs`
 
-## Planned proofs
+1. **`pth_analyser_never_panics`** — Proves `analyse_pth_line` never panics for any UTF-8 string up to 32 bytes (PR) / 256 bytes (nightly).
+2. **`pure_path_is_always_benign`** — Proves path-safe characters (`a-z`, `0-9`, `/`, `.`, `_`, `-`) always yield `ThreatLevel::Info`.
+3. **`exec_is_never_benign`** — Proves any ASCII string containing `exec(` is classified at least `Warning`.
 
-### `pth_analyser.rs`
+### In `sanctum-sentinel/src/pth/quarantine.rs`
 
-The following harnesses are specified (commented out) in `proofs/kani/pth_analyser.rs`:
+4. **`quarantine_state_transitions`** — Proves the quarantine state machine has valid transitions: `Active` accepts all actions, `Deleted` is terminal, `Approve` -> `Restored`, `Delete` -> `Deleted`, `Report` preserves state.
+5. **`validate_id_rejects_traversal`** — Proves `validate_id` rejects empty strings, strings containing `/` or `\`, and strings containing `..` for all 4-byte UTF-8 inputs.
 
-1. **`pth_analyser_never_panics`** — Will prove that `analyse_pth_line` never panics for any UTF-8 string up to 256 bytes.
-2. **`pure_path_is_always_benign`** — Will prove that a string containing only path-safe characters (`a-z`, `0-9`, `/`, `.`, `_`, `-`) always receives a `Benign` verdict.
-3. **`exec_is_never_benign`** — Will prove that any string containing the substring `exec(` receives at least `Warning` level.
-4. **`quarantine_state_transitions`** — Will prove that the quarantine state machine has valid transitions and that `Deleted` is a terminal state. (Stub only; no implementation body yet.)
+### In `sanctum-budget/src/pricing.rs`
+
+6. **`ceiling_cost_no_overflow`** — Proves `ceiling_cost` never overflows for any `u64` inputs, and that zero tokens or zero price always yields zero cost.
+
+### In `sanctum-firewall/src/entropy.rs`
+
+7. **`shannon_entropy_never_panics`** — Proves `shannon_entropy` never panics for any valid UTF-8 input up to 8 bytes, and that the result is always non-negative (zero for empty strings).
+
+### In `sanctum-firewall/src/mcp/policy.rs`
+
+8. **`glob_matches_exact_match_works`** — Proves that for any 4-byte printable ASCII pattern without wildcards, `glob_matches` is equivalent to string equality.
+
+## `kani-core` proofs (PR gate)
+
+The following 5 proofs run on every PR and gate `build-release`:
+
+| Proof | Crate | Rationale for fast gate |
+|-------|-------|------------------------|
+| `quarantine_state_transitions` | sanctum-sentinel | Core state machine correctness |
+| `pure_path_is_always_benign` | sanctum-sentinel | Path classification soundness |
+| `validate_id_rejects_traversal` | sanctum-sentinel | Quarantine traversal prevention |
+| `ceiling_cost_no_overflow` | sanctum-budget | Budget arithmetic safety |
+| `glob_matches_exact_match_works` | sanctum-firewall | MCP policy correctness |
+
+The remaining 3 proofs (`pth_analyser_never_panics`, `exec_is_never_benign`, `shannon_entropy_never_panics`) run only on `main` push and nightly schedule via `kani-full`, due to their larger unwind bounds.
 
 ## Bounds and limitations
 
-Kani uses bounded model checking. The `#[kani::unwind(N)]` annotation limits loop iterations and string length. Proofs are valid up to the specified bound. For example, `pth_analyser_never_panics` is designed to prove correctness for all inputs up to 256 bytes — longer inputs use the same code paths, so this would provide high confidence for all practical inputs.
+Kani uses bounded model checking. The `#[kani::unwind(N)]` annotation limits loop iterations and string length. Proofs are valid up to the specified bound. Kani does **not** support:
+- `async`/`await` or the Tokio runtime
+- Standard I/O operations (`std::fs`, `std::net`)
+- The `regex` crate (SIMD internals)
+- Dynamic dispatch (`dyn Trait`) has limited support
+
+Proof harnesses are restricted to pure, synchronous functions.

@@ -4,7 +4,7 @@
 
 | Version | Supported |
 |---|---|
-| 0.1.x | ✅ Current |
+| 0.1.x | Current |
 
 ## Reporting a vulnerability
 
@@ -12,7 +12,7 @@
 
 Instead, please report vulnerabilities via one of:
 
-1. **GitHub Private Advisory**: [Create a private advisory](https://github.com/arbiter-security/sanctum/security/advisories/new) on this repository.
+1. **GitHub Private Advisory**: [Create a private advisory](https://github.com/postrv/sanctum/security/advisories/new) on this repository.
 2. **Email**: security@sanctum.dev (PGP key available at sanctum.dev/.well-known/security.txt)
 
 ### What to include
@@ -45,10 +45,37 @@ We ask that you give us reasonable time to address the issue before public discl
 
 Sanctum is a security tool with elevated filesystem access. We take its own security extremely seriously:
 
-- **No unsafe code** in the entire codebase
+### Code quality
+
+- **Zero `unsafe` code** in the entire codebase
+- **No `unwrap`/`expect`/`panic`** outside test code (enforced by workspace-level clippy lints)
+- **Zero clippy warnings** across 456 tests
+- **Rust toolchain pinned** to 1.93.0 via `rust-toolchain.toml` for reproducible builds
+
+### Dependency management
+
+- **`cargo-deny` enforced** via `deny.toml`:
+  - Known vulnerabilities denied
+  - Yanked crates denied
+  - Only permissive licenses allowed (MIT, Apache-2.0, BSD, ISC, Unicode)
+  - Copyleft dependencies denied
+  - Multiple versions of the same crate denied
+  - C system dependencies (`openssl-sys`, `libz-sys`) explicitly banned -- pure Rust only
+  - Only crates.io registry allowed; unknown registries and git sources denied
 - **All dependencies audited** and documented in `docs/DEPENDENCY_AUDIT.md`
-- **Fuzz testing** on all input-parsing code
-- **Property-based testing** with 10,000+ cases on security-critical modules
-- **Formal verification** via Kani bounded model checking on core algorithms
-- **Sigstore attestation** on all release binaries
-- **Reproducible builds** verified in CI
+
+### Runtime security
+
+- **Race-free PID file creation** using `O_CREAT | O_EXCL` semantics (`create_new(true)`) to prevent TOCTOU races between checking for an existing daemon and starting a new one
+- **AppleScript injection prevention** in macOS notifications -- all user-controlled strings are sanitized before embedding in AppleScript literals to prevent code injection via `osascript`
+- **IPC messages capped at 64KB** (`MAX_MESSAGE_SIZE`) -- both read and write paths enforce the limit before allocating payload buffers
+- **Unix socket permissions set to 0o600** -- only the owning user can connect to the daemon
+- **Audit log with 0o600 permissions** -- append-only NDJSON format; audit logging failures are logged but never crash the daemon
+- **Budget state files persisted with 0o600 permissions**
+
+### Testing
+
+- **456 tests** covering all five workspace crates
+- **Fuzz testing targets** for security-critical parsers (PTH file analyser, config parser) in `fuzz/fuzz_targets/`
+- **9 property-based tests** using proptest (6 sentinel + 3 budget) that verify invariants such as analyser totality, determinism, quarantine roundtrip identity, pricing overflow safety, and spend monotonicity
+- **Kani proof harnesses** for bounded model checking on core algorithms in `proofs/kani/` (analyser panic-freedom, path classification correctness, exec detection, state machine validity)

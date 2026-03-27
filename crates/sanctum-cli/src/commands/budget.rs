@@ -112,8 +112,22 @@ fn parse_dollar_amount(s: &str) -> Result<u64, CliError> {
         ));
     }
 
+    if !amount.is_finite() {
+        return Err(CliError::InvalidArgs(
+            "budget amount must be a finite number".to_string(),
+        ));
+    }
+
+    let cents_f = (amount * 100.0).round();
+    #[allow(clippy::cast_precision_loss)]
+    if cents_f >= u64::MAX as f64 {
+        return Err(CliError::InvalidArgs(
+            "budget amount too large".to_string(),
+        ));
+    }
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let cents = (amount * 100.0).round() as u64;
+    let cents = cents_f as u64;
     Ok(cents)
 }
 
@@ -208,6 +222,20 @@ mod tests {
     #[test]
     fn parse_dollar_amount_rejects_text() {
         assert!(parse_dollar_amount("fifty").is_err());
+    }
+
+    #[test]
+    fn parse_dollar_amount_rejects_infinity_nan() {
+        assert!(parse_dollar_amount("$inf").is_err());
+        assert!(parse_dollar_amount("$infinity").is_err());
+        assert!(parse_dollar_amount("$NaN").is_err());
+        assert!(parse_dollar_amount("inf").is_err());
+        assert!(parse_dollar_amount("NaN").is_err());
+    }
+
+    #[test]
+    fn parse_dollar_amount_rejects_overflow() {
+        assert!(parse_dollar_amount("$184467440737095517.00").is_err());
     }
 
     #[test]

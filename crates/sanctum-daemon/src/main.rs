@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sanctum_budget::{BudgetTracker, Provider, UsageData};
 use sanctum_sentinel::credentials::{CredentialEvent, CredentialWatcher};
@@ -155,16 +155,19 @@ async fn run_daemon(
 
     // Start network watcher if configured
     let (net_tx, mut net_rx) = tokio::sync::mpsc::channel::<NetworkEvent>(256);
-    let _net_watcher = if shared_config.read().await.sentinel.watch_network {
-        tracing::info!("starting network watcher");
-        Some(NetworkWatcher::start(
-            shared_config.read().await.sentinel.network.clone(),
-            net_tx,
-        ))
-    } else {
-        tracing::info!("network monitoring disabled (watch_network = false)");
-        drop(net_tx);
-        None
+    let _net_watcher = {
+        let net_config_snap = shared_config.read().await.clone();
+        if net_config_snap.sentinel.watch_network {
+            tracing::info!("starting network watcher");
+            Some(NetworkWatcher::start(
+                net_config_snap.sentinel.network,
+                net_tx,
+            ))
+        } else {
+            tracing::info!("network monitoring disabled (watch_network = false)");
+            drop(net_tx);
+            None
+        }
     };
 
     // Register signal handlers
@@ -309,16 +312,25 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
 
                         tokio::spawn(async move {
                             let _permit = permit;
-                            if let Err(e) = handle_ipc_command(
-                                &mut conn,
-                                uptime,
-                                watchers_active,
-                                quarantine_count,
-                                shutdown_tx,
-                                ipc_config,
-                                ipc_budget,
+                            match tokio::time::timeout(
+                                Duration::from_secs(30),
+                                handle_ipc_command(
+                                    &mut conn,
+                                    uptime,
+                                    watchers_active,
+                                    quarantine_count,
+                                    shutdown_tx,
+                                    ipc_config,
+                                    ipc_budget,
+                                ),
                             ).await {
-                                tracing::warn!(%e, "IPC handler error");
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    tracing::warn!(%e, "IPC handler error");
+                                }
+                                Err(_) => {
+                                    tracing::warn!("IPC connection timed out after 30s");
+                                }
                             }
                         });
                     }
@@ -705,6 +717,7 @@ fn append_resolution_inner(
 
     let json = serde_json::to_string(resolution).map_err(std::io::Error::other)?;
     writeln!(file, "{json}")?;
+    file.sync_all()?;
     Ok(())
 }
 

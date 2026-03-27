@@ -178,9 +178,16 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
             // Split on '*' and check that the last path component matches.
             let star_parts: Vec<&str> = suffix.split('*').collect();
             if star_parts.len() == 2 {
+                let before_star = star_parts.first().copied().unwrap_or("");
                 let after_star = star_parts.get(1).copied().unwrap_or("");
-                // Match any path component ending with the extension.
-                return path.ends_with(after_star);
+                // Match any path component ending with the extension
+                // AND whose filename starts with the prefix before the '*'.
+                if !path.ends_with(after_star) {
+                    return false;
+                }
+                // Extract the filename (last path component) and verify the prefix.
+                let filename = path.rsplit('/').next().unwrap_or(path);
+                return before_star.is_empty() || filename.starts_with(before_star);
             }
         }
         return path.ends_with(&format!("/{suffix}")) || path == suffix;
@@ -398,6 +405,17 @@ mod tests {
         assert!(glob_matches("/usr/*/bin", "/usr/local/bin"));
         assert!(glob_matches("/etc/*", "/etc/passwd"));
         assert!(!glob_matches("/foo/*/bar", "/baz/anything/bar"));
+    }
+
+    #[test]
+    fn glob_double_star_with_prefix_wildcard() {
+        // Pattern **/config*.json should match files whose name starts with "config"
+        // and ends with ".json", but NOT arbitrary .json files.
+        assert!(glob_matches("**/config*.json", "/home/config-dev.json"));
+        assert!(glob_matches("**/config*.json", "/home/user/config.json"));
+        assert!(glob_matches("**/config*.json", "/home/user/config_prod.json"));
+        assert!(!glob_matches("**/config*.json", "/home/random.json"));
+        assert!(!glob_matches("**/config*.json", "/home/user/settings.json"));
     }
 
     #[test]

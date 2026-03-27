@@ -79,7 +79,7 @@ impl McpAuditLog {
                 writeln!(file, "{json}")?;
             }
         }
-        file.flush()?;
+        file.sync_all()?;
         Ok(())
     }
 }

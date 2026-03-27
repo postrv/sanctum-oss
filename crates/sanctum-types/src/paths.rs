@@ -120,11 +120,13 @@ fn platform_dirs(home: &std::path::Path) -> (PathBuf, PathBuf) {
     #[cfg(target_os = "linux")]
     {
         let data = std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"))
             .join("sanctum");
 
         let config = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"))
             .join("sanctum");
@@ -193,6 +195,31 @@ mod tests {
             .data_dir
             .to_string_lossy()
             .contains("Library/Application Support/sanctum"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_xdg_var_uses_default() {
+        // When XDG_DATA_HOME is set to "" the code should fall back to the
+        // default (~/.local/share) rather than producing a relative path.
+        let home = std::env::var("HOME").expect("HOME should be set in test");
+        std::env::set_var("XDG_DATA_HOME", "");
+        std::env::set_var("XDG_CONFIG_HOME", "");
+        let paths = WellKnownPaths::detect().expect("detect should succeed with HOME set");
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert!(
+            paths.data_dir.is_absolute(),
+            "data_dir should be absolute, got: {}",
+            paths.data_dir.display()
+        );
+        assert!(
+            paths.config_dir.is_absolute(),
+            "config_dir should be absolute, got: {}",
+            paths.config_dir.display()
+        );
+        let expected_data = std::path::Path::new(&home).join(".local/share/sanctum");
+        assert_eq!(paths.data_dir, expected_data);
     }
 
     #[test]

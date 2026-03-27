@@ -61,7 +61,7 @@ static_regex!(
 );
 static_regex!(
     BEARER_TOKEN_RE,
-    r"[Aa]uthorization[=: ]+Bearer [A-Za-z0-9_\-]{20,}"
+    r"(?i:authorization)[=: ]+Bearer [A-Za-z0-9_\-]{20,}"
 );
 static_regex!(PRIVATE_KEY_RE, r"-----BEGIN[A-Z ]*PRIVATE KEY-----");
 static_regex!(CONNECTION_STRING_RE, r"(postgresql|postgres|mongodb|redis|mysql)://[^\s@]+@[^\s]+");
@@ -71,7 +71,7 @@ static_regex!(NPM_TOKEN_RE, r"npm_[a-zA-Z0-9]{36}");
 static_regex!(PYPI_TOKEN_RE, r"pypi-[A-Za-z0-9_\-]{16,}");
 static_regex!(DIGITALOCEAN_RE, r"dop_v1_[a-f0-9]{64}");
 static_regex!(DATADOG_RE, r"dd(?:api|app)_[a-z0-9]{32,}");
-static_regex!(AZURE_SAS_RE, r"\bsig=[A-Za-z0-9%+/=]{20,}\b");
+static_regex!(AZURE_SAS_RE, r"\bsig=[A-Za-z0-9%+/=]{20,}");
 
 /// All registered credential patterns.
 ///

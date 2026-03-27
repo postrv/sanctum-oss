@@ -36,7 +36,7 @@ main() {
 
     local _target="${_arch}-${_os}"
     local _latest
-    _latest="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)"
+    _latest="$(curl --proto '=https' --tlsv1.2 -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)"
 
     if [ -z "$_latest" ]; then
         err "could not determine latest version"
@@ -50,33 +50,88 @@ main() {
     local _tmpdir
     _tmpdir="$(mktemp -d)"
 
-    curl -fsSL "${_url}" -o "${_tmpdir}/sanctum"
-    curl -fsSL "${_url_daemon}" -o "${_tmpdir}/sanctum-daemon"
+    curl --proto '=https' --tlsv1.2 -fsSL "${_url}" -o "${_tmpdir}/sanctum"
+    curl --proto '=https' --tlsv1.2 -fsSL "${_url_daemon}" -o "${_tmpdir}/sanctum-daemon"
     chmod +x "${_tmpdir}/sanctum" "${_tmpdir}/sanctum-daemon"
 
-    # Download signature and certificate for Sigstore verification
+    # Download SHA256SUMS and verify checksums (mandatory)
+    echo "Downloading checksums..."
+    curl --proto '=https' --tlsv1.2 -fsSL "${_base_url}/SHA256SUMS" -o "${_tmpdir}/SHA256SUMS"
+
+    # Detect available sha256 tool
+    if command -v sha256sum > /dev/null 2>&1; then
+        _sha256cmd="sha256sum"
+    elif command -v shasum > /dev/null 2>&1; then
+        _sha256cmd="shasum -a 256"
+    else
+        err "need 'sha256sum' or 'shasum' for checksum verification (command not found)"
+    fi
+
+    echo "Verifying checksums..."
+    # Extract expected checksums for our target binaries and verify
+    local _sanctum_hash _daemon_hash _actual_sanctum _actual_daemon
+    _sanctum_hash="$(grep "sanctum-${_target}\$" "${_tmpdir}/SHA256SUMS" | head -1 | awk '{print $1}')"
+    _daemon_hash="$(grep "sanctum-daemon-${_target}\$" "${_tmpdir}/SHA256SUMS" | head -1 | awk '{print $1}')"
+
+    if [ -z "$_sanctum_hash" ] || [ -z "$_daemon_hash" ]; then
+        err "could not find checksums for ${_target} in SHA256SUMS"
+    fi
+
+    _actual_sanctum="$($_sha256cmd "${_tmpdir}/sanctum" | awk '{print $1}')"
+    _actual_daemon="$($_sha256cmd "${_tmpdir}/sanctum-daemon" | awk '{print $1}')"
+
+    if [ "$_sanctum_hash" != "$_actual_sanctum" ]; then
+        err "checksum mismatch for sanctum: expected ${_sanctum_hash}, got ${_actual_sanctum}"
+    fi
+    if [ "$_daemon_hash" != "$_actual_daemon" ]; then
+        err "checksum mismatch for sanctum-daemon: expected ${_daemon_hash}, got ${_actual_daemon}"
+    fi
+    echo "Checksums verified."
+
+    # Download signature and certificate for Sigstore verification (both binaries)
     local _sig_url="${_base_url}/sanctum-${_target}.sig"
     local _cert_url="${_base_url}/sanctum-${_target}.cert"
+    local _sig_daemon_url="${_base_url}/sanctum-daemon-${_target}.sig"
+    local _cert_daemon_url="${_base_url}/sanctum-daemon-${_target}.cert"
 
-    curl -fsSL "$_sig_url" -o "${_tmpdir}/sanctum.sig" 2>/dev/null || true
-    curl -fsSL "$_cert_url" -o "${_tmpdir}/sanctum.cert" 2>/dev/null || true
+    curl --proto '=https' --tlsv1.2 -fsSL "$_sig_url" -o "${_tmpdir}/sanctum.sig" 2>/dev/null || true
+    curl --proto '=https' --tlsv1.2 -fsSL "$_cert_url" -o "${_tmpdir}/sanctum.cert" 2>/dev/null || true
+    curl --proto '=https' --tlsv1.2 -fsSL "$_sig_daemon_url" -o "${_tmpdir}/sanctum-daemon.sig" 2>/dev/null || true
+    curl --proto '=https' --tlsv1.2 -fsSL "$_cert_daemon_url" -o "${_tmpdir}/sanctum-daemon.cert" 2>/dev/null || true
 
-    # Verify Sigstore signature if cosign is available
+    # Verify Sigstore signatures if cosign is available (optional)
     if command -v cosign > /dev/null 2>&1; then
+        # Verify sanctum binary
         if [ -f "${_tmpdir}/sanctum.sig" ] && [ -f "${_tmpdir}/sanctum.cert" ]; then
-            echo "Verifying Sigstore signature..."
+            echo "Verifying Sigstore signature for sanctum..."
             if cosign verify-blob \
                 --signature "${_tmpdir}/sanctum.sig" \
                 --certificate "${_tmpdir}/sanctum.cert" \
                 --certificate-identity-regexp "^https://github\\.com/postrv/sanctum/" \
                 --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
                 "${_tmpdir}/sanctum"; then
-                echo "Signature verified."
+                echo "Signature verified for sanctum."
             else
-                err "signature verification failed -- binary may be tampered with"
+                err "signature verification failed for sanctum -- binary may be tampered with"
             fi
         else
-            echo "warning: signature files not found in release, skipping verification" >&2
+            echo "warning: signature files not found for sanctum, skipping cosign verification" >&2
+        fi
+        # Verify sanctum-daemon binary
+        if [ -f "${_tmpdir}/sanctum-daemon.sig" ] && [ -f "${_tmpdir}/sanctum-daemon.cert" ]; then
+            echo "Verifying Sigstore signature for sanctum-daemon..."
+            if cosign verify-blob \
+                --signature "${_tmpdir}/sanctum-daemon.sig" \
+                --certificate "${_tmpdir}/sanctum-daemon.cert" \
+                --certificate-identity-regexp "^https://github\\.com/postrv/sanctum/" \
+                --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+                "${_tmpdir}/sanctum-daemon"; then
+                echo "Signature verified for sanctum-daemon."
+            else
+                err "signature verification failed for sanctum-daemon -- binary may be tampered with"
+            fi
+        else
+            echo "warning: signature files not found for sanctum-daemon, skipping cosign verification" >&2
         fi
     else
         echo "warning: cosign not installed, skipping signature verification" >&2

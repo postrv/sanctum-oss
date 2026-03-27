@@ -226,6 +226,7 @@ impl Quarantine {
     ///
     /// Returns an error if the file cannot be read, moved, or the stub
     /// cannot be written (e.g., read-only directory).
+    #[allow(clippy::too_many_lines)]
     pub fn quarantine_file(
         &self,
         path: &Path,
@@ -238,6 +239,19 @@ impl Quarantine {
                 source: e,
             }
         })?;
+
+        // Restrict quarantine directory to owner-only access
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o700);
+            fs::set_permissions(&self.quarantine_dir, perms).map_err(|e| {
+                SentinelError::Quarantine {
+                    path: self.quarantine_dir.clone(),
+                    source: e,
+                }
+            })?;
+        }
 
         // Generate unique ID — use file stem (without extension) to avoid
         // conflicts with the .json metadata extension naming scheme.
@@ -321,11 +335,17 @@ impl Quarantine {
             })?;
         }
 
-        // Replace original with empty stub
-        fs::write(path, "").map_err(|e| SentinelError::Quarantine {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+        // Replace original with empty stub and fsync for crash durability
+        {
+            let stub = fs::File::create(path).map_err(|e| SentinelError::Quarantine {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            stub.sync_all().map_err(|e| SentinelError::Quarantine {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+        }
 
         // Preserve original permissions on the stub
         #[cfg(unix)]
@@ -816,6 +836,28 @@ mod tests {
         // Restore should fail because the quarantined content is gone.
         let result = q.restore(&entry.id);
         assert!(result.is_err(), "restore should fail when quarantined file is deleted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quarantine_dir_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("evil.pth");
+        fs::write(&pth_path, "exec(...)").expect("write");
+
+        let q_dir = dir.path().join("quarantine");
+        let q = Quarantine::new(q_dir.clone());
+        q.quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine should succeed");
+
+        let mode = fs::metadata(&q_dir)
+            .expect("quarantine dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "quarantine dir should be owner-only (0o700), got {mode:#o}");
     }
 
     #[test]

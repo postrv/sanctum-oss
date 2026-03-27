@@ -30,9 +30,10 @@ pub fn handle_watch_event(
         WatchEventKind::Created | WatchEventKind::Modified => {
             tracing::info!(path = %event.path.display(), "detected .pth file change");
 
-            // Read the file content
-            let content = match std::fs::read_to_string(&event.path) {
-                Ok(c) => c,
+            // Read the file content (use read + from_utf8_lossy so non-UTF-8
+            // bytes are replaced with U+FFFD rather than silently skipping the file)
+            let content = match std::fs::read(&event.path) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(e) => {
                     tracing::warn!(path = %event.path.display(), %e, "failed to read file");
                     return;
@@ -184,7 +185,7 @@ pub fn handle_network_event(
                     "Anomalous connection to {remote_addr} by {process_desc}: {anomaly:?}"
                 ),
                 source_path: pid
-                    .map(|p| std::path::PathBuf::from(format!("/proc/{p}/exe")))
+                    .map(|p| std::path::PathBuf::from(format!("pid:{p}")))
                     .unwrap_or_default(),
                 creator_pid: *pid,
                 creator_exe: None,
@@ -221,7 +222,7 @@ pub fn handle_network_event(
                     "Connection to blocklisted destination {remote_addr} by {process_desc}: {reason}"
                 ),
                 source_path: pid
-                    .map(|p| std::path::PathBuf::from(format!("/proc/{p}/exe")))
+                    .map(|p| std::path::PathBuf::from(format!("pid:{p}")))
                     .unwrap_or_default(),
                 creator_pid: *pid,
                 creator_exe: None,

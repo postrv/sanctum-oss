@@ -100,7 +100,13 @@ fn parse_duration(s: &str) -> Result<chrono::TimeDelta, CliError> {
         )));
     }
 
-    let (digits, suffix) = s.split_at(s.len() - 1);
+    let last_char = s.chars().next_back().ok_or_else(|| {
+        CliError::InvalidArgs(format!(
+            "invalid duration: {s} (expected e.g. 30m, 1h, 24h, 7d)"
+        ))
+    })?;
+    let digits = &s[..s.len() - last_char.len_utf8()];
+    let suffix = &s[s.len() - last_char.len_utf8()..];
     let value: i64 = digits.parse().map_err(|_| {
         CliError::InvalidArgs(format!(
             "invalid duration: {s} (expected e.g. 30m, 1h, 24h, 7d)"

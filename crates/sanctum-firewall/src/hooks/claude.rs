@@ -222,6 +222,43 @@ fn is_env_dump(command: &str) -> bool {
         }
     }
 
+    // Check for env-dump commands after shell separators.
+    // Catches bypasses like "echo foo; env", "true && env", "false || env",
+    // "echo hi | env", and newline-separated "echo hi\nenv".
+    let separator_patterns: &[&str] = &["; ", ";\t", ";\n", "&& ", "|| ", "| "];
+    let all_env_cmds: &[&str] = &["env", "printenv"];
+    for sep in separator_patterns {
+        for cmd in all_env_cmds {
+            let needle = format!("{sep}{cmd}");
+            if let Some(pos) = normalised.find(&needle) {
+                let after = pos + needle.len();
+                // Matches if the command is at end-of-string, followed by
+                // whitespace, or followed by a pipe/separator.
+                if after >= normalised.len()
+                    || normalised.as_bytes().get(after).is_some_and(|&b| {
+                        b == b' ' || b == b'\t' || b == b'|' || b == b';' || b == b'\n'
+                    })
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    // Also check for newline-then-command (no space after separator).
+    for cmd in all_env_cmds {
+        let nl_needle = format!("\n{cmd}");
+        if let Some(pos) = normalised.find(&nl_needle) {
+            let after = pos + nl_needle.len();
+            if after >= normalised.len()
+                || normalised.as_bytes().get(after).is_some_and(|&b| {
+                    b == b' ' || b == b'\t' || b == b'|' || b == b';' || b == b'\n'
+                })
+            {
+                return true;
+            }
+        }
+    }
+
     false
 }
 
@@ -951,6 +988,16 @@ mod tests {
     #[test]
     fn env_dump_rejects_normal_env_set() {
         assert!(!is_env_dump("env FOO=bar some_command"));
+    }
+
+    #[test]
+    fn env_dump_after_separator_detected() {
+        assert!(is_env_dump("echo foo; env"));
+        assert!(is_env_dump("true && env"));
+        assert!(is_env_dump("false || env"));
+        assert!(is_env_dump("echo hi\nenv"));
+        assert!(is_env_dump("echo foo; env | grep SECRET"));
+        assert!(is_env_dump("true && printenv"));
     }
 
     // ---- pre_write tests ----

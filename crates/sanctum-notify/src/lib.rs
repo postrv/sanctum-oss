@@ -71,11 +71,16 @@ pub fn notify_threat(event: &ThreatEvent) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let last = LAST_NOTIFICATION.load(Ordering::Relaxed);
+    let last = LAST_NOTIFICATION.load(Ordering::Acquire);
     if now_ms.saturating_sub(last) < MIN_NOTIFICATION_INTERVAL_MS {
         return;
     }
-    LAST_NOTIFICATION.store(now_ms, Ordering::Relaxed);
+    if LAST_NOTIFICATION
+        .compare_exchange(last, now_ms, Ordering::Release, Ordering::Relaxed)
+        .is_err()
+    {
+        return; // Another thread beat us
+    }
 
     let summary = match event.level {
         ThreatLevel::Critical => format!("Sanctum: CRITICAL - {}", category_display(event)),

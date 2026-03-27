@@ -380,6 +380,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn uppercase_authorization_header_redacted() {
+        let input = "AUTHORIZATION: Bearer abcdefghijklmnopqrstuvwxyz1234567890";
+        let (output, events) = redact_credentials(input);
+        assert!(!output.contains("abcdefghijklmnopqrstuvwxyz1234567890"));
+        assert!(output.contains("[REDACTED:Bearer Token:"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].credential_type, "Bearer Token");
+    }
+
+    #[test]
+    fn azure_sas_with_padding_fully_redacted() {
+        // The SAS token ends with base64 padding '=' which should be captured fully.
+        let input = "sig=dGVzdHNpZ25hdHVyZXZhbHVlMTIzNDU2Nzg5MA==";
+        let (output, events) = redact_credentials(input);
+        assert!(!output.contains("dGVzdHNpZ25hdHVyZXZhbHVl"));
+        assert!(output.contains("[REDACTED:Azure SAS Token:"));
+        assert_eq!(events.len(), 1);
+        // Verify the trailing padding was included in the match
+        assert!(!output.contains("=="));
+    }
+
     // ---- Edge case tests ----
 
     #[test]

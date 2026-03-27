@@ -24,6 +24,8 @@ const OPENAI_PRICING: &[ModelPrice] = &[
     ModelPrice { model_prefix: "gpt-4.1",      input_price: 200,  output_price: 800 },
     ModelPrice { model_prefix: "o3-mini",      input_price: 110,  output_price: 440 },
     ModelPrice { model_prefix: "o4-mini",      input_price: 110,  output_price: 440 },
+    ModelPrice { model_prefix: "o1-mini",      input_price: 110,  output_price: 440 },
+    ModelPrice { model_prefix: "o1-preview",   input_price: 1500, output_price: 6000 },
     ModelPrice { model_prefix: "o1",           input_price: 1500, output_price: 6000 },
 ];
 
@@ -188,6 +190,18 @@ mod tests {
     fn known_model_o4_mini() {
         let cost = calculate_cost(Provider::OpenAI, "o4-mini", 1_000_000, 1_000_000);
         assert_eq!(cost, 550); // 110 + 440
+    }
+
+    #[test]
+    fn o1_mini_uses_own_pricing() {
+        let cost = calculate_cost(Provider::OpenAI, "o1-mini", 1_000_000, 1_000_000);
+        assert_eq!(cost, 550); // 110 + 440, NOT 1500 + 6000
+    }
+
+    #[test]
+    fn o1_preview_uses_own_pricing() {
+        let cost = calculate_cost(Provider::OpenAI, "o1-preview", 1_000_000, 1_000_000);
+        assert_eq!(cost, 7500); // 1500 + 6000
     }
 
     #[test]

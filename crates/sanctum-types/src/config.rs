@@ -67,6 +67,15 @@ impl Default for SentinelConfig {
     }
 }
 
+/// Deserialise `alert_at_percent`, clamping to a maximum of 100.
+fn deserialize_alert_at_percent<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u8::deserialize(deserializer)?;
+    Ok(value.min(100))
+}
+
 /// Deserialise a poll interval, clamping to a minimum of 1 second.
 /// `tokio::time::interval(Duration::ZERO)` panics, so we must prevent
 /// a user from setting `poll_interval_secs = 0` in their config.
@@ -201,7 +210,8 @@ pub struct BudgetConfig {
     pub default_session: Option<BudgetAmount>,
     /// Default per-day budget (e.g., "$200").
     pub default_daily: Option<BudgetAmount>,
-    /// Percentage at which to send an alert notification.
+    /// Percentage at which to send an alert notification (clamped to 0..=100).
+    #[serde(deserialize_with = "deserialize_alert_at_percent")]
     pub alert_at_percent: u8,
     /// Per-provider budget and model restrictions.
     pub providers: std::collections::HashMap<String, ProviderBudgetConfig>,
@@ -534,6 +544,20 @@ mod tests {
         "#;
         let result: Result<SanctumConfig, _> = toml::from_str(toml_str);
         assert!(result.is_err(), "amount that overflows u64 cents should be rejected");
+    }
+
+    #[test]
+    fn alert_at_percent_clamped_to_100() {
+        let toml_str = r"
+            [budgets]
+            alert_at_percent = 200
+        ";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("config should parse");
+        assert_eq!(
+            config.budgets.alert_at_percent, 100,
+            "alert_at_percent > 100 should be clamped to 100"
+        );
     }
 
     #[test]

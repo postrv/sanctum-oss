@@ -231,7 +231,10 @@ impl BudgetTracker {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(json.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&tmp_path, path)?;
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
 
         #[cfg(unix)]
         {

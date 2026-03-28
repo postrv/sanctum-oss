@@ -10,11 +10,17 @@ use super::{AnomalyKind, ConnectionInfo, NetworkEvent};
 /// Check a connection for anomalies.
 ///
 /// Returns `Some(NetworkEvent)` if an anomaly is detected, `None` otherwise.
-/// Checks are ordered by priority: allowlist first (skip all checks),
-/// then blocklist, then port heuristics.
+///
+/// **Precedence**: Allowlisted destinations skip all anomaly checks
+/// including blocklist checks. To block an allowlisted destination,
+/// remove it from the allowlist first.
+///
+/// After the allowlist, checks are: blocklist, then port heuristics.
 #[must_use]
 pub fn check(conn: &ConnectionInfo, config: &NetworkConfig) -> Option<NetworkEvent> {
-    // If the destination is in the allowlist, skip all anomaly checks
+    // Allowlisted destinations skip all anomaly checks including blocklist
+    // checks. To block an allowlisted destination, remove it from the
+    // allowlist first.
     if is_destination_allowlisted(conn, config) {
         return None;
     }
@@ -34,15 +40,18 @@ pub fn check(conn: &ConnectionInfo, config: &NetworkConfig) -> Option<NetworkEve
 
 /// Check if a destination IP is in the configured allowlist.
 ///
-/// Allowlisted destinations bypass all anomaly detection, including
-/// unusual-port checks. Blocklist entries are NOT overridden by the
-/// allowlist -- the allowlist check runs first so blocklist never fires.
+/// Allowlisted destinations skip all anomaly checks including blocklist
+/// checks. To block an allowlisted destination, remove it from the
+/// allowlist first.
 fn is_destination_allowlisted(conn: &ConnectionInfo, config: &NetworkConfig) -> bool {
     let remote_ip = conn.remote_addr.ip().to_string();
     config.destination_allowlist.contains(&remote_ip)
 }
 
 /// Check if `remote_addr.ip()` matches any entry in `config.destination_blocklist`.
+///
+/// Uses exact IP string comparison only (no CIDR matching). Each blocklist
+/// entry must be a single IP address string, not a subnet.
 fn check_blocklist(conn: &ConnectionInfo, config: &NetworkConfig) -> Option<NetworkEvent> {
     let remote_ip = conn.remote_addr.ip().to_string();
 

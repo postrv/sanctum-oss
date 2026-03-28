@@ -31,7 +31,7 @@ See the [Getting Started guide](docs/GETTING_STARTED.md) for a complete 5-minute
 
 ### Phase 2: AI Firewall (current)
 
-- **Credential redaction** -- Scans outbound content against 22 credential patterns (OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, and more) before data leaves your machine.
+- **Credential redaction** -- Scans outbound content against 28 credential patterns (OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, Vercel, Docker Hub, Hashicorp Vault, and more) before data leaves your machine.
 - **Shannon entropy analysis** -- Detects high-entropy strings that look like randomly-generated secrets, even when they don't match a known pattern.
 - **Claude Code hook handlers** -- PreToolUse/PostToolUse hooks for pre-bash, pre-write, pre-read, and post-bash actions.
 - **MCP policy engine** -- Audits MCP tool calls with policy-based restrictions.
@@ -155,7 +155,7 @@ A workspace of 8 crates (~19,000 lines of Rust):
 | `sanctum-cli` | CLI interface (12 commands, clap) |
 | `sanctum-daemon` | Background daemon, IPC server (14 commands), event loop |
 | `sanctum-sentinel` | `.pth` monitoring, quarantine, credential watching, network anomaly detection |
-| `sanctum-firewall` | Credential redaction (22 patterns), entropy analysis, MCP policy engine |
+| `sanctum-firewall` | Credential redaction (28 patterns), entropy analysis, MCP policy engine |
 | `sanctum-budget` | Spend tracking, 3 provider parsers, budget enforcement |
 | `sanctum-proxy` | HTTP budget proxy foundation (provider identification) |
 | `sanctum-types` | Shared types, config schema (10 structs), threat model (6 categories) |
@@ -175,7 +175,7 @@ Key guarantees:
 - **Zero `unsafe` code** in the entire codebase (denied by workspace lint)
 - **No panics on any input** (`unwrap` and `expect` are denied by clippy)
 - **All dependencies audited** and version-pinned (193 deps, 0 known CVEs)
-- **704 tests**, 0 clippy warnings (pedantic + nursery)
+- **827 tests**, 0 clippy warnings (pedantic + nursery)
 - **8 Kani bounded model checking proofs** with CI enforcement
 - **2 fuzz targets** for security-critical parsers
 - **9 property-based tests** verifying core invariants

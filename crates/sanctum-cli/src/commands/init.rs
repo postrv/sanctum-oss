@@ -94,10 +94,24 @@ fn create_config(config_dir: &Path, config_path: &Path) -> Result<bool, CliError
         return Ok(false);
     }
 
-    fs::create_dir_all(config_dir)?;
+    // Create config directory with restricted permissions (0o700 on Unix).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(config_dir)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(config_dir)?;
+    }
 
     let default_config = r#"# Sanctum configuration
 # https://sanctum.dev/docs/config
+
+config_version = 1
 
 [sentinel]
 watch_pth = true
@@ -123,7 +137,18 @@ alert_at_percent = 75
         file.write_all(default_config.as_bytes())?;
         file.sync_all()?;
     }
-    fs::rename(&tmp_path, config_path)?;
+    if let Err(e) = fs::rename(&tmp_path, config_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+
+    // Set config file permissions to 0o600 on Unix (owner read/write only).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(config_path, fs::Permissions::from_mode(0o600))?;
+    }
+
     Ok(true)
 }
 

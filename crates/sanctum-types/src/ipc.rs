@@ -91,6 +91,7 @@ pub enum IpcResponse {
     /// List of unresolved threats.
     ThreatList {
         threats: Vec<ThreatListItem>,
+        truncated: bool,
     },
     /// Detailed information about a single threat.
     ThreatDetails {
@@ -327,14 +328,16 @@ mod tests {
                 source_path: "/tmp/evil.pth".to_string(),
                 action_taken: "Quarantined".to_string(),
             }],
+            truncated: false,
         };
         let json = serde_json::to_string(&resp).expect("serialise");
         let roundtripped: IpcResponse = serde_json::from_str(&json).expect("deserialise");
         match roundtripped {
-            IpcResponse::ThreatList { threats } => {
+            IpcResponse::ThreatList { threats, truncated } => {
                 assert_eq!(threats.len(), 1);
                 assert_eq!(threats[0].id, "abcdef012345");
                 assert_eq!(threats[0].category, "PthInjection");
+                assert!(!truncated);
             }
             other => panic!("expected ThreatList, got {other:?}"),
         }

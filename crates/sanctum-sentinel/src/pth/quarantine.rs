@@ -226,6 +226,19 @@ fn validate_restore_path(path: &Path) -> Result<(), SentinelError> {
     Ok(())
 }
 
+/// Compare two strings in constant time to prevent timing side-channel attacks.
+///
+/// Returns `true` if both strings have the same length and contain identical bytes.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 /// Process-wide counter to ensure quarantine ID uniqueness.
 static QUARANTINE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -381,12 +394,13 @@ impl Quarantine {
         let mut metadata_with_time = metadata.clone();
         metadata_with_time.quarantined_at = Utc::now();
 
-        // Write metadata alongside and fsync to ensure durability
+        // Write metadata atomically: write to temp file, sync, then rename
         let meta_path = quarantine_path.with_extension("json");
+        let meta_tmp = meta_path.with_extension("tmp");
         let meta_json = serde_json::to_string_pretty(&metadata_with_time)
             .unwrap_or_else(|_| "{}".to_string());
         {
-            let mut mfile = fs::File::create(&meta_path).map_err(|e| {
+            let mut mfile = fs::File::create(&meta_tmp).map_err(|e| {
                 SentinelError::Quarantine {
                     path: meta_path.clone(),
                     source: e,
@@ -405,23 +419,44 @@ impl Quarantine {
                 }
             })?;
         }
-
-        // Replace original with empty stub and fsync for crash durability
-        {
-            let stub = fs::File::create(path).map_err(|e| SentinelError::Quarantine {
-                path: path.to_path_buf(),
+        if let Err(e) = fs::rename(&meta_tmp, &meta_path) {
+            let _ = fs::remove_file(&meta_tmp);
+            return Err(SentinelError::Quarantine {
+                path: meta_path,
                 source: e,
-            })?;
-            stub.sync_all().map_err(|e| SentinelError::Quarantine {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
+            });
         }
 
-        // Preserve original permissions on the stub
-        #[cfg(unix)]
-        if let Some(perms) = original_permissions {
-            let _ = fs::set_permissions(path, perms);
+        // Replace original with empty stub — but skip if the path is now a
+        // symlink, which could be a symlink-swap attack.
+        let is_symlink = path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+
+        if is_symlink {
+            tracing::warn!(
+                path = %path.display(),
+                "original path is a symlink — skipping stub write to prevent symlink attack"
+            );
+        } else {
+            // Write empty stub and fsync for crash durability
+            {
+                let stub = fs::File::create(path).map_err(|e| SentinelError::Quarantine {
+                    path: path.to_path_buf(),
+                    source: e,
+                })?;
+                stub.sync_all().map_err(|e| SentinelError::Quarantine {
+                    path: path.to_path_buf(),
+                    source: e,
+                })?;
+            }
+
+            // Preserve original permissions on the stub
+            #[cfg(unix)]
+            if let Some(perms) = original_permissions {
+                let _ = fs::set_permissions(path, perms);
+            }
         }
 
         let quarantined_at = metadata_with_time.quarantined_at;
@@ -462,8 +497,9 @@ impl Quarantine {
         })?;
 
         // Verify content integrity: SHA-256 hash must match the stored metadata hash
+        // Uses constant-time comparison to prevent timing side-channels.
         let actual_hash = crate::pth::analyser::content_hash(&content);
-        if actual_hash != metadata.content_hash {
+        if !constant_time_eq(&actual_hash, &metadata.content_hash) {
             return Err(SentinelError::Quarantine {
                 path: quarantine_path,
                 source: std::io::Error::new(
@@ -479,13 +515,51 @@ impl Quarantine {
         // Validate the restore path before writing
         validate_restore_path(&metadata.original_path)?;
 
-        // Restore to original location
-        fs::write(&metadata.original_path, content).map_err(|e| {
-            SentinelError::Quarantine {
+        // Check if the restore target is a symlink (symlink-swap attack prevention)
+        let is_symlink = metadata
+            .original_path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_symlink {
+            return Err(SentinelError::Quarantine {
+                path: metadata.original_path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "restore target is a symlink — aborting to prevent symlink attack",
+                ),
+            });
+        }
+
+        // Atomic restore: write to temp file, sync, then rename into place
+        let restore_tmp = metadata.original_path.with_extension("sanctum_restore_tmp");
+        {
+            let mut file = fs::File::create(&restore_tmp).map_err(|e| {
+                SentinelError::Quarantine {
+                    path: metadata.original_path.clone(),
+                    source: e,
+                }
+            })?;
+            file.write_all(&content).map_err(|e| {
+                SentinelError::Quarantine {
+                    path: metadata.original_path.clone(),
+                    source: e,
+                }
+            })?;
+            file.sync_all().map_err(|e| {
+                SentinelError::Quarantine {
+                    path: metadata.original_path.clone(),
+                    source: e,
+                }
+            })?;
+        }
+        if let Err(e) = fs::rename(&restore_tmp, &metadata.original_path) {
+            let _ = fs::remove_file(&restore_tmp);
+            return Err(SentinelError::Quarantine {
                 path: metadata.original_path,
                 source: e,
-            }
-        })?;
+            });
+        }
 
         // Clean up quarantine files
         let _ = fs::remove_file(&quarantine_path);
@@ -548,22 +622,38 @@ impl Quarantine {
         for entry in dir_entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Ok(meta_str) = fs::read_to_string(&path) {
-                    if let Ok(metadata) =
-                        serde_json::from_str::<QuarantineMetadata>(&meta_str)
-                    {
-                        let id = path
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        let quarantined_at = metadata.quarantined_at;
-                        entries.push(QuarantineEntry {
-                            id: id.clone(),
-                            quarantine_path: self.quarantine_dir.join(&id),
-                            metadata,
-                            quarantined_at,
-                            state: QuarantineState::Active,
-                        });
+                match fs::read_to_string(&path) {
+                    Ok(meta_str) => {
+                        match serde_json::from_str::<QuarantineMetadata>(&meta_str) {
+                            Ok(metadata) => {
+                                let id = path
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                let quarantined_at = metadata.quarantined_at;
+                                entries.push(QuarantineEntry {
+                                    id: id.clone(),
+                                    quarantine_path: self.quarantine_dir.join(&id),
+                                    metadata,
+                                    quarantined_at,
+                                    state: QuarantineState::Active,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    %e,
+                                    "corrupted quarantine metadata — entry will not appear in list"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %e,
+                            "failed to read quarantine metadata"
+                        );
                     }
                 }
             }
@@ -1111,6 +1201,103 @@ mod tests {
             err_msg.contains("tampered"),
             "error should mention tampering, got: {err_msg}"
         );
+    }
+
+    // ── M1 test: list logs warning for corrupted metadata ────────────────
+
+    #[test]
+    fn list_skips_corrupted_metadata_and_returns_valid_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let q_dir = dir.path().join("quarantine");
+        fs::create_dir_all(&q_dir).expect("mkdir");
+
+        // Create a valid quarantine entry
+        let pth_path = dir.path().join("valid.pth");
+        fs::write(&pth_path, "safe content").expect("write");
+        let q = Quarantine::new(q_dir.clone());
+        q.quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine");
+
+        // Write a corrupted metadata file alongside (invalid JSON)
+        let corrupt_meta = q_dir.join("corrupted-entry.json");
+        fs::write(&corrupt_meta, "this is not valid json {{{").expect("write corrupt");
+
+        // List should succeed and return only the valid entry, skipping the corrupted one
+        let entries = q.list().expect("list should succeed");
+        assert_eq!(entries.len(), 1, "only the valid entry should appear");
+    }
+
+    // ── M6 test: symlink detection ───────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn quarantine_skips_stub_write_when_path_is_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_file = dir.path().join("real.pth");
+        let link_path = dir.path().join("link.pth");
+        fs::write(&real_file, "payload").expect("write");
+
+        // Create a symlink pointing to real_file
+        std::os::unix::fs::symlink(&real_file, &link_path).expect("symlink");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        // Quarantine the symlink path — should succeed (file content is read
+        // via the symlink) but the stub write should be skipped.
+        let result = q.quarantine_file(&link_path, &default_meta(&link_path));
+        assert!(result.is_ok(), "quarantine should succeed for symlink: {result:?}");
+
+        // The symlink should still exist and still be a symlink (not overwritten)
+        assert!(link_path.symlink_metadata().expect("meta").file_type().is_symlink());
+        // The real file should not have been truncated
+        let real_content = fs::read_to_string(&real_file).expect("read");
+        assert_eq!(real_content, "payload", "real file should not be modified");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_symlink_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_file = dir.path().join("real.pth");
+        let content = "safe content";
+        fs::write(&real_file, content).expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&real_file, &meta_with_hash(&real_file, content.as_bytes()))
+            .expect("quarantine");
+
+        // Replace the original path with a symlink (simulating a symlink-swap attack)
+        let _ = fs::remove_file(&real_file);
+        let target = dir.path().join("attack_target");
+        fs::write(&target, "").expect("create target");
+        std::os::unix::fs::symlink(&target, &real_file).expect("symlink");
+
+        // Restore should fail because the target is now a symlink
+        let result = q.restore(&entry.id);
+        assert!(result.is_err(), "restore should reject symlink target");
+    }
+
+    // ── M7 test: constant-time comparison ────────────────────────────────
+
+    #[test]
+    fn constant_time_eq_matches_equal_strings() {
+        assert!(constant_time_eq("abc", "abc"));
+        assert!(constant_time_eq("", ""));
+        assert!(constant_time_eq("sha256:deadbeef", "sha256:deadbeef"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_strings() {
+        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "ab"));
+        assert!(!constant_time_eq("", "a"));
+        assert!(!constant_time_eq("sha256:aaaa", "sha256:bbbb"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_lengths() {
+        assert!(!constant_time_eq("short", "longer_string"));
+        assert!(!constant_time_eq("longer_string", "short"));
     }
 }
 

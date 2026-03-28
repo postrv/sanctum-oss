@@ -72,6 +72,12 @@ static_regex!(PYPI_TOKEN_RE, r"\bpypi-[A-Za-z0-9_\-]{16,}");
 static_regex!(DIGITALOCEAN_RE, r"\bdop_v1_[a-f0-9]{64}\b");
 static_regex!(DATADOG_RE, r"\bdd(?:api|app)_[a-z0-9]{32,}\b");
 static_regex!(AZURE_SAS_RE, r"\bsig=[A-Za-z0-9%+/=]{20,}");
+static_regex!(VERCEL_RE, r"\bvercel_[a-zA-Z0-9]{24,}\b");
+static_regex!(DOCKER_PAT_RE, r"\bdckr_pat_[a-zA-Z0-9\-_]{24,}");
+static_regex!(VAULT_TOKEN_RE, r"\bhvs\.[a-zA-Z0-9_\-]{24,}");
+static_regex!(HF_TOKEN_RE, r"\bhf_[a-zA-Z0-9]{34,}\b");
+static_regex!(SHOPIFY_RE, r"\bshp(?:at|ss|pa|ca)_[a-fA-F0-9]{32,}\b");
+static_regex!(LINEAR_RE, r"\blin_api_[a-zA-Z0-9]{40,}\b");
 
 /// All registered credential patterns.
 ///
@@ -165,6 +171,30 @@ pub static PATTERNS: &[CredentialPattern] = &[
     CredentialPattern {
         name: "Azure SAS Token",
         regex: &AZURE_SAS_RE,
+    },
+    CredentialPattern {
+        name: "Vercel Token",
+        regex: &VERCEL_RE,
+    },
+    CredentialPattern {
+        name: "Docker Hub PAT",
+        regex: &DOCKER_PAT_RE,
+    },
+    CredentialPattern {
+        name: "Hashicorp Vault Token",
+        regex: &VAULT_TOKEN_RE,
+    },
+    CredentialPattern {
+        name: "Hugging Face Token",
+        regex: &HF_TOKEN_RE,
+    },
+    CredentialPattern {
+        name: "Shopify Token",
+        regex: &SHOPIFY_RE,
+    },
+    CredentialPattern {
+        name: "Linear API Key",
+        regex: &LINEAR_RE,
     },
 ];
 
@@ -637,7 +667,7 @@ mod tests {
 
     #[test]
     fn pattern_count_is_correct() {
-        assert_eq!(PATTERNS.len(), 22, "Expected 22 credential patterns");
+        assert_eq!(PATTERNS.len(), 28, "Expected 28 credential patterns");
     }
 
     // ---- Word-boundary tests: prevent substring false positives ----
@@ -795,5 +825,137 @@ mod tests {
     fn stripe_restricted_test_key_detected() {
         let key = format!("rk_test_{}", "c".repeat(24));
         assert!(STRIPE_SECRET_RE.is_match(&key));
+    }
+
+    // ---- New patterns: Vercel Token ----
+
+    #[test]
+    fn vercel_token_matches_valid_token() {
+        let key = format!("vercel_{}", "a".repeat(24));
+        assert!(VERCEL_RE.is_match(&key));
+    }
+
+    #[test]
+    fn vercel_token_rejects_short_token() {
+        let key = format!("vercel_{}", "a".repeat(10));
+        assert!(!VERCEL_RE.is_match(&key));
+    }
+
+    #[test]
+    fn vercel_token_rejects_normal_text() {
+        assert!(!VERCEL_RE.is_match("vercel deploy --prod"));
+    }
+
+    // ---- New patterns: Docker Hub PAT ----
+
+    #[test]
+    fn docker_pat_matches_valid_token() {
+        let key = format!("dckr_pat_{}", "a".repeat(24));
+        assert!(DOCKER_PAT_RE.is_match(&key));
+    }
+
+    #[test]
+    fn docker_pat_rejects_short_token() {
+        let key = format!("dckr_pat_{}", "a".repeat(10));
+        assert!(!DOCKER_PAT_RE.is_match(&key));
+    }
+
+    #[test]
+    fn docker_pat_rejects_normal_text() {
+        assert!(!DOCKER_PAT_RE.is_match("docker pull nginx"));
+    }
+
+    // ---- New patterns: Hashicorp Vault Token ----
+
+    #[test]
+    fn vault_token_matches_valid_token() {
+        let key = format!("hvs.{}", "a".repeat(24));
+        assert!(VAULT_TOKEN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn vault_token_rejects_short_token() {
+        let key = format!("hvs.{}", "a".repeat(10));
+        assert!(!VAULT_TOKEN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn vault_token_rejects_normal_text() {
+        assert!(!VAULT_TOKEN_RE.is_match("vault secrets list"));
+    }
+
+    // ---- New patterns: Hugging Face Token ----
+
+    #[test]
+    fn hf_token_matches_valid_token() {
+        let key = format!("hf_{}", "a".repeat(34));
+        assert!(HF_TOKEN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn hf_token_rejects_short_token() {
+        let key = format!("hf_{}", "a".repeat(10));
+        assert!(!HF_TOKEN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn hf_token_rejects_normal_text() {
+        assert!(!HF_TOKEN_RE.is_match("huggingface model download"));
+    }
+
+    // ---- New patterns: Shopify Token ----
+
+    #[test]
+    fn shopify_token_matches_valid_access_token() {
+        let key = format!("shpat_{}", "a".repeat(32));
+        assert!(SHOPIFY_RE.is_match(&key));
+    }
+
+    #[test]
+    fn shopify_token_matches_valid_shared_secret() {
+        let key = format!("shpss_{}", "b".repeat(32));
+        assert!(SHOPIFY_RE.is_match(&key));
+    }
+
+    #[test]
+    fn shopify_token_matches_valid_private_app() {
+        let key = format!("shppa_{}", "c".repeat(32));
+        assert!(SHOPIFY_RE.is_match(&key));
+    }
+
+    #[test]
+    fn shopify_token_matches_valid_custom_app() {
+        let key = format!("shpca_{}", "d".repeat(32));
+        assert!(SHOPIFY_RE.is_match(&key));
+    }
+
+    #[test]
+    fn shopify_token_rejects_short_token() {
+        let key = format!("shpat_{}", "a".repeat(10));
+        assert!(!SHOPIFY_RE.is_match(&key));
+    }
+
+    #[test]
+    fn shopify_token_rejects_normal_text() {
+        assert!(!SHOPIFY_RE.is_match("shopify store setup"));
+    }
+
+    // ---- New patterns: Linear API Key ----
+
+    #[test]
+    fn linear_api_key_matches_valid_key() {
+        let key = format!("lin_api_{}", "a".repeat(40));
+        assert!(LINEAR_RE.is_match(&key));
+    }
+
+    #[test]
+    fn linear_api_key_rejects_short_key() {
+        let key = format!("lin_api_{}", "a".repeat(10));
+        assert!(!LINEAR_RE.is_match(&key));
+    }
+
+    #[test]
+    fn linear_api_key_rejects_normal_text() {
+        assert!(!LINEAR_RE.is_match("linear issue tracking"));
     }
 }

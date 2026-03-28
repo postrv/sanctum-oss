@@ -10,7 +10,97 @@
 
 use sanctum_firewall::hooks::claude;
 use sanctum_firewall::hooks::protocol::{HookDecision, HookInput, HookOutput};
+use sanctum_types::config::AiFirewallConfig;
 use sanctum_types::errors::CliError;
+
+/// Return an `AiFirewallConfig` with all protections enabled.
+///
+/// Used as a fail-closed fallback when a config file exists but cannot be
+/// read or parsed.
+const fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
+    AiFirewallConfig {
+        redact_credentials: true,
+        claude_hooks: true,
+        mcp_audit: true,
+        mcp_rules: Vec::new(),
+    }
+}
+
+/// Enforce a security floor on project-local AI firewall configs.
+///
+/// Project-local configs must not disable `claude_hooks` or
+/// `redact_credentials`. If they attempt to, the values are forced back
+/// to `true` and a warning is emitted.
+fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
+    if !cfg.claude_hooks {
+        tracing::warn!(
+            "Project-local config cannot disable claude_hooks \u{2014} using global default"
+        );
+        cfg.claude_hooks = true;
+    }
+    if !cfg.redact_credentials {
+        tracing::warn!(
+            "Project-local config cannot disable redact_credentials \u{2014} using global default"
+        );
+        cfg.redact_credentials = true;
+    }
+}
+
+/// Load AI firewall config from a single config file path.
+///
+/// If the file cannot be read or parsed, returns restrictive defaults
+/// (fail-closed). If `is_local` is `true`, enforces the security floor.
+fn load_ai_config_from_path(p: &std::path::Path, is_local: bool) -> AiFirewallConfig {
+    let mut cfg = match std::fs::read_to_string(p) {
+        Ok(s) => match toml::from_str::<sanctum_types::config::SanctumConfig>(&s) {
+            Ok(c) => c.ai_firewall,
+            Err(e) => {
+                tracing::warn!(
+                    path = %p.display(),
+                    error = %e,
+                    "config parse failed \u{2014} using restrictive defaults"
+                );
+                restrictive_ai_firewall_defaults()
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                path = %p.display(),
+                error = %e,
+                "config read failed \u{2014} using restrictive defaults"
+            );
+            restrictive_ai_firewall_defaults()
+        }
+    };
+    if is_local {
+        enforce_ai_firewall_security_floor(&mut cfg);
+    }
+    cfg
+}
+
+/// Locate and load the AI firewall config.
+///
+/// Tries project-local `.sanctum/config.toml`, then the global config.
+/// Returns `None` only when no config file exists at all.
+fn load_ai_firewall_config() -> Option<AiFirewallConfig> {
+    let local = std::path::PathBuf::from(".sanctum/config.toml");
+    if local.exists() {
+        tracing::warn!(
+            path = %local.display(),
+            "Loading project-local config from {} \u{2014} verify this file is trusted",
+            local.display()
+        );
+        return Some(load_ai_config_from_path(&local, true));
+    }
+
+    let paths = sanctum_types::paths::WellKnownPaths::default();
+    let global = paths.config_dir.join("config.toml");
+    if global.exists() {
+        return Some(load_ai_config_from_path(&global, false));
+    }
+
+    None
+}
 
 /// Run a hook action.
 ///
@@ -37,49 +127,9 @@ pub fn run(action: &str, verbose: bool) -> Result<(), CliError> {
         .map_err(|e| CliError::InvalidArgs(format!("invalid hook input JSON: {e}")))?;
 
     // Load config to respect ai_firewall settings.
-    // Try local (.sanctum/config.toml) then global config, falling back to None.
-    let (ai_config, is_project_local) = {
-        let local = std::path::PathBuf::from(".sanctum/config.toml");
-        let (config_path, is_local) = if local.exists() {
-            tracing::warn!(
-                path = %local.display(),
-                "Loading project-local config from {} \u{2014} verify this file is trusted",
-                local.display()
-            );
-            (Some(local), true)
-        } else {
-            let paths = sanctum_types::paths::WellKnownPaths::default();
-            let global = paths.config_dir.join("config.toml");
-            if global.exists() {
-                (Some(global), false)
-            } else {
-                (None, false)
-            }
-        };
-        let cfg = config_path.and_then(|p| {
-            std::fs::read_to_string(&p)
-                .ok()
-                .and_then(|s| toml::from_str::<sanctum_types::config::SanctumConfig>(&s).ok())
-                .map(|c| c.ai_firewall)
-        });
-        (cfg, is_local)
-    };
-
-    // Warn if project-local config disables security features
-    if is_project_local {
-        if let Some(ref cfg) = ai_config {
-            if !cfg.redact_credentials {
-                tracing::warn!(
-                    "Project-local config disables credential redaction (redact_credentials = false)"
-                );
-            }
-            if !cfg.claude_hooks {
-                tracing::warn!(
-                    "Project-local config disables Claude hooks (claude_hooks = false)"
-                );
-            }
-        }
-    }
+    // Fail-closed: if a config file exists but cannot be read or parsed,
+    // use restrictive defaults instead of silently disabling protections.
+    let ai_config = load_ai_firewall_config();
 
     input.config.clone_from(&ai_config);
     tracing::debug!(config_loaded = ai_config.is_some(), "firewall config");
@@ -130,7 +180,9 @@ pub fn run(action: &str, verbose: bool) -> Result<(), CliError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
+    use super::*;
     use sanctum_firewall::hooks::claude;
     use sanctum_firewall::hooks::protocol::{HookDecision, HookInput};
     use serde_json::json;
@@ -208,5 +260,52 @@ mod tests {
         );
         let output = claude::pre_read(&input);
         assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn restrictive_defaults_have_all_protections_enabled() {
+        let defaults = restrictive_ai_firewall_defaults();
+        assert!(defaults.claude_hooks);
+        assert!(defaults.redact_credentials);
+        assert!(defaults.mcp_audit);
+    }
+
+    #[test]
+    fn security_floor_forces_claude_hooks_on() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: false,
+            redact_credentials: true,
+            mcp_audit: true,
+            mcp_rules: Vec::new(),
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!(cfg.claude_hooks);
+    }
+
+    #[test]
+    fn security_floor_forces_redact_credentials_on() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: false,
+            mcp_audit: true,
+            mcp_rules: Vec::new(),
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!(cfg.redact_credentials);
+    }
+
+    #[test]
+    fn security_floor_preserves_already_enabled() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: false,
+            mcp_rules: Vec::new(),
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        // mcp_audit is not enforced by the floor, so it stays false.
+        assert!(!cfg.mcp_audit);
+        assert!(cfg.claude_hooks);
+        assert!(cfg.redact_credentials);
     }
 }

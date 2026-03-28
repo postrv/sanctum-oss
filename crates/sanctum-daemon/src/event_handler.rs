@@ -343,6 +343,7 @@ fn handle_warning_verdict(
 }
 
 /// Handle a critical .pth file verdict by quarantining, alerting, or logging based on config.
+#[allow(clippy::too_many_lines)]
 fn handle_critical_verdict(
     ctx: &VerdictContext<'_>,
     analysis: &FileAnalysis,
@@ -373,35 +374,44 @@ fn handle_critical_verdict(
                 quarantined_at: chrono::Utc::now(),
             };
 
-            match quarantine.quarantine_file(&ctx.event.path, &metadata) {
-                Ok(entry) => {
-                    tracing::info!(
-                        id = entry.id,
-                        path = %ctx.event.path.display(),
-                        "file quarantined"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        path = %ctx.event.path.display(),
-                        %e,
-                        "failed to quarantine file"
-                    );
-                }
-            }
+            let (action_taken, description) =
+                match quarantine.quarantine_file(&ctx.event.path, &metadata) {
+                    Ok(entry) => {
+                        tracing::info!(
+                            id = entry.id,
+                            path = %ctx.event.path.display(),
+                            "file quarantined"
+                        );
+                        (
+                            sanctum_types::threat::Action::Quarantined,
+                            format!("Malicious .pth file quarantined: {}", ctx.event.path.display()),
+                        )
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            path = %ctx.event.path.display(),
+                            %e,
+                            "failed to quarantine file"
+                        );
+                        (
+                            sanctum_types::threat::Action::Logged,
+                            format!(
+                                "Malicious .pth file detected (quarantine failed: {e}): {}",
+                                ctx.event.path.display()
+                            ),
+                        )
+                    }
+                };
 
             let threat_event = sanctum_types::threat::ThreatEvent {
                 timestamp: chrono::Utc::now(),
                 level: sanctum_types::threat::ThreatLevel::Critical,
                 category: sanctum_types::threat::ThreatCategory::PthInjection,
-                description: format!(
-                    "Malicious .pth file quarantined: {}",
-                    ctx.event.path.display()
-                ),
+                description,
                 source_path: ctx.event.path.clone(),
                 creator_pid: ctx.creator_pid,
                 creator_exe: ctx.creator_exe.clone(),
-                action_taken: sanctum_types::threat::Action::Quarantined,
+                action_taken,
             };
             sanctum_notify::notify_threat(&threat_event);
             audit::append_audit_event(&threat_event, ctx.audit_path);
@@ -635,6 +645,96 @@ mod tests {
         assert!(
             audit_contents.contains("Logged"),
             "audit log should record action as Logged, got: {audit_contents}"
+        );
+    }
+
+    // ============================================================
+    // H3: Quarantine failure records Action::Logged, not Action::Quarantined
+    // ============================================================
+
+    #[test]
+    fn quarantine_failure_records_logged_action() {
+        use sanctum_types::config::PthResponse;
+
+        let Some((dir, pth_path)) = create_temp_file(
+            "evil.pth",
+            b"import base64;exec(base64.b64decode('...'))",
+        ) else {
+            return;
+        };
+        let audit_path = dir.path().join("audit.log");
+
+        let mut config = SanctumConfig::default();
+        config.sentinel.pth_response = PthResponse::Quarantine;
+
+        // Use a quarantine directory that is not writable (nonexistent parent
+        // with a long path that cannot be created to provoke failure).
+        let quarantine = sanctum_sentinel::pth::quarantine::Quarantine::new(
+            std::path::PathBuf::from("/dev/null/impossible/quarantine"),
+        );
+
+        let event = WatchEvent {
+            path: pth_path,
+            kind: sanctum_sentinel::watcher::WatchEventKind::Created,
+        };
+
+        handle_watch_event(&event, &quarantine, &config, &audit_path);
+
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert!(
+            audit_contents.contains("PthInjection"),
+            "audit log should contain a PthInjection entry, got: {audit_contents}"
+        );
+        // When quarantine fails, the action should be Logged, NOT Quarantined
+        assert!(
+            audit_contents.contains("Logged"),
+            "audit log should record action as Logged on quarantine failure, got: {audit_contents}"
+        );
+        assert!(
+            !audit_contents.contains("Quarantined"),
+            "audit log must NOT record action as Quarantined on quarantine failure, got: {audit_contents}"
+        );
+        assert!(
+            audit_contents.contains("quarantine failed"),
+            "audit log description should mention quarantine failure, got: {audit_contents}"
+        );
+    }
+
+    // ============================================================
+    // H3: Successful quarantine records Action::Quarantined
+    // ============================================================
+
+    #[test]
+    fn quarantine_success_records_quarantined_action() {
+        use sanctum_types::config::PthResponse;
+
+        let Some((dir, pth_path)) = create_temp_file(
+            "evil.pth",
+            b"import base64;exec(base64.b64decode('...'))",
+        ) else {
+            return;
+        };
+        let audit_path = dir.path().join("audit.log");
+
+        let mut config = SanctumConfig::default();
+        config.sentinel.pth_response = PthResponse::Quarantine;
+
+        // Use a valid, writable quarantine directory
+        let quarantine = sanctum_sentinel::pth::quarantine::Quarantine::new(
+            dir.path().join("quarantine"),
+        );
+
+        let event = WatchEvent {
+            path: pth_path,
+            kind: sanctum_sentinel::watcher::WatchEventKind::Created,
+        };
+
+        handle_watch_event(&event, &quarantine, &config, &audit_path);
+
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert!(
+            audit_contents.contains("Quarantined"),
+            "audit log should record action as Quarantined on success, got: {audit_contents}"
         );
     }
 }

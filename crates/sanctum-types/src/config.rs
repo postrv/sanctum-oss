@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 #[derive(Default)]
 pub struct SanctumConfig {
+    /// Configuration file version for forward compatibility.
+    #[serde(default)]
+    pub config_version: Option<u32>,
     /// Sentinel module configuration.
     pub sentinel: SentinelConfig,
     /// AI Firewall configuration.
@@ -390,6 +393,22 @@ mod tests {
         assert!(config.sentinel.watch_pth);
         assert!(!config.sentinel.watch_network);
         assert_eq!(config.budgets.alert_at_percent, 75);
+    }
+
+    #[test]
+    fn config_version_defaults_to_none() {
+        let toml_str = "";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("empty config should use defaults");
+        assert!(config.config_version.is_none());
+    }
+
+    #[test]
+    fn config_version_parses_from_toml() {
+        let toml_str = "config_version = 1\n";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("config_version should parse");
+        assert_eq!(config.config_version, Some(1));
     }
 
     #[test]

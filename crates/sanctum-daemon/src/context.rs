@@ -34,6 +34,9 @@ pub struct EventLoopContext<'a> {
     pub sighup: &'a mut tokio::signal::unix::Signal,
     pub audit_path: &'a Path,
     pub ipc_semaphore: &'a Arc<Semaphore>,
+    pub budget_save_interval: &'a mut tokio::time::Interval,
+    pub data_dir: &'a Path,
+    pub budget_state_path: &'a Path,
 }
 
 /// Bundles the common parameters shared across verdict handlers.

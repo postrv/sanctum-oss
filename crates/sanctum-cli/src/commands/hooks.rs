@@ -104,7 +104,10 @@ fn install_claude_hooks() -> Result<(), CliError> {
         file.write_all(json_str.as_bytes())?;
         file.sync_all()?;
     }
-    fs::rename(&tmp_path, &settings_path)?;
+    if let Err(e) = fs::rename(&tmp_path, &settings_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
 
     #[allow(clippy::print_stdout)]
     {
@@ -154,7 +157,10 @@ fn remove_claude_hooks() -> Result<(), CliError> {
         file.write_all(json_str.as_bytes())?;
         file.sync_all()?;
     }
-    fs::rename(&tmp_path, &settings_path)?;
+    if let Err(e) = fs::rename(&tmp_path, &settings_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
 
     #[allow(clippy::print_stdout)]
     {

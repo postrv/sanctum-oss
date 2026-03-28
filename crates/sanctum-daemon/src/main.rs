@@ -81,16 +81,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Load configuration
-    let config = match config::find_config_path() {
-        Some(path) => match config::load_config(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(%e, "failed to load config");
-                return ExitCode::FAILURE;
-            }
-        },
-        None => SanctumConfig::default(),
+    // Load configuration with security floor enforcement
+    let config = match config::load_and_resolve() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(%e, "failed to load config");
+            return ExitCode::FAILURE;
+        }
     };
     let shared_config = Arc::new(RwLock::new(config));
 
@@ -201,6 +198,11 @@ async fn run_daemon(
 
     let ipc_semaphore = Arc::new(Semaphore::new(MAX_IPC_CONNECTIONS));
 
+    // Periodic budget state persistence (every 5 minutes) to limit data loss on crash
+    let mut budget_save_interval = tokio::time::interval(Duration::from_secs(300));
+    // The first tick completes immediately; consume it so we don't save right at startup.
+    budget_save_interval.tick().await;
+
     tracing::info!("daemon ready, entering main event loop");
 
     let mut ctx = EventLoopContext {
@@ -220,6 +222,9 @@ async fn run_daemon(
         sighup: &mut sighup,
         audit_path: &audit_path,
         ipc_semaphore: &ipc_semaphore,
+        budget_save_interval: &mut budget_save_interval,
+        data_dir: &paths.data_dir,
+        budget_state_path: &budget_state_path,
     };
 
     run_event_loop(&mut ctx).await;
@@ -353,22 +358,31 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                 }
             }
 
-            // Handle filesystem events
+            // Handle filesystem events (dispatched to blocking thread to avoid stalling the loop)
             Some(event) = ctx.watch_rx.recv() => {
                 let config_snapshot = ctx.shared_config.read().await.clone();
-                let quarantine_guard = ctx.shared_quarantine.lock().await;
-                event_handler::handle_watch_event(&event, &quarantine_guard, &config_snapshot, ctx.audit_path);
-                drop(quarantine_guard);
+                let quarantine = Arc::clone(ctx.shared_quarantine);
+                let audit_path = ctx.audit_path.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    let quarantine_guard = quarantine.blocking_lock();
+                    event_handler::handle_watch_event(&event, &quarantine_guard, &config_snapshot, &audit_path);
+                });
             }
 
-            // Handle credential file events
+            // Handle credential file events (dispatched to blocking thread for audit I/O)
             Some(cred_event) = ctx.cred_rx.recv() => {
-                event_handler::handle_credential_event(&cred_event, ctx.audit_path);
+                let audit_path = ctx.audit_path.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    event_handler::handle_credential_event(&cred_event, &audit_path);
+                });
             }
 
-            // Handle network anomaly events
+            // Handle network anomaly events (dispatched to blocking thread for audit I/O)
             Some(net_event) = ctx.net_rx.recv() => {
-                event_handler::handle_network_event(&net_event, ctx.audit_path);
+                let audit_path = ctx.audit_path.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    event_handler::handle_network_event(&net_event, &audit_path);
+                });
             }
 
             // Handle SIGTERM (graceful shutdown)
@@ -394,6 +408,11 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                 tracing::info!("received shutdown command via IPC, shutting down");
                 break;
             }
+
+            // Periodic budget state persistence (every 5 minutes)
+            _ = ctx.budget_save_interval.tick() => {
+                save_budget_state(ctx.shared_budget, ctx.data_dir, ctx.budget_state_path).await;
+            }
         }
     }
 }
@@ -416,7 +435,7 @@ async fn save_budget_state(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // handler needs all shared state references
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // handler needs all shared state references
 async fn handle_ipc_command(
     conn: &mut ipc::IpcConnection,
     uptime: u64,
@@ -501,12 +520,30 @@ async fn handle_ipc_command(
             }
         }
         IpcCommand::GetThreatDetails { id } => {
-            let quarantine = shared_quarantine.lock().await;
-            handle_get_threat_details(&paths, &quarantine, &id)
+            let paths_clone = paths.clone();
+            let quarantine_arc = Arc::clone(&shared_quarantine);
+            match tokio::task::spawn_blocking(move || {
+                let quarantine = quarantine_arc.blocking_lock();
+                handle_get_threat_details(&paths_clone, &quarantine, &id)
+            }).await {
+                Ok(resp) => resp,
+                Err(e) => IpcResponse::Error {
+                    message: format!("task failed: {e}"),
+                },
+            }
         }
         IpcCommand::ResolveThreat { id, action, note } => {
-            let quarantine = shared_quarantine.lock().await;
-            handle_resolve_threat(&paths, &quarantine, &id, &action, &note)
+            let paths_clone = paths.clone();
+            let quarantine_arc = Arc::clone(&shared_quarantine);
+            match tokio::task::spawn_blocking(move || {
+                let quarantine = quarantine_arc.blocking_lock();
+                handle_resolve_threat(&paths_clone, &quarantine, &id, &action, &note)
+            }).await {
+                Ok(resp) => resp,
+                Err(e) => IpcResponse::Error {
+                    message: format!("task failed: {e}"),
+                },
+            }
         }
     };
 
@@ -743,13 +780,15 @@ fn read_resolved_ids(paths: &WellKnownPaths, max_entries: usize) -> std::collect
 }
 
 /// Append a resolution entry to the resolution log.
+///
+/// Returns an error description if the write fails so the caller can
+/// propagate it to the IPC client.
 fn append_resolution(
     paths: &WellKnownPaths,
     resolution: &sanctum_types::threat::ThreatResolution,
-) {
-    if let Err(e) = append_resolution_inner(paths, resolution) {
-        tracing::warn!("failed to write resolution log entry: {e}");
-    }
+) -> Result<(), String> {
+    append_resolution_inner(paths, resolution)
+        .map_err(|e| format!("failed to write resolution log entry: {e}"))
 }
 
 fn append_resolution_inner(
@@ -783,6 +822,11 @@ fn append_resolution_inner(
     file.sync_all()?;
     Ok(())
 }
+
+/// Maximum number of threat items returned in a single `ListThreats` response.
+///
+/// Prevents exceeding the 64 KB IPC frame limit when the audit log is large.
+const MAX_THREAT_LIST_ITEMS: usize = 500;
 
 /// List unresolved threats, optionally filtered by category and level.
 fn handle_list_threats(
@@ -831,7 +875,14 @@ fn handle_list_threats(
         })
         .collect();
 
-    IpcResponse::ThreatList { threats }
+    let truncated = threats.len() > MAX_THREAT_LIST_ITEMS;
+    let threats = if truncated {
+        threats.into_iter().take(MAX_THREAT_LIST_ITEMS).collect()
+    } else {
+        threats
+    };
+
+    IpcResponse::ThreatList { threats, truncated }
 }
 
 /// Get detailed information about a specific threat.
@@ -938,7 +989,9 @@ fn handle_resolve_threat(
         note: sanitised_note,
     };
 
-    append_resolution(paths, &resolution);
+    if let Err(e) = append_resolution(paths, &resolution) {
+        return IpcResponse::Error { message: e };
+    }
 
     IpcResponse::Ok {
         message: format!("threat {id} resolved with action: {action}"),
@@ -948,20 +1001,14 @@ fn handle_resolve_threat(
 /// Reload configuration from disk into the shared config.
 /// Best-effort: logs errors but does not propagate them.
 async fn reload_shared_config(shared_config: &Arc<RwLock<SanctumConfig>>) {
-    match config::find_config_path() {
-        Some(path) => {
-            match config::load_config(&path) {
-                Ok(new_config) => {
-                    *shared_config.write().await = new_config;
-                    tracing::info!("configuration reloaded");
-                }
-                Err(e) => {
-                    tracing::error!(%e, "failed to reload config");
-                }
-            }
+    match config::load_and_resolve() {
+        Ok(new_config) => {
+            *shared_config.write().await = new_config;
+            tracing::info!("configuration reloaded");
+            tracing::info!("note: watcher configuration changes (watch_pth, watch_credentials, watch_network) require a daemon restart to take effect");
         }
-        None => {
-            tracing::info!("no config file found, keeping current config");
+        Err(e) => {
+            tracing::error!(%e, "failed to reload config");
         }
     }
 }
@@ -1031,7 +1078,7 @@ fn handle_reload(paths: &WellKnownPaths) -> ExitCode {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use sanctum_types::threat::{Action, ThreatCategory, ThreatEvent, ThreatLevel};
@@ -1158,5 +1205,38 @@ mod tests {
         drop(p1);
         let p4 = sem.try_acquire_owned();
         assert!(p4.is_ok(), "permit should be available after drop");
+    }
+
+    // ============================================================
+    // H4: ListThreats truncation
+    // ============================================================
+
+    #[test]
+    fn list_threats_truncates_at_max() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Write more events than MAX_THREAT_LIST_ITEMS (500)
+        let paths = write_events_to_audit_log(dir.path(), 600);
+        let response = handle_list_threats(&paths, None, None);
+        match response {
+            IpcResponse::ThreatList { threats, truncated } => {
+                assert_eq!(threats.len(), MAX_THREAT_LIST_ITEMS);
+                assert!(truncated, "truncated should be true when items exceed the limit");
+            }
+            other => panic!("expected ThreatList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_threats_not_truncated_when_under_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = write_events_to_audit_log(dir.path(), 10);
+        let response = handle_list_threats(&paths, None, None);
+        match response {
+            IpcResponse::ThreatList { threats, truncated } => {
+                assert_eq!(threats.len(), 10);
+                assert!(!truncated, "truncated should be false when items are under the limit");
+            }
+            other => panic!("expected ThreatList, got {other:?}"),
+        }
     }
 }

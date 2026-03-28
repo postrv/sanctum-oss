@@ -41,7 +41,7 @@ fn run_list(
     let response = ipc_client::send_command(&command)?;
 
     match response {
-        IpcResponse::ThreatList { threats } => {
+        IpcResponse::ThreatList { threats, truncated } => {
             if threats.is_empty() {
                 #[allow(clippy::print_stdout)]
                 {
@@ -61,6 +61,13 @@ fn run_list(
                 }
             } else {
                 print_threat_table(&threats);
+            }
+
+            if truncated {
+                #[allow(clippy::print_stdout)]
+                {
+                    println!("(results truncated — more threats exist than shown)");
+                }
             }
 
             Ok(())
@@ -242,7 +249,7 @@ fn run_all(category: Option<&str>, yes: bool) -> Result<(), CliError> {
     let response = ipc_client::send_command(&command)?;
 
     match response {
-        IpcResponse::ThreatList { threats } => {
+        IpcResponse::ThreatList { threats, .. } => {
             if threats.is_empty() {
                 #[allow(clippy::print_stdout)]
                 {

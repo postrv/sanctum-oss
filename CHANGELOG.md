@@ -17,13 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New threat categories**: `McpViolation` and `BudgetOverrun` added to `ThreatCategory`
 - **Credential allowlist**: Configurable `credential_allowlist` in `SentinelConfig`
 - **IPC rate limiting**: Per-connection token-bucket rate limiter (100 messages/second) closes IPC DoS residual risk
-- **Credential patterns**: Added Datadog API/App Key and Azure SAS Token detection (22 patterns total), plus Twilio/Datadog/Azure env var detection in hooks
+- **Credential patterns**: 28 credential patterns total (Vercel, Docker Hub, Hashicorp Vault, Hugging Face, Shopify, Linear added), plus Twilio/Datadog/Azure env var detection in hooks
 - **Glob matcher safety**: Multi-star patterns now return false with a warning instead of silently falling through to exact match
 - **4 new Kani proofs**: `ceiling_cost_no_overflow`, `validate_id_rejects_traversal`, `shannon_entropy_never_panics`, `glob_matches_exact_match_works` (8 proofs total)
 - **Reproducible build verification**: CI job builds twice and compares SHA-256 hashes
 - **Nightly extended fuzz testing**: 5-hour fuzz runs via cron schedule (2.5 hours per target)
 - **Release workflow gates**: `verify-ci` job checks CI status before building release artifacts
-- **704 tests** across 8 crates (up from 511)
+- **Config version field**: `config_version` added to `SanctumConfig` for future migration support
+- **827 tests** across 8 crates (up from 511)
+
+### Security
+- **Project-local config hardening**: Security-critical settings (`claude_hooks`, `redact_credentials`, `watch_pth`, `pth_response`) are pinned to global config values and cannot be weakened by project-local `.sanctum/config.toml` — prevents malicious repos from disabling protections
+- **Fail-closed config loading**: Hook config parse errors now apply restrictive defaults (all protections enabled) instead of silently running with no firewall rules
+- **Async event loop safety**: Blocking file I/O, process spawning, and quarantine operations offloaded to `spawn_blocking` to prevent stalling the daemon event loop
+- **Quarantine integrity**: Atomic metadata writes (write-temp-then-rename), symlink detection before stub/restore writes, constant-time hash comparison, corrupted metadata warnings instead of silent skipping
+- **Audit event correctness**: Quarantine failure now records `Action::Logged` instead of false `Action::Quarantined`
+- **IPC response truncation**: `ListThreats` capped at 500 items to prevent exceeding 64KB frame limit
+- **Resolution log durability**: Write failures now propagate as IPC errors instead of silently succeeding
+- **Periodic budget persistence**: Budget state saved every 5 minutes instead of only on clean shutdown
+- **Defence-in-depth expansion**: D7 catch-all extended to 20 credential paths (was 10); 9 indirect read commands added (`ln`, `rsync`, `scp`, `tar`, `zip`, `7z`, `diff`, `bat`, `batcat`)
+- **PTH analyser hardening**: 5 new critical keywords (`getattr(`, `importlib`, `open(`, `codecs.`, `ctypes`), Unicode homoglyph detection expanded to all critical keywords, `\r\n` continuation line support
+- **Config directory permissions**: `.sanctum/` created with 0o700, config files with 0o600
+- **Temp file cleanup**: All write-temp-then-rename paths now clean up on failure
+- **IPC socket directory permissions**: Failure to set 0o700 now logged as error instead of silently ignored
 
 ## [0.1.0] - 2026-03-27
 

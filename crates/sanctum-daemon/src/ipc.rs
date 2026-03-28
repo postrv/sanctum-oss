@@ -126,7 +126,9 @@ impl IpcServer {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)) {
+                    tracing::error!(%e, "failed to set IPC socket directory permissions to 0o700 — socket may be accessible to other users");
+                }
             }
         }
 

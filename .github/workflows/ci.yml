@@ -20,11 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # 1.94.0
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 1.94.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@9d47f7b6ad4cd962b1bc2b3c1fec5abf10735064 # v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features
 
@@ -32,16 +32,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: EmbarkStudios/cargo-deny-action@34899fc33cd8ee34b782a34b2baf00c4a0a47347 # v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2
 
   test-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # 1.94.0
-      - uses: Swatinem/rust-cache@9d47f7b6ad4cd962b1bc2b3c1fec5abf10735064 # v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 1.94.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo test --all --all-features
       - run: cargo test --all --all-features -- --ignored
 
@@ -49,9 +49,9 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # 1.94.0
-      - uses: Swatinem/rust-cache@9d47f7b6ad4cd962b1bc2b3c1fec5abf10735064 # v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 1.94.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo test --all --all-features
       - run: cargo test --all --all-features -- --ignored
 
@@ -59,18 +59,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # 1.94.0
-      - uses: Swatinem/rust-cache@9d47f7b6ad4cd962b1bc2b3c1fec5abf10735064 # v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 1.94.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo test --all --all-features -- property
         env:
           PROPTEST_CASES: 10000
 
   audit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -79,8 +82,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: model-checking/kani-github-action@f838096619a707b1efdea5155bfbfb15b07e966e # v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1
       - run: cargo kani --harness quarantine_state_transitions -p sanctum-sentinel
       - run: cargo kani --harness pure_path_is_always_benign -p sanctum-sentinel
       - run: cargo kani --harness validate_id_rejects_traversal -p sanctum-sentinel
@@ -92,17 +95,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: model-checking/kani-github-action@f838096619a707b1efdea5155bfbfb15b07e966e # v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1
       - run: cargo kani --workspace
 
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # nightly
-      - uses: Swatinem/rust-cache@9d47f7b6ad4cd962b1bc2b3c1fec5abf10735064 # v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo install cargo-fuzz@0.12.0
       - run: cargo fuzz run fuzz_pth_analyser -- -max_total_time=30
       - run: cargo fuzz run fuzz_config_parser -- -max_total_time=30
@@ -112,9 +117,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # nightly
-      - uses: Swatinem/rust-cache@9d47f7b6ad4cd962b1bc2b3c1fec5abf10735064 # v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo install cargo-fuzz@0.12.0
       - run: cargo fuzz run fuzz_pth_analyser -- -max_total_time=9000
       - run: cargo fuzz run fuzz_config_parser -- -max_total_time=9000
@@ -124,8 +131,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # 1.94.0
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 1.94.0
       - name: First build
         run: |
           cargo build --release --target x86_64-unknown-linux-gnu
@@ -154,13 +161,13 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # 1.94.0
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 1.94.0
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@9d47f7b6ad4cd962b1bc2b3c1fec5abf10735064 # v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo build --release --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@ea165f8d65b6db9a6b7c67862cd61e8caf8cd11c # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanctum-${{ matrix.target }}
           path: |

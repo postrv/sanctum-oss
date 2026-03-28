@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Verify CI workflow passed for this commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,15 +77,15 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # 1.94.0
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 1.94.0
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@9d47f7b6ad4cd962b1bc2b3c1fec5abf10735064 # v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo test --all --all-features
       - run: cargo clippy --all-targets --all-features
       - run: cargo build --release --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@ea165f8d65b6db9a6b7c67862cd61e8caf8cd11c # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanctum-${{ matrix.target }}
           path: |
@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       - name: Generate SHA256 checksums
         run: |
@@ -126,7 +126,7 @@ jobs:
             --output-signature SHA256SUMS.sig \
             --output-certificate SHA256SUMS.cert \
             --rekor-url "https://rekor.sigstore.dev"
-      - uses: actions/upload-artifact@ea165f8d65b6db9a6b7c67862cd61e8caf8cd11c # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signatures
           path: |
@@ -143,9 +143,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1f174b91f20 # 1.94.0
-      - uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 1.94.0
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx@0.5.5
       - name: Generate SBOM
@@ -156,7 +156,7 @@ jobs:
             --output-signature sanctum-sbom.cdx.json.sig \
             --output-certificate sanctum-sbom.cdx.json.cert \
             --rekor-url "https://rekor.sigstore.dev"
-      - uses: actions/upload-artifact@ea165f8d65b6db9a6b7c67862cd61e8caf8cd11c # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom
           path: |
@@ -171,7 +171,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       - name: Prepare release assets
         run: |

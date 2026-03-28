@@ -1406,6 +1406,7 @@ mod kani_proofs {
     /// 2. `Deleted` is a terminal state — applying any action returns `Err`.
     /// 3. `Restored` is not terminal — actions can still be applied.
     #[kani::proof]
+    #[kani::unwind(10)]
     fn quarantine_state_transitions() {
         let state: QuarantineState = kani::any();
         let action: QuarantineAction = kani::any();

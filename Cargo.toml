@@ -10,6 +10,7 @@ members = [
     "crates/sanctum-budget",
     "crates/sanctum-proxy",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 publish = false

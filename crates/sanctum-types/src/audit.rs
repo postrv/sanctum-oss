@@ -12,25 +12,62 @@
 //! - All errors in `append_audit_event` are swallowed — audit logging must
 //!   never crash the caller.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::threat::ThreatEvent;
 
 /// Maximum audit log file size before rotation (50 MB).
 const MAX_AUDIT_LOG_BYTES: u64 = 50 * 1024 * 1024;
 
+/// Maximum audit events per second before throttling.
+const MAX_AUDIT_EVENTS_PER_SEC: u64 = 50;
+
+/// Sliding-window rate limiter state (second boundary + count).
+static AUDIT_WINDOW_START: AtomicU64 = AtomicU64::new(0);
+static AUDIT_WINDOW_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Check whether the audit write rate limit is exceeded.
+///
+/// Uses a simple per-second sliding window. Returns `true` if the event
+/// should be dropped.
+fn should_throttle_audit() -> bool {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let window_start = AUDIT_WINDOW_START.load(Ordering::Acquire);
+    if now_secs != window_start {
+        // New second — reset counter. Race is benign (worst case: one
+        // extra event slips through).
+        AUDIT_WINDOW_START.store(now_secs, Ordering::Release);
+        AUDIT_WINDOW_COUNT.store(1, Ordering::Release);
+        return false;
+    }
+
+    let count = AUDIT_WINDOW_COUNT.fetch_add(1, Ordering::AcqRel);
+    count >= MAX_AUDIT_EVENTS_PER_SEC
+}
+
 /// Append a threat event to the NDJSON audit log.
 ///
 /// Creates the parent directory and file if they don't exist.
 /// Sets file permissions to 0o600 on Unix.
 /// Rotates the log file if it exceeds `MAX_AUDIT_LOG_BYTES`.
+/// Rate-limited to [`MAX_AUDIT_EVENTS_PER_SEC`] events per second.
 ///
 /// **Errors are swallowed**: failures are logged via `tracing::warn` but
 /// never propagated. This ensures audit logging cannot crash the daemon
 /// or cause a hook to change its allow/block decision.
 pub fn append_audit_event(event: &ThreatEvent, audit_path: &Path) {
+    if should_throttle_audit() {
+        tracing::warn!("audit log write rate limit exceeded, dropping event");
+        return;
+    }
     if let Err(e) = maybe_rotate(audit_path) {
         tracing::warn!("failed to rotate audit log: {e}");
     }
@@ -93,36 +130,11 @@ fn append_audit_event_inner(event: &ThreatEvent, audit_path: &Path) -> Result<()
             fs::create_dir_all(grandparent)?;
         }
         // Create the final directory with restricted permissions atomically
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            let mut builder = fs::DirBuilder::new();
-            builder.mode(0o700);
-            match builder.create(parent) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            fs::create_dir_all(parent)?;
-        }
+        crate::fs_safety::ensure_secure_dir(parent)?;
     }
 
-    // Open in append mode, create if needed
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(audit_path)?;
-
-    // Set restrictive permissions on first creation
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(audit_path, perms)?;
-    }
+    // Open in append mode with O_NOFOLLOW + fchmod (symlink-safe, TOCTOU-safe)
+    let mut file = crate::fs_safety::safe_append_open(audit_path)?;
 
     // Serialize as single JSON line
     let json = serde_json::to_string(event).map_err(std::io::Error::other)?;
@@ -405,5 +417,40 @@ mod tests {
             std::fs::metadata(dir.path().join("secure_dir")).expect("parent metadata");
         let mode = parent_meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "parent directory should have 0700 permissions");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_symlink_at_audit_path() {
+        let dir = tempfile::tempdir().expect("tempdir for test");
+        let target = dir.path().join("real.log");
+        let link = dir.path().join("audit.log");
+
+        // Create a real file and a symlink pointing to it
+        std::fs::write(&target, "original content").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let event = make_test_event();
+        // Should swallow the error (ELOOP) without writing to target
+        append_audit_event(&event, &link);
+
+        // Target file should be unmodified
+        let content = std::fs::read_to_string(&target).expect("read target");
+        assert_eq!(content, "original content");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn try_append_returns_err_for_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir for test");
+        let target = dir.path().join("real.log");
+        let link = dir.path().join("audit.log");
+
+        std::fs::write(&target, "original").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let event = make_test_event();
+        let result = try_append_audit_event(&event, &link);
+        assert!(result.is_err(), "should fail for symlink path");
     }
 }

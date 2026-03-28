@@ -133,20 +133,15 @@ alert_at_percent = 75
     // Atomic write: write to temp file, sync, then rename into place
     let tmp_path = config_path.with_extension("tmp");
     {
-        let mut file = fs::File::create(&tmp_path)?;
+        // Remove stale tmp file if it exists (e.g. from prior crash)
+        let _ = fs::remove_file(&tmp_path);
+        let mut file = sanctum_types::fs_safety::safe_create_exclusive(&tmp_path)?;
         file.write_all(default_config.as_bytes())?;
         file.sync_all()?;
     }
     if let Err(e) = fs::rename(&tmp_path, config_path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(e.into());
-    }
-
-    // Set config file permissions to 0o600 on Unix (owner read/write only).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(config_path, fs::Permissions::from_mode(0o600))?;
     }
 
     Ok(true)

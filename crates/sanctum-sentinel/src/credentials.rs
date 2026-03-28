@@ -291,8 +291,28 @@ fn linux_find_accessor(path: &Path) -> (Option<u32>, Option<String>) {
 ///
 /// This is best-effort: the file may already be closed by the time `lsof`
 /// runs, or `lsof` may not be installed.
+/// Maximum concurrent `lsof` invocations. Each spawns a thread that lives
+/// up to 5 seconds, so this caps worst-case thread accumulation at 4.
+static LSOF_IN_FLIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const MAX_CONCURRENT_LSOF: u32 = 4;
+
 #[cfg(target_os = "macos")]
 fn macos_find_accessor(path: &Path) -> (Option<u32>, Option<String>) {
+    // Limit concurrent lsof invocations to prevent thread accumulation
+    let current = LSOF_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    if current >= MAX_CONCURRENT_LSOF {
+        LSOF_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        tracing::debug!("too many concurrent lsof calls ({current}), skipping");
+        return (None, None);
+    }
+
+    let result = macos_find_accessor_inner(path);
+    LSOF_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Release);
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn macos_find_accessor_inner(path: &Path) -> (Option<u32>, Option<String>) {
     use std::process::Command;
     use std::time::Duration;
 

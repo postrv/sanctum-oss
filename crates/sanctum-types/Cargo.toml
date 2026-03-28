@@ -20,6 +20,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net"] }
 tracing = { workspace = true }
+nix = { version = "0.29", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

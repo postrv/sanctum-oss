@@ -31,6 +31,7 @@ use context::EventLoopContext;
 use ipc::{
     IpcCommand, IpcResponse, IpcServer, ProviderBudgetInfo, QuarantineListItem, ThreatListItem,
 };
+use sanctum_types::auth;
 
 fn main() -> ExitCode {
     // Initialise tracing subscriber
@@ -108,6 +109,7 @@ fn main() -> ExitCode {
     exit
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_daemon(
     shared_config: Arc<RwLock<SanctumConfig>>,
     paths: WellKnownPaths,
@@ -140,6 +142,21 @@ async fn run_daemon(
             return ExitCode::FAILURE;
         }
     };
+
+    // Generate and write IPC auth token
+    let auth_token = match auth::generate_token() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(%e, "failed to generate auth token");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = auth::write_token(&paths.data_dir, &auth_token) {
+        tracing::error!(%e, "failed to write auth token");
+        return ExitCode::FAILURE;
+    }
+    tracing::info!("IPC auth token written");
+    let shared_auth_token = Arc::new(auth_token);
 
     // Shutdown channel for IPC-initiated shutdown (C1)
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -221,9 +238,14 @@ async fn run_daemon(
         budget_save_interval: &mut budget_save_interval,
         data_dir: &paths.data_dir,
         budget_state_path: &budget_state_path,
+        auth_token: &shared_auth_token,
     };
 
     run_event_loop(&mut ctx).await;
+
+    // Clean up auth token on shutdown
+    auth::remove_token(&paths.data_dir);
+    tracing::info!("IPC auth token removed");
 
     // Save budget tracker state to disk on shutdown
     save_budget_state(&shared_budget, &paths.data_dir, &budget_state_path).await;
@@ -333,6 +355,7 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                         let ipc_config = Arc::clone(ctx.shared_config);
                         let ipc_budget = Arc::clone(ctx.shared_budget);
                         let ipc_quarantine = Arc::clone(ctx.shared_quarantine);
+                        let ipc_auth_token = Arc::clone(ctx.auth_token);
 
                         tokio::spawn(async move {
                             let _permit = permit;
@@ -347,6 +370,7 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                                     ipc_config,
                                     ipc_budget,
                                     ipc_quarantine,
+                                    ipc_auth_token,
                                 ),
                             ).await {
                                 Ok(Ok(())) => {}
@@ -480,8 +504,25 @@ async fn handle_ipc_command(
     shared_config: Arc<RwLock<SanctumConfig>>,
     shared_budget: Arc<Mutex<BudgetTracker>>,
     shared_quarantine: Arc<Mutex<Quarantine>>,
+    expected_token: Arc<String>,
 ) -> Result<(), sanctum_types::errors::DaemonError> {
-    let command = conn.read_command().await?;
+    let message = conn.read_message().await?;
+    let command = message.command;
+
+    // Validate auth token for commands that require it
+    if command.requires_auth() {
+        let authenticated = message
+            .auth_token
+            .as_ref()
+            .is_some_and(|provided| auth::validate_token(&expected_token, provided));
+        if !authenticated {
+            let response = IpcResponse::Error {
+                message: "authentication required".to_string(),
+            };
+            conn.send_response(&response).await?;
+            return Ok(());
+        }
+    }
 
     let paths = WellKnownPaths::default();
 
@@ -539,16 +580,23 @@ async fn handle_ipc_command(
             input_tokens,
             output_tokens,
         } => {
-            let audit_path = paths.data_dir.join("audit.log");
-            handle_record_usage(
-                &shared_budget,
-                &provider,
-                &model,
-                input_tokens,
-                output_tokens,
-                &audit_path,
-            )
-            .await
+            // Validate field lengths to prevent unbounded string storage/logging
+            if provider.len() > 64 || model.len() > 256 {
+                IpcResponse::Error {
+                    message: "provider (max 64) or model (max 256) name too long".to_string(),
+                }
+            } else {
+                let audit_path = paths.data_dir.join("audit.log");
+                handle_record_usage(
+                    &shared_budget,
+                    &provider,
+                    &model,
+                    input_tokens,
+                    output_tokens,
+                    &audit_path,
+                )
+                .await
+            }
         }
         IpcCommand::ListThreats { category, level } => {
             let paths_clone = paths.clone();
@@ -802,14 +850,21 @@ fn read_audit_events(
     paths: &WellKnownPaths,
     max_events: usize,
 ) -> Vec<sanctum_types::threat::ThreatEvent> {
+    use std::collections::VecDeque;
     use std::io::BufRead;
 
     let audit_path = paths.data_dir.join("audit.log");
     let Ok(file) = std::fs::File::open(&audit_path) else {
         return Vec::new();
     };
+    if max_events == 0 {
+        return Vec::new();
+    }
     let reader = std::io::BufReader::new(file);
-    let mut events = Vec::new();
+    // Use a bounded ring buffer to keep only the most recent events,
+    // preventing unbounded memory growth on large audit logs.
+    let capacity = max_events.min(1024);
+    let mut ring: VecDeque<sanctum_types::threat::ThreatEvent> = VecDeque::with_capacity(capacity);
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -818,22 +873,23 @@ fn read_audit_events(
                 continue;
             }
         };
-        let trimmed = line.trim().to_string();
+        let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        match serde_json::from_str::<sanctum_types::threat::ThreatEvent>(&trimmed) {
-            Ok(event) => events.push(event),
+        match serde_json::from_str::<sanctum_types::threat::ThreatEvent>(trimmed) {
+            Ok(event) => {
+                if ring.len() >= max_events {
+                    ring.pop_front();
+                }
+                ring.push_back(event);
+            }
             Err(e) => {
                 tracing::warn!(%e, "skipping malformed audit log line");
             }
         }
     }
-    if events.len() > max_events {
-        events.split_off(events.len() - max_events)
-    } else {
-        events
-    }
+    ring.into()
 }
 
 /// Read resolved threat IDs from the resolution log, bounded to `max_entries` most recent.
@@ -844,14 +900,20 @@ fn read_resolved_ids(
     paths: &WellKnownPaths,
     max_entries: usize,
 ) -> std::collections::HashSet<String> {
+    use std::collections::VecDeque;
     use std::io::BufRead;
 
     let resolution_path = paths.data_dir.join("resolutions.log");
     let Ok(file) = std::fs::File::open(&resolution_path) else {
         return std::collections::HashSet::new();
     };
+    if max_entries == 0 {
+        return std::collections::HashSet::new();
+    }
     let reader = std::io::BufReader::new(file);
-    let mut resolutions = Vec::new();
+    // Use a bounded ring buffer to keep only the most recent resolution IDs.
+    let capacity = max_entries.min(1024);
+    let mut ring: VecDeque<String> = VecDeque::with_capacity(capacity);
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -860,25 +922,23 @@ fn read_resolved_ids(
                 continue;
             }
         };
-        let trimmed = line.trim().to_string();
+        let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        match serde_json::from_str::<sanctum_types::threat::ThreatResolution>(&trimmed) {
-            Ok(r) => resolutions.push(r.threat_id),
+        match serde_json::from_str::<sanctum_types::threat::ThreatResolution>(trimmed) {
+            Ok(r) => {
+                if ring.len() >= max_entries {
+                    ring.pop_front();
+                }
+                ring.push_back(r.threat_id);
+            }
             Err(e) => {
                 tracing::warn!(%e, "skipping malformed resolution log line");
             }
         }
     }
-    if resolutions.len() > max_entries {
-        resolutions
-            .split_off(resolutions.len() - max_entries)
-            .into_iter()
-            .collect()
-    } else {
-        resolutions.into_iter().collect()
-    }
+    ring.into_iter().collect()
 }
 
 /// Append a resolution entry to the resolution log.
@@ -929,18 +989,7 @@ fn append_resolution_inner(
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&resolution_path)?;
-
-    // Set restrictive permissions
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&resolution_path, perms)?;
-    }
+    let mut file = sanctum_types::fs_safety::safe_append_open(&resolution_path)?;
 
     let json = serde_json::to_string(resolution).map_err(std::io::Error::other)?;
     writeln!(file, "{json}")?;

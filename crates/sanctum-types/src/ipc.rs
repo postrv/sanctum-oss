@@ -65,6 +65,45 @@ pub enum IpcCommand {
     },
 }
 
+impl IpcCommand {
+    /// Returns `true` for commands that modify daemon state and require
+    /// authentication via an IPC auth token.
+    ///
+    /// Read-only / informational commands (`Status`, `ListQuarantine`,
+    /// `BudgetStatus`, `ListThreats`, `GetThreatDetails`, `RecordUsage`)
+    /// do not require authentication.
+    #[must_use]
+    pub const fn requires_auth(&self) -> bool {
+        matches!(
+            self,
+            Self::Shutdown
+                | Self::ReloadConfig
+                | Self::RestoreQuarantine { .. }
+                | Self::DeleteQuarantine { .. }
+                | Self::BudgetSet { .. }
+                | Self::BudgetExtend { .. }
+                | Self::BudgetReset
+                | Self::ResolveThreat { .. }
+        )
+    }
+}
+
+/// Authenticated IPC message envelope.
+///
+/// Wraps an [`IpcCommand`] with an optional auth token. The `serde(flatten)`
+/// attribute means the serialised form is the same as an `IpcCommand` with an
+/// additional `auth_token` field — backwards-compatible with old clients that
+/// omit the token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcMessage {
+    /// The underlying command.
+    #[serde(flatten)]
+    pub command: IpcCommand,
+    /// Optional authentication token for privileged commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+}
+
 /// Responses sent from the daemon to the CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "response")]
@@ -337,6 +376,150 @@ mod tests {
             }
             other => panic!("expected ThreatList, got {other:?}"),
         }
+    }
+
+    // ---- requires_auth tests ----
+
+    #[test]
+    fn status_does_not_require_auth() {
+        assert!(!IpcCommand::Status.requires_auth());
+    }
+
+    #[test]
+    fn list_quarantine_does_not_require_auth() {
+        assert!(!IpcCommand::ListQuarantine.requires_auth());
+    }
+
+    #[test]
+    fn budget_status_no_auth_needed() {
+        assert!(!IpcCommand::BudgetStatus.requires_auth());
+    }
+
+    #[test]
+    fn shutdown_requires_auth() {
+        assert!(IpcCommand::Shutdown.requires_auth());
+    }
+
+    #[test]
+    fn reload_config_requires_auth() {
+        assert!(IpcCommand::ReloadConfig.requires_auth());
+    }
+
+    #[test]
+    fn restore_quarantine_requires_auth() {
+        assert!(IpcCommand::RestoreQuarantine {
+            id: "test".to_string(),
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn delete_quarantine_requires_auth() {
+        assert!(IpcCommand::DeleteQuarantine {
+            id: "test".to_string(),
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn budget_set_needs_auth() {
+        assert!(IpcCommand::BudgetSet {
+            session_cents: Some(100),
+            daily_cents: None,
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn budget_extend_requires_auth() {
+        assert!(IpcCommand::BudgetExtend {
+            additional_cents: 500,
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn budget_reset_requires_auth() {
+        assert!(IpcCommand::BudgetReset.requires_auth());
+    }
+
+    #[test]
+    fn resolve_threat_requires_auth() {
+        assert!(IpcCommand::ResolveThreat {
+            id: "t1".to_string(),
+            action: "dismiss".to_string(),
+            note: "ok".to_string(),
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn record_usage_does_not_require_auth() {
+        assert!(!IpcCommand::RecordUsage {
+            provider: "anthropic".to_string(),
+            model: "claude".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn list_threats_does_not_require_auth() {
+        assert!(!IpcCommand::ListThreats {
+            category: None,
+            level: None,
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn get_threat_details_does_not_require_auth() {
+        assert!(!IpcCommand::GetThreatDetails {
+            id: "x".to_string(),
+        }
+        .requires_auth());
+    }
+
+    // ---- IpcMessage serialization tests ----
+
+    #[test]
+    fn ipc_message_with_auth_token_roundtrips() {
+        let msg = IpcMessage {
+            command: IpcCommand::Shutdown,
+            auth_token: Some("abc123".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        assert!(json.contains("auth_token"));
+        assert!(json.contains("abc123"));
+
+        let roundtrip: IpcMessage = serde_json::from_str(&json).expect("deserialise");
+        assert!(matches!(roundtrip.command, IpcCommand::Shutdown));
+        assert_eq!(roundtrip.auth_token.unwrap(), "abc123");
+    }
+
+    #[test]
+    fn ipc_message_without_auth_token_roundtrips() {
+        let msg = IpcMessage {
+            command: IpcCommand::Status,
+            auth_token: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        // auth_token should be omitted due to skip_serializing_if
+        assert!(!json.contains("auth_token"));
+
+        let roundtrip: IpcMessage = serde_json::from_str(&json).expect("deserialise");
+        assert!(matches!(roundtrip.command, IpcCommand::Status));
+        assert!(roundtrip.auth_token.is_none());
+    }
+
+    #[test]
+    fn old_client_json_without_auth_token_deserialises_as_none() {
+        // Simulate an old client that only sends the command fields
+        let json = r#"{"command":"Status"}"#;
+        let msg: IpcMessage = serde_json::from_str(json).expect("deserialise");
+        assert!(matches!(msg.command, IpcCommand::Status));
+        assert!(msg.auth_token.is_none());
     }
 
     #[test]

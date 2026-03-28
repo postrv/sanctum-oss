@@ -228,19 +228,14 @@ impl BudgetTracker {
         let json = serde_json::to_string_pretty(&state)?;
 
         let tmp_path = path.with_extension("tmp");
-        let mut file = std::fs::File::create(&tmp_path)?;
+        // Remove stale tmp file if it exists (e.g. from prior crash)
+        let _ = std::fs::remove_file(&tmp_path);
+        let mut file = sanctum_types::fs_safety::safe_create_exclusive(&tmp_path)?;
         file.write_all(json.as_bytes())?;
         file.sync_all()?;
         if let Err(e) = std::fs::rename(&tmp_path, path) {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e.into());
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
         }
         Ok(())
     }

@@ -15,7 +15,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use sanctum_types::errors::DaemonError;
 pub use sanctum_types::ipc::{
-    IpcCommand, IpcResponse, ProviderBudgetInfo, QuarantineListItem, ThreatListItem,
+    IpcCommand, IpcMessage, IpcResponse, ProviderBudgetInfo, QuarantineListItem, ThreatListItem,
 };
 
 // ============================================================
@@ -198,15 +198,16 @@ pub struct IpcConnection {
 }
 
 impl IpcConnection {
-    /// Read a command from the client.
+    /// Read an authenticated message from the client.
     ///
-    /// Enforces a per-connection rate limit. If the client exceeds the allowed
-    /// message rate, returns an error.
+    /// Deserialises the incoming frame as an [`IpcMessage`] which contains
+    /// both the command and an optional auth token. Enforces a per-connection
+    /// rate limit.
     ///
     /// # Errors
     ///
     /// Returns an error if the message is too large, malformed, or rate-limited.
-    pub async fn read_command(&mut self) -> Result<IpcCommand, DaemonError> {
+    pub async fn read_message(&mut self) -> Result<IpcMessage, DaemonError> {
         if !self.rate_limiter.try_acquire() {
             return Err(DaemonError::Ipc(
                 "rate limit exceeded: too many messages per second".to_string(),
@@ -248,8 +249,8 @@ mod tests {
         let socket_path_clone = socket_path.clone();
         let server_handle = tokio::spawn(async move {
             let mut conn = server.accept().await.expect("accept");
-            let cmd = conn.read_command().await.expect("read command");
-            assert!(matches!(cmd, IpcCommand::Status));
+            let msg = conn.read_message().await.expect("read message");
+            assert!(matches!(msg.command, IpcCommand::Status));
 
             let response = IpcResponse::Status {
                 version: "0.1.0".to_string(),
@@ -300,8 +301,8 @@ mod tests {
 
         let server_handle = tokio::spawn(async move {
             let mut conn = server.accept().await.expect("accept");
-            let cmd = conn.read_command().await.expect("read");
-            assert!(matches!(cmd, IpcCommand::ListQuarantine));
+            let msg = conn.read_message().await.expect("read message");
+            assert!(matches!(msg.command, IpcCommand::ListQuarantine));
 
             let response = IpcResponse::QuarantineList {
                 items: vec![QuarantineListItem {
@@ -345,7 +346,7 @@ mod tests {
         let server_handle = tokio::spawn(async move {
             let mut conn = server.accept().await.expect("accept");
             // Try to read — should fail because client sends oversized frame
-            let result = conn.read_command().await;
+            let result = conn.read_message().await;
             assert!(result.is_err());
         });
 
@@ -568,5 +569,215 @@ mod tests {
     fn rate_limiter_zero_capacity_always_rejects() {
         let mut rl = RateLimiter::new(0, 0);
         assert!(!rl.try_acquire());
+    }
+
+    // ---- IPC authentication tests ----
+
+    /// Helper: sends an `IpcMessage` to the server and returns the response.
+    async fn send_ipc_message(socket_path: &std::path::Path, msg: &IpcMessage) -> IpcResponse {
+        let mut stream = UnixStream::connect(socket_path).await.expect("connect");
+        let payload = serde_json::to_vec(msg).expect("serialise message");
+        sanctum_types::ipc::write_frame(&mut stream, &payload)
+            .await
+            .expect("write");
+        let resp_payload = sanctum_types::ipc::read_frame(&mut stream)
+            .await
+            .expect("read");
+        serde_json::from_slice(&resp_payload).expect("deserialise response")
+    }
+
+    /// Helper: spawns a server that reads one message and validates auth
+    /// using the provided expected token, then sends an appropriate response.
+    #[allow(clippy::unused_async)]
+    async fn spawn_auth_server(
+        socket_path: &std::path::Path,
+        expected_token: String,
+    ) -> tokio::task::JoinHandle<()> {
+        let server = IpcServer::bind(socket_path).expect("bind");
+        let token = expected_token;
+
+        tokio::spawn(async move {
+            let mut conn = server.accept().await.expect("accept");
+            let msg = conn.read_message().await.expect("read message");
+
+            // Validate auth for commands that require it
+            if msg.command.requires_auth() {
+                let authenticated = msg
+                    .auth_token
+                    .as_ref()
+                    .is_some_and(|provided| sanctum_types::auth::validate_token(&token, provided));
+                if !authenticated {
+                    let response = IpcResponse::Error {
+                        message: "authentication required".to_string(),
+                    };
+                    conn.send_response(&response).await.expect("send error");
+                    return;
+                }
+            }
+
+            // For authenticated or non-auth commands, send success
+            let response = match msg.command {
+                IpcCommand::Status => IpcResponse::Status {
+                    version: "0.1.0".to_string(),
+                    uptime_secs: 42,
+                    watchers_active: 1,
+                    quarantine_count: 0,
+                },
+                IpcCommand::Shutdown => IpcResponse::Ok {
+                    message: "shutdown initiated".to_string(),
+                },
+                IpcCommand::BudgetStatus => IpcResponse::BudgetStatus { providers: vec![] },
+                IpcCommand::BudgetSet { .. } => IpcResponse::Ok {
+                    message: "budget limits updated".to_string(),
+                },
+                _ => IpcResponse::Ok {
+                    message: "ok".to_string(),
+                },
+            };
+            conn.send_response(&response).await.expect("send response");
+        })
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_status_succeeds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("test.sock");
+        let token = "a".repeat(64);
+
+        let handle = spawn_auth_server(&socket_path, token).await;
+
+        let msg = IpcMessage {
+            command: IpcCommand::Status,
+            auth_token: None,
+        };
+        let response = send_ipc_message(&socket_path, &msg).await;
+
+        assert!(
+            matches!(response, IpcResponse::Status { .. }),
+            "Status should succeed without auth: {response:?}"
+        );
+
+        handle.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_shutdown_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("test.sock");
+        let token = "b".repeat(64);
+
+        let handle = spawn_auth_server(&socket_path, token).await;
+
+        let msg = IpcMessage {
+            command: IpcCommand::Shutdown,
+            auth_token: None,
+        };
+        let response = send_ipc_message(&socket_path, &msg).await;
+
+        match response {
+            IpcResponse::Error { message } => {
+                assert_eq!(message, "authentication required");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        handle.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn authenticated_shutdown_succeeds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("test.sock");
+        let token = "c".repeat(64);
+
+        let handle = spawn_auth_server(&socket_path, token.clone()).await;
+
+        let msg = IpcMessage {
+            command: IpcCommand::Shutdown,
+            auth_token: Some(token),
+        };
+        let response = send_ipc_message(&socket_path, &msg).await;
+
+        match response {
+            IpcResponse::Ok { message } => {
+                assert_eq!(message, "shutdown initiated");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        handle.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn wrong_token_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("test.sock");
+        let token = "d".repeat(64);
+
+        let handle = spawn_auth_server(&socket_path, token).await;
+
+        let msg = IpcMessage {
+            command: IpcCommand::Shutdown,
+            auth_token: Some("e".repeat(64)),
+        };
+        let response = send_ipc_message(&socket_path, &msg).await;
+
+        match response {
+            IpcResponse::Error { message } => {
+                assert_eq!(message, "authentication required");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        handle.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn budget_status_no_auth_needed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("test.sock");
+        let token = "f".repeat(64);
+
+        let handle = spawn_auth_server(&socket_path, token).await;
+
+        let msg = IpcMessage {
+            command: IpcCommand::BudgetStatus,
+            auth_token: None,
+        };
+        let response = send_ipc_message(&socket_path, &msg).await;
+
+        assert!(
+            matches!(response, IpcResponse::BudgetStatus { .. }),
+            "BudgetStatus should succeed without auth: {response:?}"
+        );
+
+        handle.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn budget_set_needs_auth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("test.sock");
+        let token = "1".repeat(64);
+
+        let handle = spawn_auth_server(&socket_path, token).await;
+
+        let msg = IpcMessage {
+            command: IpcCommand::BudgetSet {
+                session_cents: Some(100),
+                daily_cents: None,
+            },
+            auth_token: None,
+        };
+        let response = send_ipc_message(&socket_path, &msg).await;
+
+        match response {
+            IpcResponse::Error { message } => {
+                assert_eq!(message, "authentication required");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        handle.await.expect("server task");
     }
 }

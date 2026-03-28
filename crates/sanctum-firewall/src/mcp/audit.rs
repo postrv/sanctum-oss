@@ -78,20 +78,8 @@ impl McpAuditLog {
     ///
     /// Returns an error if the file cannot be created or written to.
     pub fn write_to_file(&self, path: &Path) -> Result<(), std::io::Error> {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-
-        // Set restrictive permissions (owner-only read/write) so that audit
-        // logs are not world-readable. The `let _ =` deliberately ignores
-        // errors (e.g. on non-Unix platforms where this is a no-op).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
-        }
+        // O_NOFOLLOW + fchmod: symlink-safe, TOCTOU-safe
+        let mut file = sanctum_types::fs_safety::safe_append_open(path)?;
 
         for entry in &self.entries {
             // Serialisation of our well-known types should never fail, but we

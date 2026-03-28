@@ -57,6 +57,15 @@ fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
         );
         cfg.mcp_audit = true;
     }
+    // Prevent local configs from weakening the MCP default policy to Allow.
+    // A malicious repo could include .sanctum/config.toml with
+    // `default_mcp_policy = "allow"` to bypass MCP restrictions.
+    if cfg.default_mcp_policy == sanctum_types::config::McpDefaultPolicy::Allow {
+        tracing::warn!(
+            "Project-local config cannot set default_mcp_policy to 'allow' \u{2014} using 'deny'"
+        );
+        cfg.default_mcp_policy = sanctum_types::config::McpDefaultPolicy::Deny;
+    }
 }
 
 /// Load AI firewall config from a single config file path.
@@ -664,18 +673,24 @@ mod tests {
 
     #[test]
     fn record_does_not_write_for_allow_decisions() {
-        // The function returns early for Allow — verify by checking it doesn't
-        // create any file when called directly
-        let dir = tempfile::tempdir().expect("tempdir");
-        let log_path = dir.path().join("logs").join("audit.log");
-
-        // Directly test that Allow creates no event
+        // Verify that record_hook_threat_event with Allow returns immediately
+        // without writing any audit event. We call the function directly
+        // (it uses WellKnownPaths::default() internally for the audit path).
         let input = make_input("bash", json!({ "command": "ls" }));
-        // record_hook_threat_event returns early for Allow
-        // We can't easily test this without calling the real function,
-        // but we can verify the guard in the function code
-        let _ = input; // Demonstrate we have the input
-        assert!(!log_path.exists(), "no log should be created for Allow");
+
+        // Get the default audit path to check before/after
+        let paths = sanctum_types::paths::WellKnownPaths::default();
+        let audit_path = paths.data_dir.join("audit.log");
+        let size_before = std::fs::metadata(&audit_path).map(|m| m.len()).ok();
+
+        // Call with Allow — should return early without writing
+        record_hook_threat_event("pre-bash", &input, HookDecision::Allow, "allowed");
+
+        let size_after = std::fs::metadata(&audit_path).map(|m| m.len()).ok();
+        assert_eq!(
+            size_before, size_after,
+            "Allow decisions should not write to audit log"
+        );
     }
 
     // ---- Integration: category mapping end-to-end ----
@@ -763,6 +778,40 @@ mod tests {
         assert!(cfg.mcp_audit);
         assert!(cfg.claude_hooks);
         assert!(cfg.redact_credentials);
+    }
+
+    #[test]
+    fn security_floor_prevents_mcp_allow_policy() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        // Local config cannot weaken MCP policy to Allow — forced to Deny
+        assert_eq!(
+            cfg.default_mcp_policy,
+            sanctum_types::config::McpDefaultPolicy::Deny
+        );
+    }
+
+    #[test]
+    fn security_floor_allows_mcp_warn_policy() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Warn,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        // Warn is acceptable — not weakened
+        assert_eq!(
+            cfg.default_mcp_policy,
+            sanctum_types::config::McpDefaultPolicy::Warn
+        );
     }
 
     // ---- IPC usage forwarding tests ----

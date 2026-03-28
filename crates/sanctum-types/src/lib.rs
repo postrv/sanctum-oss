@@ -5,8 +5,10 @@
 //! well-known filesystem paths.
 
 pub mod audit;
+pub mod auth;
 pub mod config;
 pub mod errors;
+pub mod fs_safety;
 pub mod ipc;
 pub mod paths;
 pub mod threat;

@@ -37,6 +37,7 @@ pub struct EventLoopContext<'a> {
     pub budget_save_interval: &'a mut tokio::time::Interval,
     pub data_dir: &'a Path,
     pub budget_state_path: &'a Path,
+    pub auth_token: &'a Arc<String>,
 }
 
 /// Bundles the common parameters shared across verdict handlers.

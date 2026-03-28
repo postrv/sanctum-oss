@@ -224,28 +224,51 @@ fn matches_builtin_restriction(path: &str) -> bool {
 ///
 /// Recurses into objects and arrays, collecting any string that contains
 /// a path separator.
+/// Known-sensitive bare filenames that should be detected even without path
+/// separators. Catches MCP tool arguments like `{"filename": ".env"}`.
+const SENSITIVE_BARE_FILENAMES: &[&str] = &[
+    ".env",
+    ".netrc",
+    ".pgpass",
+    ".npmrc",
+    ".pypirc",
+    ".my.cnf",
+    ".vault-token",
+];
+
 fn extract_path_values(value: &serde_json::Value) -> Vec<String> {
     let mut paths = Vec::new();
-    collect_path_strings(value, &mut paths);
+    collect_path_strings(value, &mut paths, 0);
     paths
 }
 
-fn collect_path_strings(value: &serde_json::Value, out: &mut Vec<String>) {
+/// Maximum recursion depth for JSON traversal (defense against stack overflow).
+const MAX_JSON_DEPTH: usize = 32;
+
+fn collect_path_strings(value: &serde_json::Value, out: &mut Vec<String>, depth: usize) {
+    if depth > MAX_JSON_DEPTH {
+        return;
+    }
     match value {
         serde_json::Value::String(s) => {
             // Heuristic: treat any string containing '/' as a potential path.
             if s.contains('/') || s.contains('\\') {
                 out.push(s.clone());
             }
+            // Also catch bare sensitive filenames without path separators
+            let s_lower = s.to_lowercase();
+            if SENSITIVE_BARE_FILENAMES.iter().any(|f| s_lower == *f) {
+                out.push(s.clone());
+            }
         }
         serde_json::Value::Object(map) => {
             for v in map.values() {
-                collect_path_strings(v, out);
+                collect_path_strings(v, out, depth + 1);
             }
         }
         serde_json::Value::Array(arr) => {
             for v in arr {
-                collect_path_strings(v, out);
+                collect_path_strings(v, out, depth + 1);
             }
         }
         _ => {}
@@ -957,5 +980,61 @@ mod kani_proofs {
             // Without wildcards, glob_matches must be equivalent to ==
             assert_eq!(result, pattern == path);
         }
+    }
+
+    #[test]
+    fn extract_path_values_catches_bare_env_filename() {
+        let val = serde_json::json!({"filename": ".env"});
+        let paths = extract_path_values(&val);
+        assert!(
+            paths.iter().any(|p| p == ".env"),
+            "should extract bare .env filename"
+        );
+    }
+
+    #[test]
+    fn extract_path_values_catches_bare_netrc() {
+        let val = serde_json::json!({"file": ".netrc"});
+        let paths = extract_path_values(&val);
+        assert!(
+            paths.iter().any(|p| p == ".netrc"),
+            "should extract bare .netrc filename"
+        );
+    }
+
+    #[test]
+    fn extract_path_values_ignores_normal_strings() {
+        let val = serde_json::json!({"name": "hello.txt"});
+        let paths = extract_path_values(&val);
+        assert!(paths.is_empty(), "normal filenames should not be extracted");
+    }
+
+    #[test]
+    fn collect_path_strings_respects_depth_limit() {
+        // Build a deeply nested JSON structure
+        let mut val = serde_json::json!("/secret/path");
+        for _ in 0..50 {
+            val = serde_json::json!({"nested": val});
+        }
+        let paths = extract_path_values(&val);
+        // The path should NOT be found because it's deeper than MAX_JSON_DEPTH (32)
+        assert!(
+            paths.is_empty(),
+            "paths beyond depth limit should not be extracted"
+        );
+    }
+
+    #[test]
+    fn collect_path_strings_finds_paths_within_depth_limit() {
+        // Build JSON nested to depth 10 (within limit)
+        let mut val = serde_json::json!("/secret/path");
+        for _ in 0..10 {
+            val = serde_json::json!({"nested": val});
+        }
+        let paths = extract_path_values(&val);
+        assert!(
+            paths.iter().any(|p| p == "/secret/path"),
+            "paths within depth limit should be extracted"
+        );
     }
 }

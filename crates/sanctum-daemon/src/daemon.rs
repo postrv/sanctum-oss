@@ -159,17 +159,13 @@ impl DaemonManager {
 
         file.write_all(pid.to_string().as_bytes())?;
 
-        // Set owner-only permissions
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Err(e) = fs::set_permissions(&self.pid_file, fs::Permissions::from_mode(0o600)) {
-                tracing::warn!(
-                    path = %self.pid_file.display(),
-                    %e,
-                    "failed to set PID file permissions"
-                );
-            }
+        // Set owner-only permissions via fchmod on the fd (TOCTOU-safe)
+        if let Err(e) = sanctum_types::fs_safety::fchmod_600(&file) {
+            tracing::warn!(
+                path = %self.pid_file.display(),
+                %e,
+                "failed to set PID file permissions"
+            );
         }
 
         tracing::info!(pid, path = %self.pid_file.display(), "PID file written");

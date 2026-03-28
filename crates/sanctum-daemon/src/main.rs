@@ -541,12 +541,24 @@ async fn handle_ipc_command(
             handle_quarantine_list(&quarantine)
         }
         IpcCommand::RestoreQuarantine { id } => {
-            let quarantine = shared_quarantine.lock().await;
-            handle_quarantine_restore(&quarantine, &id)
+            if id.len() > 128 {
+                IpcResponse::Error {
+                    message: "id too long (max 128 chars)".to_string(),
+                }
+            } else {
+                let quarantine = shared_quarantine.lock().await;
+                handle_quarantine_restore(&quarantine, &id)
+            }
         }
         IpcCommand::DeleteQuarantine { id } => {
-            let quarantine = shared_quarantine.lock().await;
-            handle_quarantine_delete(&quarantine, &id)
+            if id.len() > 128 {
+                IpcResponse::Error {
+                    message: "id too long (max 128 chars)".to_string(),
+                }
+            } else {
+                let quarantine = shared_quarantine.lock().await;
+                handle_quarantine_delete(&quarantine, &id)
+            }
         }
         IpcCommand::ReloadConfig => {
             should_reload = true;
@@ -585,6 +597,10 @@ async fn handle_ipc_command(
                 IpcResponse::Error {
                     message: "provider (max 64) or model (max 256) name too long".to_string(),
                 }
+            } else if input_tokens > 100_000_000 || output_tokens > 100_000_000 {
+                IpcResponse::Error {
+                    message: "token count exceeds maximum (100,000,000)".to_string(),
+                }
             } else {
                 let audit_path = paths.data_dir.join("audit.log");
                 handle_record_usage(
@@ -614,33 +630,45 @@ async fn handle_ipc_command(
             }
         }
         IpcCommand::GetThreatDetails { id } => {
-            let paths_clone = paths.clone();
-            let quarantine_arc = Arc::clone(&shared_quarantine);
-            match tokio::task::spawn_blocking(move || {
-                let quarantine = quarantine_arc.blocking_lock();
-                handle_get_threat_details(&paths_clone, &quarantine, &id)
-            })
-            .await
-            {
-                Ok(resp) => resp,
-                Err(e) => IpcResponse::Error {
-                    message: format!("task failed: {e}"),
-                },
+            if id.len() > 128 {
+                IpcResponse::Error {
+                    message: "id too long (max 128 chars)".to_string(),
+                }
+            } else {
+                let paths_clone = paths.clone();
+                let quarantine_arc = Arc::clone(&shared_quarantine);
+                match tokio::task::spawn_blocking(move || {
+                    let quarantine = quarantine_arc.blocking_lock();
+                    handle_get_threat_details(&paths_clone, &quarantine, &id)
+                })
+                .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => IpcResponse::Error {
+                        message: format!("task failed: {e}"),
+                    },
+                }
             }
         }
         IpcCommand::ResolveThreat { id, action, note } => {
-            let paths_clone = paths.clone();
-            let quarantine_arc = Arc::clone(&shared_quarantine);
-            match tokio::task::spawn_blocking(move || {
-                let quarantine = quarantine_arc.blocking_lock();
-                handle_resolve_threat(&paths_clone, &quarantine, &id, &action, &note)
-            })
-            .await
-            {
-                Ok(resp) => resp,
-                Err(e) => IpcResponse::Error {
-                    message: format!("task failed: {e}"),
-                },
+            if id.len() > 128 {
+                IpcResponse::Error {
+                    message: "id too long (max 128 chars)".to_string(),
+                }
+            } else {
+                let paths_clone = paths.clone();
+                let quarantine_arc = Arc::clone(&shared_quarantine);
+                match tokio::task::spawn_blocking(move || {
+                    let quarantine = quarantine_arc.blocking_lock();
+                    handle_resolve_threat(&paths_clone, &quarantine, &id, &action, &note)
+                })
+                .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => IpcResponse::Error {
+                        message: format!("task failed: {e}"),
+                    },
+                }
             }
         }
     };
@@ -1012,7 +1040,7 @@ fn handle_list_threats(
     let events = read_audit_events(paths, MAX_AUDIT_EVENTS);
     let resolved = read_resolved_ids(paths, MAX_AUDIT_EVENTS);
 
-    let threats: Vec<ThreatListItem> = events
+    let mut matching = events
         .iter()
         .filter_map(|event| {
             let id = event.threat_id();
@@ -1048,14 +1076,11 @@ fn handle_list_threats(
                 action_taken: format!("{:?}", event.action_taken),
             })
         })
-        .collect();
+        .take(MAX_THREAT_LIST_ITEMS + 1)
+        .peekable();
 
-    let truncated = threats.len() > MAX_THREAT_LIST_ITEMS;
-    let threats = if truncated {
-        threats.into_iter().take(MAX_THREAT_LIST_ITEMS).collect()
-    } else {
-        threats
-    };
+    let threats: Vec<ThreatListItem> = matching.by_ref().take(MAX_THREAT_LIST_ITEMS).collect();
+    let truncated = matching.peek().is_some();
 
     IpcResponse::ThreatList { threats, truncated }
 }

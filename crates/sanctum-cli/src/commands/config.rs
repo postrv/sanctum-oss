@@ -29,7 +29,12 @@ pub fn run(edit: bool, recommended: bool) -> Result<(), CliError> {
             // Create default config in standard location
             let paths = sanctum_types::paths::WellKnownPaths::default();
             let config_file = paths.config_dir.join("config.toml");
-            fs::create_dir_all(&paths.config_dir)?;
+            // Ensure parent directories exist, then create the config
+            // directory with restricted (0o700) permissions.
+            if let Some(parent) = paths.config_dir.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            sanctum_types::fs_safety::ensure_secure_dir(&paths.config_dir)?;
 
             if !config_file.exists() {
                 // Atomic write: write to temp file, sync, then rename into place

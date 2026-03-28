@@ -113,9 +113,24 @@ pub fn write_token(data_dir: &Path, token: &str) -> io::Result<PathBuf> {
 /// Returns an `io::Error` if the file cannot be read.
 pub fn read_token(data_dir: &Path) -> io::Result<String> {
     let token_path = data_dir.join(AUTH_TOKEN_FILENAME);
-    let token = fs::read_to_string(&token_path)?;
-    let trimmed = token.trim().to_string();
-    Ok(trimmed)
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+            .open(&token_path)?;
+        let mut token = String::new();
+        file.read_to_string(&mut token)?;
+        Ok(token.trim().to_owned())
+    }
+    #[cfg(not(unix))]
+    {
+        let content = fs::read_to_string(&token_path)?;
+        Ok(content.trim().to_owned())
+    }
 }
 
 /// Remove the auth token file. Best-effort: ignores `NotFound`.

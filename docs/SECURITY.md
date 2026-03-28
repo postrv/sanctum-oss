@@ -49,7 +49,7 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 
 - **Zero `unsafe` code** in the entire codebase
 - **No `unwrap`/`expect`/`panic`** outside test code (enforced by workspace-level clippy lints)
-- **Zero clippy warnings** across 1,085 tests
+- **Zero clippy warnings** across 1,127 tests
 - **Rust toolchain pinned** to 1.94.0 via `rust-toolchain.toml` for reproducible builds
 
 ### Dependency management
@@ -75,7 +75,7 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 
 ### Testing
 
-- **1,085 tests** covering all eight workspace crates
+- **1,127 tests** covering all eight workspace crates
 - **Fuzz testing targets** for security-critical parsers (PTH file analyser, config parser) in `fuzz/fuzz_targets/`
 - **9 property-based tests** using proptest (6 sentinel + 3 budget) that verify invariants such as analyser totality, determinism, quarantine roundtrip identity, pricing overflow safety, and spend monotonicity
 - **8 Kani bounded model checking proofs** for core algorithms (analyser panic-freedom, path classification, exec detection, quarantine state machine, ID traversal rejection, ceiling cost overflow, Shannon entropy panic-freedom, glob exact-match correctness) — integrated as `#[cfg(kani)]` modules with CI enforcement

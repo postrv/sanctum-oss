@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP built-in sensitive path restrictions**: All MCP tools are blocked from accessing `.ssh/`, `.aws/`, `.gnupg/`, `.env`, `.pth`, `sitecustomize.py`, and other sensitive paths, regardless of user rules
 - **macOS credential access tracing**: Best-effort `lsof` probe identifies which process accessed credential files (previously returned no process info on macOS)
 - **BudgetOverrun threat events**: Budget limit exceedances now emit `ThreatEvent` records to the audit log
-- **1,085 tests** across 8 crates (up from 899)
+- **1,127 tests** across 8 crates (up from 899)
 
 ### Fixed
 - **Claude Code hooks JSON format**: Migrated from deprecated flat format to current three-level nested format (`hooks: [{ type: "command", command }]`) — without this fix, hooks were silently ignored by Claude Code
@@ -63,6 +63,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Config directory permissions**: `.sanctum/` created with 0o700, config files with 0o600
 - **Temp file cleanup**: All write-temp-then-rename paths now clean up on failure
 - **IPC socket directory permissions**: Failure to set 0o700 now logged as error instead of silently ignored
+- **PID file fsync**: fsync after PID write for crash safety (prevents dual-daemon race)
+- **IPC `id` field length validation**: `id` field capped at 128 characters to prevent oversized payloads
+- **`IpcMessage` custom Debug impl**: Redacts auth token from log output
+- **`RecordUsage` token count validation**: Token counts capped at 100M per field
+- **`read_token()` O_NOFOLLOW**: Consistent with `write_token()`, prevents symlink-based token theft
+- **Quarantine file read O_NOFOLLOW**: Prevents symlink-based content exfiltration from quarantine
+- **PTH analyser whitespace detection**: Detects Python import statements using form feed, vertical tab, and carriage return whitespace
+- **Extended Unicode homoglyph map**: Greek omicron, alpha, and fullwidth character variants added
+- **`ensure_secure_dir` permission correction**: Verifies and corrects permissions on existing directories
+- **Security floor extension**: `watch_credentials` and `credential_allowlist` cannot be weakened by project-local configs
+- **Config file size limit**: 1MB maximum prevents denial-of-service via oversized config
+- **Config directory 0o700 permissions**: Config directory created with restrictive permissions
+- **Network exfiltration command detection**: `nc`, `ncat`, `socat`, `telnet`, `wget --post` detected with credential path blocking
+- **Full environment dump detection**: Python `os.environ` dump and Node `process.env` dump detection in scripts
+- **High-risk write path blocking**: `authorized_keys`, crontab, systemd autostart paths now blocked (not just warned)
+- **Additional credential file patterns**: `.vault-token`, `.my.cnf`, `.boto`, `application-default-credentials.json`
+- **`ListThreats` iterator optimization**: Prevents unbounded memory allocation
 
 ## [0.1.0] - 2026-03-27
 

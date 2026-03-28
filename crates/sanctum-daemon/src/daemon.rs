@@ -158,6 +158,7 @@ impl DaemonManager {
             .open(&self.pid_file)?;
 
         file.write_all(pid.to_string().as_bytes())?;
+        file.sync_all()?;
 
         // Set owner-only permissions via fchmod on the fd (TOCTOU-safe)
         if let Err(e) = sanctum_types::fs_safety::fchmod_600(&file) {

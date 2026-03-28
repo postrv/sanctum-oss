@@ -33,14 +33,14 @@ See the [Getting Started guide](docs/GETTING_STARTED.md) for a complete 5-minute
 
 - **Credential redaction** -- Scans outbound content against 37 credential patterns (OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, Vercel, Docker Hub, Hashicorp Vault, and more) before data leaves your machine.
 - **Shannon entropy analysis** -- Detects high-entropy strings that look like randomly-generated secrets, even when they don't match a known pattern.
-- **Claude Code hook handlers** -- PreToolUse/PostToolUse hooks for pre-bash, pre-write, pre-read, and post-bash actions.
+- **Claude Code hook handlers** -- PreToolUse/PostToolUse hooks for pre-bash, pre-write, pre-read, pre-mcp, and post-bash actions.
 - **MCP policy engine** -- Audits MCP tool calls with policy-based restrictions.
 
 ### Phase 3: Budget Controller (current)
 
-- **Per-provider, per-session, and per-day spend limits** -- Set budgets globally or per provider with `sanctum budget set`.
+- **Per-provider, per-session, and per-day spend tracking and alerts** -- Set budget alert thresholds globally or per provider with `sanctum budget set`.
 - **3 provider parsers** -- Extracts cost data from OpenAI, Anthropic, and Google API responses.
-- **Model allowlists** -- Restrict which models each provider may use.
+- **Model allowlists** -- Restrict which models each provider may use (enforcement via proxy, tracking available now).
 - **Budget extend and reset** -- Extend a session budget or reset counters without reconfiguring limits.
 - **HTTP budget proxy** (foundation) -- `sanctum-proxy` crate with provider identification for transparent API interception (TLS MITM implementation in progress).
 
@@ -148,7 +148,7 @@ cargo build --release
 
 ## Architecture
 
-A workspace of 8 crates (~26,400 lines of Rust):
+A workspace of 8 crates (~28,100 lines of Rust):
 
 | Crate | Purpose |
 |-------|---------|
@@ -175,7 +175,7 @@ Key guarantees:
 - **Zero `unsafe` code** in the entire codebase (denied by workspace lint)
 - **No panics on any input** (`unwrap` and `expect` are denied by clippy)
 - **All dependencies audited** and version-pinned (193 deps, 0 known CVEs)
-- **1,085 tests**, 0 clippy warnings (pedantic + nursery)
+- **1,127 tests**, 0 clippy warnings (pedantic + nursery)
 - **8 Kani bounded model checking proofs** with CI enforcement
 - **2 fuzz targets** for security-critical parsers
 - **9 property-based tests** verifying core invariants

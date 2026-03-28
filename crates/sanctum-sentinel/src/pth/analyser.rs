@@ -136,6 +136,11 @@ const HOMOGLYPH_MAP: &[(char, char)] = &[
     ('\u{0440}', 'p'), // Cyrillic р → Latin p
     ('\u{0445}', 'x'), // Cyrillic х → Latin x
     ('\u{0456}', 'i'), // Cyrillic і → Latin i
+    ('\u{03BF}', 'o'), // Greek omicron ο → Latin o
+    ('\u{03B1}', 'a'), // Greek alpha α → Latin a
+    ('\u{FF45}', 'e'), // Fullwidth Latin small e ｅ → Latin e
+    ('\u{FF58}', 'x'), // Fullwidth Latin small x ｘ → Latin x
+    ('\u{FF43}', 'c'), // Fullwidth Latin small c ｃ → Latin c
 ];
 
 /// Check whether `line` contains any critical keyword spelled with
@@ -234,8 +239,14 @@ pub fn analyse_pth_line(line: &str) -> PthVerdict {
     // Python executes .pth lines that start with "import" (after whitespace)
     let has_import = trimmed.starts_with("import ")
         || trimmed.starts_with("import\t")
+        || trimmed.starts_with("import\x0c")
+        || trimmed.starts_with("import\x0b")
+        || trimmed.starts_with("import\r")
         || lower.starts_with("import ")
-        || lower.starts_with("import\t");
+        || lower.starts_with("import\t")
+        || lower.starts_with("import\x0c")
+        || lower.starts_with("import\x0b")
+        || lower.starts_with("import\r");
 
     // Also check for Unicode homoglyph evasion in "import"
     let has_non_ascii = trimmed.bytes().any(|b| !b.is_ascii());
@@ -782,6 +793,80 @@ mod tests {
         let content = "os.sy\\\r\nstem('curl evil.com')";
         let result = analyse_pth_file(content);
         assert_eq!(result.verdict, FileVerdict::Critical);
+    }
+
+    // ============================================================
+    // Import with alternative whitespace characters
+    // ============================================================
+
+    #[test]
+    fn warning_import_form_feed_separated() {
+        let result = analyse_pth_line("import\x0cpkg_resources");
+        assert!(
+            result.level() >= ThreatLevel::Warning,
+            "import followed by form feed should be detected"
+        );
+    }
+
+    #[test]
+    fn warning_import_vertical_tab_separated() {
+        let result = analyse_pth_line("import\x0bpkg_resources");
+        assert!(
+            result.level() >= ThreatLevel::Warning,
+            "import followed by vertical tab should be detected"
+        );
+    }
+
+    #[test]
+    fn warning_import_carriage_return_separated() {
+        let result = analyse_pth_line("import\rpkg_resources");
+        assert!(
+            result.level() >= ThreatLevel::Warning,
+            "import followed by carriage return should be detected"
+        );
+    }
+
+    // ============================================================
+    // Additional homoglyph detection tests
+    // ============================================================
+
+    #[test]
+    fn homoglyph_open_greek_omicron() {
+        // U+03BF (Greek omicron ο) instead of Latin o in "open("
+        let result = analyse_pth_line("\u{03BF}pen('/etc/shadow')");
+        assert_eq!(
+            result.level(),
+            ThreatLevel::Critical,
+            "Greek omicron in open( should be detected as homoglyph evasion"
+        );
+    }
+
+    #[test]
+    fn homoglyph_base64_greek_alpha() {
+        // U+03B1 (Greek alpha α) instead of Latin a in "base64"
+        let result = analyse_pth_line("b\u{03B1}se64.b64decode('payload')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn homoglyph_exec_fullwidth_e() {
+        // U+FF45 (fullwidth Latin small e) instead of Latin e in "exec("
+        let result = analyse_pth_line("\u{FF45}xec(payload)");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn homoglyph_exec_fullwidth_x() {
+        // U+FF58 (fullwidth Latin small x) instead of Latin x in "exec("
+        let result = analyse_pth_line("e\u{FF58}ec(payload)");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn homoglyph_codecs_fullwidth_c() {
+        // U+FF43 (fullwidth Latin small c) instead of Latin c in "codecs."
+        let result = analyse_pth_line("\u{FF43}odecs.open('/etc/passwd')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
     }
 }
 

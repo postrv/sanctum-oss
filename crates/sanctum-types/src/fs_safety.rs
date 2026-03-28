@@ -130,7 +130,16 @@ pub fn ensure_secure_dir(path: &Path) -> io::Result<()> {
         builder.mode(0o700);
         match builder.create(path) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                // Verify and fix permissions on the existing directory
+                use std::os::unix::fs::PermissionsExt;
+                let meta = std::fs::metadata(path)?;
+                let mode = meta.permissions().mode() & 0o777;
+                if mode != 0o700 {
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+                }
+                Ok(())
+            }
             Err(e) => Err(e),
         }
     }
@@ -316,6 +325,37 @@ mod tests {
         let sub = dir.path().join("secure");
 
         ensure_secure_dir(&sub).expect("create");
+
+        let mode = std::fs::metadata(&sub)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_secure_dir_fixes_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("insecure");
+
+        // Create directory with overly permissive mode
+        std::fs::create_dir(&sub).expect("create");
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        // Verify it's currently 0o755
+        let mode = std::fs::metadata(&sub)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
+
+        // ensure_secure_dir should fix the permissions to 0o700
+        ensure_secure_dir(&sub).expect("fix perms");
 
         let mode = std::fs::metadata(&sub)
             .expect("metadata")

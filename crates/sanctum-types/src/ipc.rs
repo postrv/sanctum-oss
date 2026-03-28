@@ -10,6 +10,8 @@
 //! [4 bytes big-endian length][JSON payload]
 //! ```
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -95,7 +97,7 @@ impl IpcCommand {
 /// attribute means the serialised form is the same as an `IpcCommand` with an
 /// additional `auth_token` field — backwards-compatible with old clients that
 /// omit the token.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IpcMessage {
     /// The underlying command.
     #[serde(flatten)]
@@ -103,6 +105,18 @@ pub struct IpcMessage {
     /// Optional authentication token for privileged commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
+}
+
+impl fmt::Debug for IpcMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IpcMessage")
+            .field("command", &self.command)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// Responses sent from the daemon to the CLI.

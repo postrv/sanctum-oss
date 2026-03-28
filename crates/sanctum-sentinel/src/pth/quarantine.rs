@@ -401,7 +401,21 @@ impl Quarantine {
 
         let quarantine_path = self.quarantine_dir.join(&id);
 
-        // Single-fd open: use the file handle for metadata + bounded read to avoid TOCTOU
+        // Single-fd open: use O_NOFOLLOW on Unix to prevent reading through symlinks,
+        // then use the file handle for metadata + bounded read to avoid TOCTOU.
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+                .open(path)
+                .map_err(|e| SentinelError::Quarantine {
+                    path: path.to_path_buf(),
+                    source: e,
+                })?
+        };
+        #[cfg(not(unix))]
         let file = fs::File::open(path).map_err(|e| SentinelError::Quarantine {
             path: path.to_path_buf(),
             source: e,
@@ -1308,7 +1322,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn quarantine_skips_stub_write_when_path_is_symlink() {
+    fn quarantine_rejects_symlink_on_initial_read() {
         let dir = tempfile::tempdir().expect("tempdir");
         let real_file = dir.path().join("real.pth");
         let link_path = dir.path().join("link.pth");
@@ -1318,21 +1332,15 @@ mod tests {
         std::os::unix::fs::symlink(&real_file, &link_path).expect("symlink");
 
         let q = Quarantine::new(dir.path().join("quarantine"));
-        // Quarantine the symlink path — should succeed (file content is read
-        // via the symlink) but the stub write should be skipped.
+        // Quarantine the symlink path — should fail at the initial read
+        // because O_NOFOLLOW rejects symlinks with ELOOP.
         let result = q.quarantine_file(&link_path, &default_meta(&link_path));
         assert!(
-            result.is_ok(),
-            "quarantine should succeed for symlink: {result:?}"
+            result.is_err(),
+            "quarantine should reject symlink on initial read"
         );
 
-        // The symlink should still exist and still be a symlink (not overwritten)
-        assert!(link_path
-            .symlink_metadata()
-            .expect("meta")
-            .file_type()
-            .is_symlink());
-        // The real file should not have been truncated
+        // The real file should not have been modified
         let real_content = fs::read_to_string(&real_file).expect("read");
         assert_eq!(real_content, "payload", "real file should not be modified");
     }

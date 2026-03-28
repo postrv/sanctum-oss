@@ -464,14 +464,15 @@ fn handle_critical_verdict(
 /// This is inherently racy: the creating process may have already closed the file
 /// descriptor by the time we scan. The result is best-effort and may return `None`.
 #[allow(clippy::missing_const_for_fn)] // Linux branch calls non-const linux_find_creator_pid
-fn try_find_creator_pid(_path: &Path) -> Option<u32> {
+fn try_find_creator_pid(path: &Path) -> Option<u32> {
     #[cfg(target_os = "linux")]
     {
-        linux_find_creator_pid(_path)
+        linux_find_creator_pid(path)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = path;
         None
     }
 }

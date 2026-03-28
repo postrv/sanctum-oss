@@ -124,7 +124,7 @@ impl CredentialWatcher {
                 };
 
                 if tx.blocking_send(credential_event).is_err() {
-                    alive_clone.store(false, std::sync::atomic::Ordering::Relaxed);
+                    alive_clone.store(false, std::sync::atomic::Ordering::Release);
                     return;
                 }
             }
@@ -172,7 +172,7 @@ impl CredentialWatcher {
     /// Check if the watcher is still alive.
     #[must_use]
     pub fn is_alive(&self) -> bool {
-        self.alive.load(std::sync::atomic::Ordering::Relaxed)
+        self.alive.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 

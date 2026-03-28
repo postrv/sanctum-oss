@@ -76,22 +76,22 @@ where
     Ok(value.min(100))
 }
 
-/// Deserialise a poll interval, clamping to a minimum of 1 second.
-/// `tokio::time::interval(Duration::ZERO)` panics, so we must prevent
-/// a user from setting `poll_interval_secs = 0` in their config.
+/// Deserialise a poll interval, clamping to 1..=3600.
+/// `tokio::time::interval(Duration::ZERO)` panics, so we enforce a minimum of 1.
+/// Values above 3600 (1 hour) effectively disable monitoring, so we cap there.
 fn deserialize_poll_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = u64::deserialize(deserializer)?;
-    Ok(value.max(1))
+    Ok(value.clamp(1, 3600))
 }
 
 /// Network monitoring configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NetworkConfig {
-    /// Polling interval in seconds (minimum 1, to avoid tokio panic).
+    /// Polling interval in seconds (clamped to 1..=3600).
     #[serde(deserialize_with = "deserialize_poll_interval")]
     pub poll_interval_secs: u64,
     /// Baseline learning period in days.
@@ -126,6 +126,24 @@ impl Default for NetworkConfig {
             safe_ports: vec![80, 443, 22, 53, 8080, 8443, 3000, 5000, 5432, 3306, 6379],
         }
     }
+}
+
+/// Deserialise `ca_validity_days`, clamping to 1..=3650.
+fn deserialize_ca_validity_days<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    Ok(value.clamp(1, 3650))
+}
+
+/// Deserialise `max_response_body_bytes`, clamping to 1..=100MB.
+fn deserialize_max_response_body_bytes<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    Ok(value.clamp(1, 100 * 1024 * 1024)) // 1 byte to 100MB
 }
 
 /// An entry in the `.pth` allowlist.
@@ -183,9 +201,11 @@ pub struct ProxyConfig {
     pub enforce_budget: bool,
     /// Whether to enforce model allowlists.
     pub enforce_allowed_models: bool,
-    /// CA certificate validity in days.
+    /// CA certificate validity in days (clamped to 1..=3650).
+    #[serde(deserialize_with = "deserialize_ca_validity_days")]
     pub ca_validity_days: u32,
-    /// Maximum response body size to buffer for usage extraction (bytes).
+    /// Maximum response body size to buffer for usage extraction (bytes, clamped to 1..=100MB).
+    #[serde(deserialize_with = "deserialize_max_response_body_bytes")]
     pub max_response_body_bytes: usize,
 }
 
@@ -547,6 +567,24 @@ mod tests {
     }
 
     #[test]
+    fn ca_validity_days_clamped_to_bounds() {
+        let toml_str = "[proxy]\nca_validity_days = 0\n";
+        let config: SanctumConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.proxy.ca_validity_days, 1);
+
+        let toml_str = "[proxy]\nca_validity_days = 999999\n";
+        let config: SanctumConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.proxy.ca_validity_days, 3650);
+    }
+
+    #[test]
+    fn max_response_body_bytes_clamped() {
+        let toml_str = "[proxy]\nmax_response_body_bytes = 0\n";
+        let config: SanctumConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.proxy.max_response_body_bytes, 1);
+    }
+
+    #[test]
     fn alert_at_percent_clamped_to_100() {
         let toml_str = r"
             [budgets]
@@ -575,6 +613,20 @@ mod tests {
         assert!(
             config.sentinel.network.poll_interval_secs >= 1,
             "poll_interval_secs must be at least 1 to avoid tokio panic"
+        );
+    }
+
+    #[test]
+    fn poll_interval_clamped_to_upper_bound() {
+        let toml_str = r"
+            [sentinel.network]
+            poll_interval_secs = 86400
+        ";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("config should parse");
+        assert_eq!(
+            config.sentinel.network.poll_interval_secs, 3600,
+            "poll_interval_secs above 3600 should be clamped to 3600"
         );
     }
 }

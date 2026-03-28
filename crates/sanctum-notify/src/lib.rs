@@ -76,7 +76,7 @@ pub fn notify_threat(event: &ThreatEvent) {
         return;
     }
     if LAST_NOTIFICATION
-        .compare_exchange(last, now_ms, Ordering::Release, Ordering::Relaxed)
+        .compare_exchange(last, now_ms, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         return; // Another thread beat us

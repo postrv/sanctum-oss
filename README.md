@@ -18,6 +18,8 @@ sanctum init
 # The daemon auto-starts with your shell.
 ```
 
+See the [Getting Started guide](docs/GETTING_STARTED.md) for a complete 5-minute walkthrough.
+
 ## What it does
 
 ### Phase 1: The Sentinel (current)
@@ -146,7 +148,7 @@ cargo build --release
 
 ## Architecture
 
-A workspace of 8 crates (~17,400 lines of Rust):
+A workspace of 8 crates (~19,000 lines of Rust):
 
 | Crate | Purpose |
 |-------|---------|
@@ -173,7 +175,7 @@ Key guarantees:
 - **Zero `unsafe` code** in the entire codebase (denied by workspace lint)
 - **No panics on any input** (`unwrap` and `expect` are denied by clippy)
 - **All dependencies audited** and version-pinned (193 deps, 0 known CVEs)
-- **580 tests**, 0 clippy warnings (pedantic + nursery)
+- **645 tests**, 0 clippy warnings (pedantic + nursery)
 - **8 Kani bounded model checking proofs** with CI enforcement
 - **2 fuzz targets** for security-critical parsers
 - **9 property-based tests** verifying core invariants

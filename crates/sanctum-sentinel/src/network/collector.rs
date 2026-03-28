@@ -73,7 +73,7 @@ async fn collect_macos() -> HashSet<ConnectionInfo> {
 /// Records are delimited by `p` lines (new process) and `f` lines (new file descriptor).
 /// We only care about TCP connections that have both local and remote addresses.
 #[must_use]
-pub fn parse_lsof_output(output: &str) -> HashSet<ConnectionInfo> {
+fn parse_lsof_output(output: &str) -> HashSet<ConnectionInfo> {
     let mut connections = HashSet::new();
     let mut current_pid: Option<u32> = None;
     let mut current_command: Option<String> = None;
@@ -86,7 +86,8 @@ pub fn parse_lsof_output(output: &str) -> HashSet<ConnectionInfo> {
 
         // Safe to index: we checked the line is non-empty
         let field_id = line.as_bytes()[0];
-        let value = &line[1..];
+        // Use safe slicing to avoid panic on unexpected multi-byte UTF-8 first char
+        let value = line.get(1..).unwrap_or("");
 
         match field_id {
             b'p' => {
@@ -199,8 +200,9 @@ fn collect_linux() -> HashSet<ConnectionInfo> {
 /// Addresses are in hex: `AABBCCDD:PORT` for IPv4.
 /// State 01 = ESTABLISHED.
 #[must_use]
+#[cfg(any(target_os = "linux", test))]
 #[allow(clippy::similar_names)]
-pub fn parse_proc_net_tcp(contents: &str, is_ipv6: bool) -> HashSet<ConnectionInfo> {
+fn parse_proc_net_tcp(contents: &str, is_ipv6: bool) -> HashSet<ConnectionInfo> {
     let mut connections = HashSet::new();
 
     for line in contents.lines().skip(1) {
@@ -244,6 +246,7 @@ pub fn parse_proc_net_tcp(contents: &str, is_ipv6: bool) -> HashSet<ConnectionIn
 }
 
 /// Parse a hex address from `/proc/net/tcp` format: `0100007F:1F90`.
+#[cfg(any(target_os = "linux", test))]
 fn parse_proc_hex_addr_v4(hex_addr: &str) -> Option<SocketAddr> {
     let (addr_hex, port_hex) = hex_addr.split_once(':')?;
     let addr_u32 = u32::from_str_radix(addr_hex, 16).ok()?;
@@ -258,6 +261,7 @@ fn parse_proc_hex_addr_v4(hex_addr: &str) -> Option<SocketAddr> {
 ///
 /// Format: `00000000000000000000000001000000:1F90`
 /// The address is 32 hex chars (128 bits) followed by `:PORT`.
+#[cfg(any(target_os = "linux", test))]
 fn parse_proc_hex_addr_v6(hex_addr: &str) -> Option<SocketAddr> {
     let (addr_hex, port_hex) = hex_addr.split_once(':')?;
     let port = u16::from_str_radix(port_hex, 16).ok()?;
@@ -270,7 +274,7 @@ fn parse_proc_hex_addr_v6(hex_addr: &str) -> Option<SocketAddr> {
     let mut octets = [0u8; 16];
     for i in 0..4 {
         let start = i * 8;
-        let word = u32::from_str_radix(&addr_hex[start..start + 8], 16).ok()?;
+        let word = u32::from_str_radix(addr_hex.get(start..start + 8)?, 16).ok()?;
         let word_bytes = word.to_be_bytes();
         // Each 32-bit word is stored in host byte order in /proc, but we read as big-endian
         // and need to swap to get the actual bytes

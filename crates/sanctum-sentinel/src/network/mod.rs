@@ -90,7 +90,7 @@ impl NetworkWatcher {
 
             loop {
                 interval.tick().await;
-                if !alive_clone.load(Ordering::Relaxed) {
+                if !alive_clone.load(Ordering::Acquire) {
                     break;
                 }
 
@@ -103,7 +103,7 @@ impl NetworkWatcher {
                         if let Some(event) = detector::check(conn, &config) {
                             if tx.send(event).await.is_err() {
                                 // Receiver dropped, stop watching
-                                alive_clone.store(false, Ordering::Relaxed);
+                                alive_clone.store(false, Ordering::Release);
                                 return;
                             }
                         }
@@ -120,12 +120,12 @@ impl NetworkWatcher {
     /// Check if the watcher is still running.
     #[must_use]
     pub fn is_alive(&self) -> bool {
-        self.alive.load(Ordering::Relaxed)
+        self.alive.load(Ordering::Acquire)
     }
 
     /// Stop the watcher.
     pub fn stop(&self) {
-        self.alive.store(false, Ordering::Relaxed);
+        self.alive.store(false, Ordering::Release);
     }
 }
 

@@ -100,7 +100,7 @@ fn command_invokes(command: &str, word: &str) -> bool {
     }
 
     // After a shell operator: "echo hi | cat .env", "echo hi; cat .env", etc.
-    let separators: &[&str] = &["| ", ";\n", "; ", "&& ", "` ", "$( ", "$("];
+    let separators: &[&str] = &["| ", ";\n", "; ", "&& ", "|| ", "` ", "`", "$( ", "$(", "\n"];
     for sep in separators {
         // e.g. "| cat .env"
         let needle = format!("{sep}{word} ");
@@ -225,7 +225,7 @@ fn is_env_dump(command: &str) -> bool {
     // Check for env-dump commands after shell separators.
     // Catches bypasses like "echo foo; env", "true && env", "false || env",
     // "echo hi | env", and newline-separated "echo hi\nenv".
-    let separator_patterns: &[&str] = &["; ", ";\t", ";\n", "&& ", "|| ", "| "];
+    let separator_patterns: &[&str] = &["; ", ";\t", ";\n", ";", "&& ", "&&", "|| ", "||", "| "];
     let all_env_cmds: &[&str] = &["env", "printenv"];
     for sep in separator_patterns {
         for cmd in all_env_cmds {
@@ -341,7 +341,7 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
 
 /// Evaluate a pre-write hook.
 ///
-/// - **BLOCK**: Writing `.pth` files or `sitecustomize.py` (supply chain attack vectors);
+/// - **BLOCK**: Writing `.pth` files, `sitecustomize.py`, or `usercustomize.py` (supply chain attack vectors);
 ///   writing content that contains detected credentials.
 /// - **ALLOW**: Everything else.
 #[must_use]
@@ -369,10 +369,10 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
         );
     }
 
-    // Block writing sitecustomize.py
-    if file_path.ends_with("sitecustomize.py") {
+    // Block writing sitecustomize.py or usercustomize.py
+    if file_path.ends_with("sitecustomize.py") || file_path.ends_with("usercustomize.py") {
         return HookOutput::block(
-            "Blocked: writing sitecustomize.py is a known supply chain attack vector".to_owned(),
+            "Blocked: writing sitecustomize.py/usercustomize.py is a known supply chain attack vector".to_owned(),
         );
     }
 
@@ -422,7 +422,15 @@ pub fn pre_read(input: &HookInput) -> HookOutput {
 
     // Block reading sensitive directory paths
     for prefix in SENSITIVE_READ_PATHS {
-        if file_path.contains(prefix.trim_start_matches('~').trim_start_matches("$HOME")) {
+        let stripped = prefix.trim_start_matches('~').trim_start_matches("$HOME");
+        if file_path.contains(stripped) {
+            return HookOutput::block(format!(
+                "Blocked: reading sensitive path '{file_path}' is not permitted"
+            ));
+        }
+        // Also catch relative paths like ".ssh/id_rsa" (no leading /)
+        let relative = stripped.trim_start_matches('/');
+        if file_path.starts_with(relative) {
             return HookOutput::block(format!(
                 "Blocked: reading sensitive path '{file_path}' is not permitted"
             ));
@@ -1504,5 +1512,43 @@ mod tests {
     fn env_dash_zero_blocked() {
         let output = pre_bash(&bash_input("env -0"));
         assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- Fix: pre_write blocks usercustomize.py ----
+
+    #[test]
+    fn pre_write_blocks_usercustomize() {
+        let input = make_input(
+            "write",
+            json!({ "file_path": "/usr/lib/python3/usercustomize.py", "content": "import os" }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- Fix: command_invokes detects bare newline separator ----
+
+    #[test]
+    fn command_invokes_detects_newline_separator() {
+        assert!(command_invokes("echo foo\ncat /etc/passwd", "cat"));
+    }
+
+    #[test]
+    fn command_invokes_detects_backtick_without_space() {
+        assert!(command_invokes("echo `cat /etc/passwd`", "cat"));
+    }
+
+    #[test]
+    fn is_env_dump_detects_semicolon_no_space() {
+        assert!(is_env_dump("true;env"));
+        assert!(is_env_dump("true&&env"));
+        assert!(is_env_dump("true||printenv"));
+    }
+
+    #[test]
+    fn pre_read_blocks_relative_ssh_path() {
+        let input = make_input("read", json!({ "file_path": ".ssh/id_rsa" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block, "relative .ssh path should be blocked");
     }
 }

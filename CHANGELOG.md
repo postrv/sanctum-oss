@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reproducible build verification**: CI job builds twice and compares SHA-256 hashes
 - **Nightly extended fuzz testing**: 5-hour fuzz runs via cron schedule (2.5 hours per target)
 - **Release workflow gates**: `verify-ci` job checks CI status before building release artifacts
-- **580 tests** across 8 crates (up from 511)
+- **645 tests** across 8 crates (up from 511)
 
 ## [0.1.0] - 2026-03-27
 

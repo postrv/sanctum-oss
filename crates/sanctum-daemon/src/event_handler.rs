@@ -20,6 +20,9 @@ use crate::context::VerdictContext;
 ///
 /// Reads the file, analyses its content, traces process lineage, and dispatches
 /// to the appropriate verdict handler based on the analysis result.
+/// Maximum size for a .pth file to be read for analysis (1 MB).
+const MAX_PTH_READ_SIZE: u64 = 1_048_576;
+
 pub fn handle_watch_event(
     event: &WatchEvent,
     quarantine: &Quarantine,
@@ -29,6 +32,23 @@ pub fn handle_watch_event(
     match event.kind {
         WatchEventKind::Created | WatchEventKind::Modified => {
             tracing::info!(path = %event.path.display(), "detected .pth file change");
+
+            // Reject files larger than 1MB to prevent OOM from malicious large .pth files
+            match std::fs::metadata(&event.path) {
+                Ok(meta) if meta.len() > MAX_PTH_READ_SIZE => {
+                    tracing::warn!(
+                        path = %event.path.display(),
+                        size = meta.len(),
+                        "file too large to analyse (max {MAX_PTH_READ_SIZE} bytes)"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(path = %event.path.display(), %e, "failed to read file metadata");
+                    return;
+                }
+                _ => {}
+            }
 
             // Read the file content (use read + from_utf8_lossy so non-UTF-8
             // bytes are replaced with U+FFFD rather than silently skipping the file)

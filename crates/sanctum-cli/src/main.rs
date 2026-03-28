@@ -13,6 +13,7 @@
 //! - `sanctum hook`     — Claude Code hook handler (pre-bash, pre-write, etc.)
 //! - `sanctum hooks`    — Install/remove Claude Code hooks
 //! - `sanctum daemon`   — Daemon management (start/stop/restart)
+//! - `sanctum doctor`   — Diagnose and verify Sanctum installation
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -71,6 +72,9 @@ enum Commands {
         /// Open config in $EDITOR.
         #[arg(long)]
         edit: bool,
+        /// Output a recommended production configuration.
+        #[arg(long, conflicts_with = "edit")]
+        recommended: bool,
     },
     /// View or manage LLM spend budgets.
     Budget {
@@ -104,6 +108,9 @@ enum Commands {
     Hook {
         /// Hook action: pre-bash, pre-write, pre-read, post-bash.
         action: String,
+        /// Enable verbose debug output to stderr.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Install or remove Claude Code hooks.
     Hooks {
@@ -115,6 +122,8 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Check installation health.
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -199,7 +208,7 @@ fn main() -> ExitCode {
         Commands::Run { sandbox, command } => {
             commands::run::run(sandbox, &command)
         }
-        Commands::Config { edit } => commands::config::run(edit),
+        Commands::Config { edit, recommended } => commands::config::run(edit, recommended),
         Commands::Budget { action } => commands::budget::run(action.as_ref()),
         Commands::Audit { last, level, json } => {
             commands::audit::run(last.as_deref(), level.as_deref(), json)
@@ -207,9 +216,10 @@ fn main() -> ExitCode {
         Commands::Fix { action, json, yes } => {
             commands::fix::run(action.as_ref(), json, yes)
         }
-        Commands::Hook { action } => commands::hook::run(&action),
+        Commands::Hook { action, verbose } => commands::hook::run(&action, verbose),
         Commands::Hooks { action } => commands::hooks::run(&action),
         Commands::Daemon { action } => commands::daemon::run(&action),
+        Commands::Doctor => commands::doctor::run(),
     };
 
     match result {

@@ -77,7 +77,7 @@ pub struct ThreatEvent {
 impl ThreatEvent {
     /// Compute a short content-addressed ID for this event.
     ///
-    /// Format: first 12 hex chars of SHA-256(timestamp || category || `source_path`).
+    /// Format: first 32 hex chars (128-bit) of SHA-256(timestamp || category || `source_path`).
     #[must_use]
     pub fn threat_id(&self) -> String {
         use sha2::{Digest, Sha256};
@@ -86,7 +86,7 @@ impl ThreatEvent {
         hasher.update(format!("{:?}", self.category).as_bytes());
         hasher.update(self.source_path.to_string_lossy().as_bytes());
         let hash = hasher.finalize();
-        hex::encode(&hash[..6])
+        hex::encode(&hash[..16])
     }
 }
 
@@ -166,7 +166,7 @@ mod tests {
         let id1 = event.threat_id();
         let id2 = event.threat_id();
         assert_eq!(id1, id2);
-        assert_eq!(id1.len(), 12);
+        assert_eq!(id1.len(), 32);
     }
 
     #[test]

@@ -975,6 +975,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1067,6 +1068,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "tracing",
 ]
 
 [[package]]

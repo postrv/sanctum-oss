@@ -49,7 +49,7 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 
 - **Zero `unsafe` code** in the entire codebase
 - **No `unwrap`/`expect`/`panic`** outside test code (enforced by workspace-level clippy lints)
-- **Zero clippy warnings** across 580 tests
+- **Zero clippy warnings** across 645 tests
 - **Rust toolchain pinned** to 1.94.0 via `rust-toolchain.toml` for reproducible builds
 
 ### Dependency management
@@ -75,7 +75,7 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 
 ### Testing
 
-- **580 tests** covering all eight workspace crates
+- **645 tests** covering all eight workspace crates
 - **Fuzz testing targets** for security-critical parsers (PTH file analyser, config parser) in `fuzz/fuzz_targets/`
 - **9 property-based tests** using proptest (6 sentinel + 3 budget) that verify invariants such as analyser totality, determinism, quarantine roundtrip identity, pricing overflow safety, and spend monotonicity
 - **8 Kani bounded model checking proofs** for core algorithms (analyser panic-freedom, path classification correctness, exec detection, quarantine state machine validity) — integrated as `#[cfg(kani)]` modules with CI enforcement
@@ -106,5 +106,16 @@ cosign verify-blob \
   SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
+
+### Checksum-only installs
+
+When installing via `scripts/install.sh` without cosign available, binaries are
+verified using SHA-256 checksums only. This protects against download corruption
+and CDN-level tampering, but not against a compromised GitHub release where an
+attacker replaces both the binary and the SHA256SUMS file.
+
+For production environments, we recommend installing
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) and
+enabling full Sigstore verification.
 
 No private signing keys exist. The signing identity is the GitHub Actions release workflow itself, verified via Fulcio certificate and logged to the Rekor transparency log.

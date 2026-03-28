@@ -76,7 +76,12 @@ fn install_claude_hooks() -> Result<(), CliError> {
     // Read existing settings or create new
     let mut settings: serde_json::Value = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+        serde_json::from_str(&content).map_err(|e| {
+            CliError::InvalidArgs(format!(
+                "Failed to parse Claude Code settings.json: {e}. \
+                 Please fix the file manually or back it up before retrying."
+            ))
+        })?
     } else {
         serde_json::json!({})
     };
@@ -84,8 +89,9 @@ fn install_claude_hooks() -> Result<(), CliError> {
     // Add Sanctum hook configuration
     settings["hooks"] = build_hooks_json();
 
-    let json_str = serde_json::to_string_pretty(&settings)
-        .unwrap_or_else(|_| "{}".to_string());
+    let json_str = serde_json::to_string_pretty(&settings).map_err(|e| {
+        CliError::InvalidArgs(format!("Failed to serialize settings: {e}"))
+    })?;
     fs::write(&settings_path, json_str)?;
 
     #[allow(clippy::print_stdout)]
@@ -114,15 +120,21 @@ fn remove_claude_hooks() -> Result<(), CliError> {
 
     let content = fs::read_to_string(&settings_path)?;
     let mut settings: serde_json::Value =
-        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+        serde_json::from_str(&content).map_err(|e| {
+            CliError::InvalidArgs(format!(
+                "Failed to parse Claude Code settings.json: {e}. \
+                 Please fix the file manually or back it up before retrying."
+            ))
+        })?;
 
     // Remove hooks key
     if let Some(obj) = settings.as_object_mut() {
         obj.remove("hooks");
     }
 
-    let json_str = serde_json::to_string_pretty(&settings)
-        .unwrap_or_else(|_| "{}".to_string());
+    let json_str = serde_json::to_string_pretty(&settings).map_err(|e| {
+        CliError::InvalidArgs(format!("Failed to serialize settings: {e}"))
+    })?;
     fs::write(&settings_path, json_str)?;
 
     #[allow(clippy::print_stdout)]

@@ -2,6 +2,7 @@ pub mod audit;
 pub mod budget;
 pub mod config;
 pub mod daemon;
+pub mod doctor;
 pub mod fix;
 pub mod hook;
 pub mod hooks;

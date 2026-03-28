@@ -861,11 +861,18 @@ fn handle_resolve_threat(
         }
     };
 
+    // Sanitise note: strip control characters (except newline) and cap length
+    let sanitised_note: String = note
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .take(1024)
+        .collect();
+
     let resolution = ThreatResolution {
         threat_id: id.to_string(),
         resolved_at: chrono::Utc::now(),
         resolution: resolution_action,
-        note: note.to_string(),
+        note: sanitised_note,
     };
 
     append_resolution(paths, &resolution);

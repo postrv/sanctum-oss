@@ -232,6 +232,9 @@ impl Quarantine {
         path: &Path,
         metadata: &QuarantineMetadata,
     ) -> Result<QuarantineEntry, SentinelError> {
+        /// Maximum size for a .pth file to be quarantined (1 MB).
+        const MAX_PTH_FILE_SIZE: u64 = 1_048_576;
+
         // Ensure quarantine dir exists
         fs::create_dir_all(&self.quarantine_dir).map_err(|e| {
             SentinelError::Quarantine {
@@ -255,8 +258,15 @@ impl Quarantine {
 
         // Generate unique ID — use file stem (without extension) to avoid
         // conflicts with the .json metadata extension naming scheme.
-        let file_stem = path
+        let raw_stem = path
             .file_stem().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string());
+        // Sanitize: only allow alphanumeric, dot, hyphen, underscore; cap at 64 chars
+        let file_stem: String = raw_stem
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .take(64)
+            .collect();
+        let file_stem = if file_stem.is_empty() { "unknown".to_string() } else { file_stem };
         let now = Utc::now();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -271,6 +281,21 @@ impl Quarantine {
         );
 
         let quarantine_path = self.quarantine_dir.join(&id);
+
+        // Reject files larger than 1MB (legitimate .pth files are small text files)
+        let file_size = fs::metadata(path).map_err(|e| SentinelError::Quarantine {
+            path: path.to_path_buf(),
+            source: e,
+        })?.len();
+        if file_size > MAX_PTH_FILE_SIZE {
+            return Err(SentinelError::Quarantine {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("file too large for quarantine ({file_size} bytes, max {MAX_PTH_FILE_SIZE})"),
+                ),
+            });
+        }
 
         // Read original content
         let content = fs::read(path).map_err(|e| SentinelError::Quarantine {
@@ -858,6 +883,56 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o700, "quarantine dir should be owner-only (0o700), got {mode:#o}");
+    }
+
+    #[test]
+    fn quarantine_id_sanitizes_malicious_file_stem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let q = Quarantine::new(dir.path().join("quarantine"));
+
+        // File with special chars that are valid on all platforms but should be stripped
+        let malicious_name = "evil;rm -rf ~;echo pwned.pth";
+        let pth_path = dir.path().join(malicious_name);
+        fs::write(&pth_path, "payload").expect("write test file");
+
+        let entry = q
+            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine should succeed with malicious filename");
+
+        // The ID should contain only safe characters (alphanumeric, dot, hyphen, underscore, date separators)
+        for ch in entry.id.chars() {
+            assert!(
+                ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'),
+                "quarantine ID contains unsafe character: {ch:?} in ID: {}",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn quarantine_rejects_oversized_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("huge.pth");
+        // Create a file just over 1MB
+        let content = vec![b'x'; 1_048_577];
+        fs::write(&pth_path, &content).expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let result = q.quarantine_file(&pth_path, &default_meta(&pth_path));
+        assert!(result.is_err(), "should reject file larger than 1MB");
+    }
+
+    #[test]
+    fn quarantine_accepts_file_at_size_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("maxsize.pth");
+        // Create a file exactly at 1MB
+        let content = vec![b'x'; 1_048_576];
+        fs::write(&pth_path, &content).expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let result = q.quarantine_file(&pth_path, &default_meta(&pth_path));
+        assert!(result.is_ok(), "should accept file exactly at 1MB limit");
     }
 
     #[test]

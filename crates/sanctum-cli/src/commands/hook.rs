@@ -16,8 +16,16 @@ use sanctum_types::errors::CliError;
 ///
 /// `action` is one of `pre-bash`, `pre-write`, `pre-read`, or `post-bash`.
 /// Tool invocation JSON is read from stdin.
-pub fn run(action: &str) -> Result<(), CliError> {
+pub fn run(action: &str, verbose: bool) -> Result<(), CliError> {
     use std::io::Read;
+
+    if verbose {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("debug"))
+            .with_writer(std::io::stderr)
+            .with_target(false)
+            .try_init();
+    }
 
     let mut input_str = String::new();
     std::io::stdin()
@@ -50,7 +58,10 @@ pub fn run(action: &str) -> Result<(), CliError> {
                 .map(|c| c.ai_firewall)
         })
     };
-    input.config = ai_config;
+    input.config.clone_from(&ai_config);
+    tracing::debug!(config_loaded = ai_config.is_some(), "firewall config");
+
+    tracing::debug!(%action, tool_name = %input.tool_name, "dispatching hook");
 
     let output: HookOutput = match action {
         "pre-bash" => claude::pre_bash(&input),
@@ -63,6 +74,8 @@ pub fn run(action: &str) -> Result<(), CliError> {
             )));
         }
     };
+
+    tracing::debug!(?output.decision, message = ?output.message, "hook decision");
 
     match output.decision {
         HookDecision::Allow => {

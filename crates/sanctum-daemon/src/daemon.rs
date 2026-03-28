@@ -77,6 +77,11 @@ impl DaemonManager {
                 path: self.pid_file.clone(),
                 source: e,
             })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            }
         }
 
         // First attempt: exclusive create

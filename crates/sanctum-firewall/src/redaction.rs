@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
+use crate::entropy::is_high_entropy_secret;
 use crate::patterns::PATTERNS;
 
 /// A record of a single credential redaction.
@@ -115,7 +116,34 @@ pub fn redact_credentials(text: &str) -> (String, Vec<RedactionEvent>) {
         result.push_str(&text[pos..]);
     }
 
-    (result, events)
+    // Entropy-based fallback: scan for high-entropy tokens that were not caught
+    // by any regex pattern. Split on whitespace and check each token, skipping
+    // tokens that are already redaction placeholders.
+    let mut entropy_pass = String::with_capacity(result.len());
+    for token in result.split_inclusive(|c: char| c.is_whitespace()) {
+        // split_inclusive keeps the delimiter attached to the token, so strip
+        // trailing whitespace for the entropy check but preserve it in output.
+        let trimmed = token.trim_end();
+        if !trimmed.starts_with("[REDACTED:") && is_high_entropy_secret(trimmed, 4.5, 20) {
+            let hash = Sha256::digest(trimmed.as_bytes());
+            let full_hex = hex::encode(hash);
+            let hash_prefix = &full_hex[..4];
+            let _ = write!(entropy_pass, "[POSSIBLE_SECRET_REDACTED:{hash_prefix}]");
+            // Preserve trailing whitespace
+            let trailing = &token[trimmed.len()..];
+            entropy_pass.push_str(trailing);
+            events.push(RedactionEvent {
+                credential_type: "High-Entropy Secret".to_owned(),
+                hash_prefix: hash_prefix.to_owned(),
+                start: 0,
+                end: 0,
+            });
+        } else {
+            entropy_pass.push_str(token);
+        }
+    }
+
+    (entropy_pass, events)
 }
 
 #[cfg(test)]
@@ -409,6 +437,27 @@ mod tests {
         let (output, events) = redact_credentials("");
         assert_eq!(output, "");
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn high_entropy_string_redacted_by_fallback() {
+        // This string does not match any known credential pattern but is
+        // high-entropy and long enough to be flagged by the entropy fallback.
+        let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
+        let input = format!("config: {secret}");
+        let (output, events) = redact_credentials(&input);
+        assert!(
+            !output.contains(secret),
+            "High-entropy secret should be redacted, got: {output}"
+        );
+        assert!(
+            output.contains("[POSSIBLE_SECRET_REDACTED:"),
+            "Output should contain entropy-based redaction placeholder"
+        );
+        assert!(
+            events.iter().any(|e| e.credential_type == "High-Entropy Secret"),
+            "Events should include a High-Entropy Secret entry"
+        );
     }
 
     #[test]

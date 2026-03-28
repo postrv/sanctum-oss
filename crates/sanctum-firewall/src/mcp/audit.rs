@@ -27,6 +27,9 @@ pub struct AuditEntry {
     pub reason: Option<String>,
 }
 
+/// Maximum number of in-memory audit entries before oldest are drained.
+const MAX_ENTRIES: usize = 10_000;
+
 /// An append-only audit log for MCP tool invocations.
 #[derive(Debug, Default)]
 pub struct McpAuditLog {
@@ -57,6 +60,10 @@ impl McpAuditLog {
             decision,
             reason,
         });
+        if self.entries.len() > MAX_ENTRIES {
+            let drain_count = self.entries.len() - MAX_ENTRIES;
+            self.entries.drain(..drain_count);
+        }
     }
 
     /// Return all recorded entries.
@@ -71,7 +78,10 @@ impl McpAuditLog {
     ///
     /// Returns an error if the file cannot be created or written to.
     pub fn write_to_file(&self, path: &Path) -> Result<(), std::io::Error> {
-        let mut file = std::fs::File::create(path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         for entry in &self.entries {
             // Serialisation of our well-known types should never fail, but we
             // handle the error gracefully rather than panicking.
@@ -137,6 +147,32 @@ mod tests {
     }
 
     #[test]
+    fn write_to_file_appends_not_truncates() -> Result<(), Box<dyn std::error::Error>> {
+        let mut log = McpAuditLog::new();
+        log.record("tool_a", json!({"arg": 1}), HookDecision::Allow, None);
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("audit.ndjson");
+
+        // First write: 1 entry
+        log.write_to_file(&path)?;
+        let contents = std::fs::read_to_string(&path)?;
+        assert_eq!(contents.lines().count(), 1);
+
+        // Second write: should append, resulting in 2 entries total
+        log.write_to_file(&path)?;
+        let contents = std::fs::read_to_string(&path)?;
+        assert_eq!(contents.lines().count(), 2, "write_to_file should append, not truncate");
+
+        // Verify all lines are valid JSON
+        for line in contents.lines() {
+            let _entry: AuditEntry = serde_json::from_str(line)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn entries_preserve_reason() {
         let mut log = McpAuditLog::new();
         log.record(
@@ -150,5 +186,16 @@ mod tests {
             entry.reason.as_deref(),
             Some("path restriction violated")
         );
+    }
+
+    #[test]
+    fn record_caps_at_max_entries() {
+        let mut log = McpAuditLog::new();
+        for i in 0..10_050 {
+            log.record(format!("tool_{i}"), json!({}), HookDecision::Allow, None);
+        }
+        assert!(log.entries().len() <= 10_000, "entries should be capped at 10,000");
+        // Oldest entries should have been drained
+        assert!(log.entries()[0].tool_name.ends_with("_50") || log.entries().len() == 10_000);
     }
 }

@@ -103,14 +103,16 @@ impl IpcServer {
     ///
     /// Returns an error if the socket cannot be bound.
     pub fn bind(socket_path: &Path) -> Result<Self, DaemonError> {
-        // Remove stale socket file if it exists
-        if socket_path.exists() {
-            std::fs::remove_file(socket_path).map_err(|e| {
-                DaemonError::Ipc(format!(
+        // Remove stale socket file if it exists (atomic try-remove avoids TOCTOU)
+        match std::fs::remove_file(socket_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(DaemonError::Ipc(format!(
                     "failed to remove stale socket {}: {e}",
                     socket_path.display()
-                ))
-            })?;
+                )));
+            }
         }
 
         // Ensure parent directory exists
@@ -121,6 +123,11 @@ impl IpcServer {
                     parent.display()
                 ))
             })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
 
         let listener = UnixListener::bind(socket_path).map_err(|e| {

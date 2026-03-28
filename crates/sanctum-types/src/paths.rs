@@ -69,10 +69,39 @@ impl WellKnownPaths {
 impl Default for WellKnownPaths {
     fn default() -> Self {
         Self::detect().unwrap_or_else(|| {
-            // Fallback to /tmp if home dir unavailable (should not happen in practice)
-            let fallback = PathBuf::from("/tmp/sanctum");
+            tracing::warn!(
+                "HOME not set — falling back to user-specific /tmp directory with restricted permissions"
+            );
+
+            // Use a user-specific fallback to prevent symlink attacks on shared /tmp.
+            // We use the real UID (not PID) so that the directory is stable across
+            // process restarts and cannot be recycled by another user.
+            #[cfg(unix)]
+            let uid = std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or_else(std::process::id);
+            #[cfg(not(unix))]
+            let uid = std::process::id();
+            let fallback = PathBuf::from(format!("/tmp/sanctum-{uid}"));
+
+            // Create the directory with restricted permissions (0o700) so other
+            // users cannot plant symlinks or read contents.
+            #[allow(clippy::let_underscore_must_use)]
+            let _ = std::fs::create_dir_all(&fallback);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o700);
+                #[allow(clippy::let_underscore_must_use)]
+                let _ = std::fs::set_permissions(&fallback, perms);
+            }
+
             Self {
-                ssh_dir: PathBuf::from("/tmp/.ssh"),
+                ssh_dir: fallback.join(".ssh"),
                 data_dir: fallback.clone(),
                 config_dir: fallback.clone(),
                 quarantine_dir: fallback.join("quarantine"),

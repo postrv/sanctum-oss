@@ -81,7 +81,7 @@ impl PthWatcher {
                     };
                     if tx.blocking_send(watch_event).is_err() {
                         // Receiver dropped — mark watcher as dead
-                        alive_clone.store(false, std::sync::atomic::Ordering::Relaxed);
+                        alive_clone.store(false, std::sync::atomic::Ordering::Release);
                         return;
                     }
                 }
@@ -115,7 +115,7 @@ impl PthWatcher {
     /// Check if the watcher is still alive.
     #[must_use]
     pub fn is_alive(&self) -> bool {
-        self.alive.load(std::sync::atomic::Ordering::Relaxed)
+        self.alive.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 

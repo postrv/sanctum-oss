@@ -26,3 +26,6 @@ lcov.info
 .sanctum/
 !tests/fixtures/
 .mcp.json
+
+# Archive
+.archive

@@ -5,6 +5,26 @@
 # This script downloads the latest Sanctum binary for your platform,
 # verifies its Sigstore signature, and installs it to /usr/local/bin.
 
+# SECURITY MODEL
+# ==============
+# This installer uses a two-layer verification approach:
+#
+# Layer 1 (mandatory): SHA-256 checksum verification
+#   - Downloads SHA256SUMS from the release artifacts
+#   - Verifies each binary against its expected hash
+#   - Protects against: download corruption, CDN tampering
+#
+# Layer 2 (optional): Sigstore signature verification
+#   - Uses cosign to verify keyless OIDC signatures
+#   - Certificate identity is bound to the GitHub Actions release workflow
+#   - Signatures are logged to the Rekor transparency log
+#   - Protects against: compromised release artifacts
+#   - Requires: cosign (https://docs.sigstore.dev/cosign/system_config/installation/)
+#
+# If cosign is not installed, the installer warns and continues with
+# checksum-only verification. This is sufficient for most threat models
+# but does not protect against a fully compromised GitHub release.
+
 set -e
 
 REPO="postrv/sanctum"

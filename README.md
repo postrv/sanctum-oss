@@ -71,6 +71,7 @@ sanctum fix all --yes     # Batch-remediate all unresolved threats
 sanctum hook <action>     # Claude Code hook handler (pre-bash, pre-write, etc.)
 sanctum hooks install claude  # Install Claude Code hooks
 sanctum hooks remove claude  # Remove Claude Code hooks
+sanctum doctor            # Run health checks
 sanctum daemon start      # Start the daemon
 sanctum daemon stop       # Stop the daemon
 sanctum daemon restart    # Restart the daemon
@@ -92,9 +93,9 @@ credential_allowlist = []       # process names to trust with credential access
 poll_interval_secs = 30
 learning_period_days = 7
 transfer_threshold_bytes = 104857600  # 100 MB
-process_allowlist = ["Dropbox", "rsync", "TimeMachine"]
+process_allowlist = ["Dropbox", "rsync", "rclone", "TimeMachine", "backupd"]
 destination_blocklist = []
-safe_ports = [80, 443, 22, 53, 8080, 3000, 5432, 3306, 6379]
+safe_ports = [80, 443, 22, 53, 8080, 8443, 3000, 5000, 5432, 3306, 6379]
 
 [ai_firewall]
 redact_credentials = true
@@ -148,7 +149,7 @@ cargo build --release
 
 ## Architecture
 
-A workspace of 8 crates (~28,100 lines of Rust):
+A workspace of 8 crates (~29,300 lines of Rust):
 
 | Crate | Purpose |
 |-------|---------|

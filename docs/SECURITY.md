@@ -57,9 +57,9 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 - **`cargo-deny` enforced** via `deny.toml`:
   - Known vulnerabilities denied
   - Yanked crates denied
-  - Only permissive licenses allowed (MIT, Apache-2.0, BSD, ISC, Unicode)
+  - Only permissive licenses allowed (MIT, Apache-2.0, BSD-3-Clause, ISC, Unicode-3.0, CC0-1.0)
   - Copyleft dependencies denied
-  - Multiple versions of the same crate denied
+  - Multiple versions of the same crate warned
   - C system dependencies (`openssl-sys`, `libz-sys`) explicitly banned -- pure Rust only
   - Only crates.io registry allowed; unknown registries and git sources denied
 - **All dependencies audited** and documented in `docs/DEPENDENCY_AUDIT.md`

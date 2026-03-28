@@ -156,4 +156,4 @@ sanctum doctor
 - Read the [threat model](THREAT_MODEL.md) to understand what Sanctum protects against
 - Review the [architecture](ARCHITECTURE.md) for design decisions
 - Configure [budget limits](../README.md) for LLM spend control
-- Set up [network anomaly detection](SECURITY.md) with `watch_network = true`
+- Set up [network anomaly detection](THREAT_MODEL.md) with `watch_network = true`

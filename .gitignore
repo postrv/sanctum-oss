@@ -26,6 +26,13 @@ lcov.info
 .sanctum/
 !tests/fixtures/
 .mcp.json
+forge.toml
+
+# Environment files
+.env*
 
 # Archive
-.archive
+.archive/
+
+# Proptest regressions
+*.proptest-regressions

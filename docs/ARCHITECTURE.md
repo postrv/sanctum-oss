@@ -20,7 +20,7 @@
 **Decision**: Cargo workspace with `sanctum-types`, `sanctum-sentinel`, `sanctum-daemon`, `sanctum-cli`, `sanctum-notify`, `sanctum-firewall`, `sanctum-budget`, `sanctum-proxy`.
 
 **Rationale**:
-- `sanctum-types` has no heavy dependencies (just serde, thiserror)
+- `sanctum-types` centralises shared types with core dependencies (serde, toml, chrono, sha2, nix, tokio, tracing)
 - `sanctum-sentinel` contains the security-critical code — auditing a smaller crate is easier
 - `sanctum-daemon` pulls in tokio (large dependency) — isolated from the analyser
 - `sanctum-cli` depends on clap — not needed in the daemon
@@ -87,7 +87,7 @@
 **Decision**: Implement `PreToolUse` / `PostToolUse` hooks invoked by Claude Code. The CLI entry point (`sanctum hook <action>`) reads tool invocation JSON from stdin, evaluates it against firewall policy, and signals the decision via exit code: 0 for allow/warn, 2 for block. Messages are written to stderr.
 
 **Rationale**:
-- Hook actions (`pre-bash`, `pre-write`, `pre-read`, `post-bash`) cover all tool call surfaces
+- Hook actions (`pre-bash`, `pre-write`, `pre-read`, `pre-mcp`, `post-bash`) cover all tool call surfaces
 - The stdin JSON / exit code protocol requires no daemon round-trip — the hook binary runs in-process
 - Block rules cover credential file reads, `.pth` / `sitecustomize.py` writes, env-var dumping, and high-entropy secret detection in file content
 - Warn rules flag risky-but-legitimate operations (e.g., `pip install`, outbound `curl POST`)
@@ -173,7 +173,7 @@
 
 ### ADR-016: Hook audit event persistence via direct file write
 
-**Context**: Claude Code hooks (`sanctum hook pre-bash/pre-write/pre-read/post-bash`) are short-lived synchronous processes invoked by Claude Code for each tool call. When a hook blocks a credential leak or warns about a risky operation, that security event is not recorded anywhere persistent. The daemon maintains an NDJSON audit log, but hooks have no communication channel to the daemon. This means `sanctum audit` and `sanctum fix` are blind to hook-detected threats.
+**Context**: Claude Code hooks (`sanctum hook pre-bash/pre-write/pre-read/pre-mcp/post-bash`) are short-lived synchronous processes invoked by Claude Code for each tool call. When a hook blocks a credential leak or warns about a risky operation, that security event is not recorded anywhere persistent. The daemon maintains an NDJSON audit log, but hooks have no communication channel to the daemon. This means `sanctum audit` and `sanctum fix` are blind to hook-detected threats.
 
 **Decision**: Hooks write `ThreatEvent` records directly to the shared NDJSON audit log file, using the same `append_audit_event` function the daemon uses. The audit write module is extracted from `sanctum-daemon` into `sanctum-types` so both the daemon and CLI can use it without circular dependencies.
 

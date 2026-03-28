@@ -12,6 +12,10 @@ Every direct dependency is justified, version-pinned, and audited. No transitive
 | `thiserror` | 2.x | Derive macro for error types | RustSec clean. Zero runtime cost (proc macro only). |
 | `chrono` | 0.4.x | Timestamp handling for events and audit logs | RustSec clean. Well-established. |
 | `tokio` | 1.x | Async I/O utilities and Unix socket types for IPC framing | RustSec clean. Industry standard. |
+| `sha2` | 0.10.x | SHA-256 for content hashing (audit log, quarantine) | RustCrypto project. Multiple independent audits. |
+| `hex` | 0.4.x | Hex encoding for hash display | Trivial crate, no unsafe, no dependencies. |
+| `tracing` | 0.1.x | Structured logging | RustSec clean. Tokio project. |
+| `nix` | 0.29.x | Unix filesystem safety (O_NOFOLLOW, fchmod) | RustSec clean. Core Rust ecosystem crate. Contains unsafe but well-audited. |
 
 ## Core library: sanctum-sentinel
 
@@ -54,6 +58,7 @@ Every direct dependency is justified, version-pinned, and audited. No transitive
 | `sha2` | 0.10.x | SHA-256 for content hashing | RustCrypto project. Multiple independent audits. |
 | `hex` | 0.4.x | Hex encoding for hash display | Trivial crate, no unsafe, no dependencies. |
 | `nix` | 0.29.x | Unix process/signal handling | RustSec clean. Core Rust ecosystem crate. Contains unsafe but well-audited. |
+| `tracing-subscriber` | 0.3.x | Log formatting for --verbose hook mode | RustSec clean. Tokio project companion. |
 
 ## Notifications: sanctum-notify
 

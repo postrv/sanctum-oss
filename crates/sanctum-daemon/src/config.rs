@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sanctum_types::config::{PthResponse, SanctumConfig};
+use sanctum_types::config::{McpDefaultPolicy, PthResponse, SanctumConfig};
 use sanctum_types::errors::DaemonError;
 
 /// Maximum config file size (1 MB).
@@ -49,10 +49,11 @@ pub fn load_config(path: &Path) -> Result<SanctumConfig, DaemonError> {
 /// - `ai_firewall.claude_hooks` forced to `true`
 /// - `ai_firewall.redact_credentials` forced to `true`
 /// - `ai_firewall.mcp_audit` forced to `true`
+/// - `ai_firewall.default_mcp_policy` cannot be set to `Allow` when global is stricter
 /// - `sentinel.watch_pth` forced to `true`
 /// - `sentinel.watch_credentials` forced to `true`
 /// - `sentinel.pth_response` cannot be downgraded from `Quarantine`
-/// - `sentinel.credential_allowlist` cannot be extended beyond the global config
+/// - `sentinel.credential_allowlist` must be a subset of the global allowlist
 pub fn enforce_security_floor(
     config: &mut SanctumConfig,
     is_project_local: bool,
@@ -93,16 +94,32 @@ pub fn enforce_security_floor(
         );
         config.ai_firewall.mcp_audit = true;
     }
+    // Prevent project-local config from setting default_mcp_policy to Allow
+    // when the global config uses a stricter policy.
+    if config.ai_firewall.default_mcp_policy == McpDefaultPolicy::Allow
+        && global.ai_firewall.default_mcp_policy != McpDefaultPolicy::Allow
+    {
+        tracing::warn!(
+            "project config tried to weaken default_mcp_policy to allow \u{2014} using global value"
+        );
+        config.ai_firewall.default_mcp_policy = global.ai_firewall.default_mcp_policy;
+    }
     if !config.sentinel.watch_credentials {
         tracing::warn!(
             "project config tried to disable watch_credentials \u{2014} overriding to true"
         );
         config.sentinel.watch_credentials = true;
     }
-    // Credential allowlist: project-local configs cannot extend beyond global.
-    if config.sentinel.credential_allowlist.len() > global.sentinel.credential_allowlist.len() {
+    // Credential allowlist: project-local list must be a subset of the global list.
+    // A project cannot introduce entries not present in the global allowlist.
+    let has_non_global_entry = config
+        .sentinel
+        .credential_allowlist
+        .iter()
+        .any(|entry| !global.sentinel.credential_allowlist.contains(entry));
+    if has_non_global_entry {
         tracing::warn!(
-            "project config tried to extend credential_allowlist \u{2014} using global allowlist"
+            "project config credential_allowlist contains entries not in global allowlist \u{2014} using global allowlist"
         );
         config
             .sentinel
@@ -333,6 +350,77 @@ mod tests {
         enforce_security_floor(&mut config, true, &global);
         assert_eq!(config.sentinel.credential_allowlist.len(), 1);
         assert_eq!(config.sentinel.credential_allowlist[0], "/usr/bin/git");
+    }
+
+    #[test]
+    fn enforce_security_floor_blocks_mcp_policy_allow_when_global_is_stricter() {
+        let mut global = SanctumConfig::default();
+        global.ai_firewall.default_mcp_policy = McpDefaultPolicy::Deny;
+        let mut config = SanctumConfig::default();
+        config.ai_firewall.default_mcp_policy = McpDefaultPolicy::Allow;
+        enforce_security_floor(&mut config, true, &global);
+        assert_eq!(
+            config.ai_firewall.default_mcp_policy,
+            McpDefaultPolicy::Deny
+        );
+    }
+
+    #[test]
+    fn enforce_security_floor_allows_mcp_policy_deny_when_global_is_allow() {
+        let global = SanctumConfig::default(); // default is Allow
+        let mut config = SanctumConfig::default();
+        config.ai_firewall.default_mcp_policy = McpDefaultPolicy::Deny;
+        enforce_security_floor(&mut config, true, &global);
+        // Stricter than global is fine.
+        assert_eq!(
+            config.ai_firewall.default_mcp_policy,
+            McpDefaultPolicy::Deny
+        );
+    }
+
+    #[test]
+    fn enforce_security_floor_allows_mcp_policy_warn_when_global_is_allow() {
+        let global = SanctumConfig::default(); // default is Allow
+        let mut config = SanctumConfig::default();
+        config.ai_firewall.default_mcp_policy = McpDefaultPolicy::Warn;
+        enforce_security_floor(&mut config, true, &global);
+        // Warn is stricter than Allow, so it should be kept.
+        assert_eq!(
+            config.ai_firewall.default_mcp_policy,
+            McpDefaultPolicy::Warn
+        );
+    }
+
+    #[test]
+    fn enforce_security_floor_blocks_allowlist_same_length_different_entries() {
+        let mut global = SanctumConfig::default();
+        global.sentinel.credential_allowlist = vec!["/usr/bin/git".to_string()];
+        let mut config = SanctumConfig::default();
+        // Same length but different entry — not a subset of global.
+        config.sentinel.credential_allowlist = vec!["/usr/bin/sneaky".to_string()];
+        enforce_security_floor(&mut config, true, &global);
+        // Should be replaced with global allowlist.
+        assert_eq!(
+            config.sentinel.credential_allowlist,
+            vec!["/usr/bin/git".to_string()]
+        );
+    }
+
+    #[test]
+    fn enforce_security_floor_blocks_allowlist_with_extra_entries() {
+        let mut global = SanctumConfig::default();
+        global.sentinel.credential_allowlist =
+            vec!["/usr/bin/git".to_string(), "/usr/bin/ssh".to_string()];
+        let mut config = SanctumConfig::default();
+        // Contains a valid entry plus an extra not in global.
+        config.sentinel.credential_allowlist =
+            vec!["/usr/bin/git".to_string(), "/usr/bin/evil".to_string()];
+        enforce_security_floor(&mut config, true, &global);
+        // Should be replaced with global allowlist.
+        assert_eq!(
+            config.sentinel.credential_allowlist,
+            vec!["/usr/bin/git".to_string(), "/usr/bin/ssh".to_string()]
+        );
     }
 
     #[test]

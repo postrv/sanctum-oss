@@ -98,6 +98,71 @@ fn build_hooks_json() -> serde_json::Value {
     })
 }
 
+/// Returns true if a matcher group contains a Sanctum hook command.
+fn is_sanctum_entry(entry: &serde_json::Value) -> bool {
+    // Check nested format: entry.hooks[*].command contains "sanctum hook"
+    if let Some(hooks_arr) = entry.get("hooks").and_then(|h| h.as_array()) {
+        for hook in hooks_arr {
+            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                if cmd.contains("sanctum hook") {
+                    return true;
+                }
+            }
+        }
+    }
+    // Check flat format: entry.command contains "sanctum hook"
+    if let Some(cmd) = entry.get("command").and_then(|c| c.as_str()) {
+        if cmd.contains("sanctum hook") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Merge new Sanctum hooks into existing hooks, preserving non-Sanctum entries.
+///
+/// For each hook type (e.g. `PreToolUse`, `PostToolUse`):
+/// 1. Remove any existing Sanctum entries from the current array.
+/// 2. Append the new Sanctum entries.
+/// 3. Preserve any non-Sanctum entries and any hook types not in the new hooks.
+fn merge_hooks(existing: &serde_json::Value, new_hooks: &serde_json::Value) -> serde_json::Value {
+    let mut result = existing.clone();
+
+    let Some(new_obj) = new_hooks.as_object() else {
+        return result;
+    };
+
+    // Ensure result is an object
+    if !result.is_object() {
+        return new_hooks.clone();
+    }
+
+    for (hook_type, new_entries) in new_obj {
+        let Some(new_arr) = new_entries.as_array() else {
+            continue;
+        };
+
+        // Get existing entries for this hook type, filtering out old Sanctum ones
+        let mut merged: Vec<serde_json::Value> = result
+            .get(hook_type)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|entry| !is_sanctum_entry(entry))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Append new Sanctum entries
+        merged.extend(new_arr.iter().cloned());
+
+        result[hook_type] = serde_json::Value::Array(merged);
+    }
+
+    result
+}
+
 fn install_claude_hooks() -> Result<(), CliError> {
     let hooks_dir = claude_hooks_dir()
         .ok_or_else(|| CliError::InvalidArgs("could not determine HOME directory".to_string()))?;
@@ -119,8 +184,13 @@ fn install_claude_hooks() -> Result<(), CliError> {
         serde_json::json!({})
     };
 
-    // Add Sanctum hook configuration
-    settings["hooks"] = build_hooks_json();
+    // Merge Sanctum hook configuration with any existing hooks
+    let new_hooks = build_hooks_json();
+    if let Some(existing_hooks) = settings.get("hooks").cloned() {
+        settings["hooks"] = merge_hooks(&existing_hooks, &new_hooks);
+    } else {
+        settings["hooks"] = new_hooks;
+    }
 
     let json_str = serde_json::to_string_pretty(&settings)
         .map_err(|e| CliError::InvalidArgs(format!("Failed to serialize settings: {e}")))?;
@@ -167,9 +237,29 @@ fn remove_claude_hooks() -> Result<(), CliError> {
         ))
     })?;
 
-    // Remove hooks key
-    if let Some(obj) = settings.as_object_mut() {
-        obj.remove("hooks");
+    // Remove Sanctum entries from hooks, preserving non-Sanctum entries
+    if let Some(hooks) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        let keys: Vec<String> = hooks.keys().cloned().collect();
+        for key in keys {
+            if let Some(arr) = hooks.get_mut(&key).and_then(|v| v.as_array_mut()) {
+                arr.retain(|entry| !is_sanctum_entry(entry));
+            }
+        }
+        // Remove empty hook type arrays
+        let empty_keys: Vec<String> = hooks
+            .iter()
+            .filter(|(_, v)| v.as_array().is_some_and(Vec::is_empty))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in empty_keys {
+            hooks.remove(&key);
+        }
+        // If hooks object is now empty, remove it entirely
+        if hooks.is_empty() {
+            if let Some(obj) = settings.as_object_mut() {
+                obj.remove("hooks");
+            }
+        }
     }
 
     let json_str = serde_json::to_string_pretty(&settings)
@@ -283,9 +373,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("should create tempdir");
         let settings_path = dir.path().join("settings.json");
 
-        // Simulate install by building and writing
+        // Simulate install by building and writing (no existing hooks)
         let mut settings = serde_json::json!({});
-        settings["hooks"] = build_hooks_json();
+        let new_hooks = build_hooks_json();
+        settings["hooks"] = new_hooks;
 
         let json_str = serde_json::to_string_pretty(&settings).expect("should serialize");
         fs::write(&settings_path, &json_str).expect("should write");
@@ -338,7 +429,12 @@ mod tests {
         // Simulate install on existing file
         let content = fs::read_to_string(&settings_path).expect("should read");
         let mut settings: serde_json::Value = serde_json::from_str(&content).expect("should parse");
-        settings["hooks"] = build_hooks_json();
+        let new_hooks = build_hooks_json();
+        if let Some(existing_hooks) = settings.get("hooks").cloned() {
+            settings["hooks"] = merge_hooks(&existing_hooks, &new_hooks);
+        } else {
+            settings["hooks"] = new_hooks;
+        }
 
         let json_str = serde_json::to_string_pretty(&settings).expect("should serialize");
         fs::write(&settings_path, &json_str).expect("should write");
@@ -350,5 +446,140 @@ mod tests {
         assert_eq!(parsed["apiKey"], "test-key");
         assert_eq!(parsed["model"], "claude-4");
         assert!(parsed.get("hooks").is_some());
+    }
+
+    #[test]
+    fn install_merges_with_existing_hooks() {
+        let existing_hooks = serde_json::json!({
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "my-custom-linter check"
+                        }
+                    ]
+                }
+            ],
+            "PostToolUse": [
+                {
+                    "matcher": "Write",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "my-formatter format"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let new_hooks = build_hooks_json();
+        let merged = merge_hooks(&existing_hooks, &new_hooks);
+
+        // Custom hooks should be preserved
+        let pre = merged["PreToolUse"].as_array().expect("PreToolUse array");
+        // Custom linter + 4 sanctum hooks = 5
+        assert_eq!(pre.len(), 5);
+        assert_eq!(pre[0]["hooks"][0]["command"], "my-custom-linter check");
+
+        let post = merged["PostToolUse"].as_array().expect("PostToolUse array");
+        // Custom formatter + 1 sanctum hook = 2
+        assert_eq!(post.len(), 2);
+        assert_eq!(post[0]["hooks"][0]["command"], "my-formatter format");
+    }
+
+    #[test]
+    fn install_replaces_old_sanctum_hooks() {
+        // Simulate existing settings that already have old Sanctum hooks
+        let existing_hooks = serde_json::json!({
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "my-custom-linter check"
+                        }
+                    ]
+                },
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "sanctum hook pre-bash"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let new_hooks = build_hooks_json();
+        let merged = merge_hooks(&existing_hooks, &new_hooks);
+
+        let pre = merged["PreToolUse"].as_array().expect("PreToolUse array");
+        // Custom linter (1) + new sanctum hooks (4) = 5
+        // The old sanctum hook should have been removed before adding new ones
+        assert_eq!(pre.len(), 5);
+        assert_eq!(pre[0]["hooks"][0]["command"], "my-custom-linter check");
+
+        // Count sanctum entries -- should be exactly the new set (4)
+        let sanctum_count = pre.iter().filter(|e| is_sanctum_entry(e)).count();
+        assert_eq!(sanctum_count, 4);
+    }
+
+    #[test]
+    fn remove_preserves_non_sanctum_hooks() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "my-custom-linter check"
+                            }
+                        ]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "sanctum hook pre-bash"
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let dir = tempfile::tempdir().expect("should create tempdir");
+        let settings_path = dir.path().join("settings.json");
+        let json_str = serde_json::to_string_pretty(&settings).expect("should serialize");
+        fs::write(&settings_path, &json_str).expect("should write");
+
+        // Simulate remove logic
+        let content = fs::read_to_string(&settings_path).expect("should read");
+        let mut parsed: serde_json::Value = serde_json::from_str(&content).expect("should parse");
+
+        if let Some(hooks) = parsed.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+            let keys: Vec<String> = hooks.keys().cloned().collect();
+            for key in keys {
+                if let Some(arr) = hooks.get_mut(&key).and_then(|v| v.as_array_mut()) {
+                    arr.retain(|entry| !is_sanctum_entry(entry));
+                }
+            }
+        }
+
+        // Custom hook should still be there
+        let pre = parsed["hooks"]["PreToolUse"]
+            .as_array()
+            .expect("PreToolUse array");
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0]["hooks"][0]["command"], "my-custom-linter check");
     }
 }

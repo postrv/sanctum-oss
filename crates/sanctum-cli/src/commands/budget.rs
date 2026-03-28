@@ -138,7 +138,11 @@ fn display_budget_table(providers: &[ProviderBudgetInfo]) {
             let mut flags = String::new();
             if provider.session_exceeded {
                 flags.push_str(" [EXCEEDED]");
-            } else if provider.alert_triggered {
+            }
+            if provider.daily_exceeded {
+                flags.push_str(" [DAILY EXCEEDED]");
+            }
+            if !provider.session_exceeded && !provider.daily_exceeded && provider.alert_triggered {
                 flags.push_str(" [ALERT]");
             }
 

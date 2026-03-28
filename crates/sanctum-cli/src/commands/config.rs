@@ -37,10 +37,12 @@ pub fn run(edit: bool, recommended: bool) -> Result<(), CliError> {
             sanctum_types::fs_safety::ensure_secure_dir(&paths.config_dir)?;
 
             if !config_file.exists() {
-                // Atomic write: write to temp file, sync, then rename into place
+                // Atomic write: write to temp file with secure permissions, sync,
+                // then rename into place.
                 let tmp_path = config_file.with_extension("tmp");
                 {
                     let mut file = fs::File::create(&tmp_path)?;
+                    sanctum_types::fs_safety::fchmod_600(&file)?;
                     file.write_all(default_config().as_bytes())?;
                     file.sync_all()?;
                 }

@@ -655,6 +655,14 @@ async fn handle_ipc_command(
                 IpcResponse::Error {
                     message: "id too long (max 128 chars)".to_string(),
                 }
+            } else if action.len() > 64 {
+                IpcResponse::Error {
+                    message: "action too long (max 64 chars)".to_string(),
+                }
+            } else if note.len() > 2048 {
+                IpcResponse::Error {
+                    message: "note too long (max 2048 chars)".to_string(),
+                }
             } else {
                 let paths_clone = paths.clone();
                 let quarantine_arc = Arc::clone(&shared_quarantine);
@@ -758,8 +766,12 @@ async fn handle_budget_set(
     daily_cents: Option<u64>,
 ) -> IpcResponse {
     let mut tracker = shared_budget.lock().await;
-    tracker.set_default_session_limit(session_cents);
-    tracker.set_default_daily_limit(daily_cents);
+    if let Some(cents) = session_cents {
+        tracker.set_default_session_limit(Some(cents));
+    }
+    if let Some(cents) = daily_cents {
+        tracker.set_default_daily_limit(Some(cents));
+    }
     drop(tracker);
     IpcResponse::Ok {
         message: "budget limits updated".to_string(),

@@ -92,4 +92,12 @@ pub enum CliError {
     /// General I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Scan found credential exposure issues.
+    #[error("scan found {0} credential exposure issue(s)")]
+    ScanFindings(usize),
+
+    /// Doctor checks failed.
+    #[error("doctor found {0} failing check(s)")]
+    DoctorFailures(u32),
 }

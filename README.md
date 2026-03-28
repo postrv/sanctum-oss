@@ -175,7 +175,7 @@ Key guarantees:
 - **Zero `unsafe` code** in the entire codebase (denied by workspace lint)
 - **No panics on any input** (`unwrap` and `expect` are denied by clippy)
 - **All dependencies audited** and version-pinned (193 deps, 0 known CVEs)
-- **1,127 tests**, 0 clippy warnings (pedantic + nursery)
+- **1,170 tests**, 0 clippy warnings (pedantic + nursery)
 - **8 Kani bounded model checking proofs** with CI enforcement
 - **2 fuzz targets** for security-critical parsers
 - **9 property-based tests** verifying core invariants

@@ -126,7 +126,11 @@ pub fn run() -> Result<(), CliError> {
         }
     }
 
-    Ok(())
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::ScanFindings(findings.len()))
+    }
 }
 
 fn scan_credential_files(dir: &Path, findings: &mut Vec<Finding>) {

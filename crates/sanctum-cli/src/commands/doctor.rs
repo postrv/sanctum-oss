@@ -40,7 +40,6 @@ impl Check {
 /// # Errors
 ///
 /// Returns `CliError::Io` if output cannot be written.
-#[allow(clippy::unnecessary_wraps)]
 pub fn run() -> Result<(), CliError> {
     let paths = WellKnownPaths::default();
 
@@ -103,7 +102,11 @@ pub fn run() -> Result<(), CliError> {
         println!("Summary: {pass_count} pass, {warn_count} warn, {fail_count} fail");
     }
 
-    Ok(())
+    if fail_count > 0 {
+        Err(CliError::DoctorFailures(fail_count))
+    } else {
+        Ok(())
+    }
 }
 
 /// Check whether the `sanctum` binary is on `PATH`.

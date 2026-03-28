@@ -221,6 +221,12 @@ const CREDENTIAL_FILE_PATTERNS: &[&str] = &[
     ".aws/credentials",
     ".aws/config",
     ".env",
+    ".env.backup",
+    ".env.bak",
+    ".env.old",
+    ".env.save",
+    ".env-",
+    ".env_",
     ".netrc",
     ".pgpass",
     "credentials.json",
@@ -242,6 +248,10 @@ const CREDENTIAL_FILE_PATTERNS: &[&str] = &[
 /// must not match `.envrc`, `.environment`, `.netrc_backup`, etc.
 const EXACT_FILENAME_PATTERNS: &[&str] = &[
     ".env",
+    ".env.backup",
+    ".env.bak",
+    ".env.old",
+    ".env.save",
     ".netrc",
     ".pgpass",
     ".npmrc",
@@ -348,6 +358,12 @@ const INDIRECT_READ_COMMANDS: &[&str] = &[
     "docker exec",
     "kubectl exec",
     "deno eval",
+    "openssl",
+    "gpg",
+    "gpg2",
+    "ssh-keygen",
+    "age",
+    "age-keygen",
 ];
 
 /// Environment-dumping commands that unconditionally leak secrets.
@@ -437,6 +453,7 @@ const D7_CREDENTIAL_PATHS: &[&str] = &[
     "/.my.cnf",
     "/.boto",
     "/application-default-credentials.json",
+    "/proc/self/environ",
 ];
 
 /// D7 patterns that require word-boundary matching to avoid false positives.
@@ -637,7 +654,9 @@ fn is_credential_file_access(command: &str) -> bool {
 /// - `ruby -e "puts ENV['SECRET_KEY']"`
 fn is_script_env_access(normalised: &str) -> Option<&'static str> {
     // Python: os.environ, os.getenv
-    let has_python = normalised.contains("python3 -c") || normalised.contains("python -c");
+    let has_python = (command_invokes(normalised, "python3")
+        || command_invokes(normalised, "python"))
+        && normalised.contains(" -c ");
     if has_python && (normalised.contains("os.environ") || normalised.contains("os.getenv")) {
         // Full environment dump patterns (no specific variable needed)
         if normalised.contains("dict(os.environ)")
@@ -675,7 +694,8 @@ fn is_script_env_access(normalised: &str) -> Option<&'static str> {
     }
 
     // Ruby: ENV[]
-    let has_ruby = normalised.contains("ruby -e") || normalised.contains("ruby --eval");
+    let has_ruby = command_invokes(normalised, "ruby")
+        && (normalised.contains(" -e ") || normalised.contains(" --eval "));
     if has_ruby && normalised.contains("ENV[") {
         for var in SENSITIVE_ENV_VARS {
             if normalised.contains(var) {
@@ -740,6 +760,13 @@ fn is_env_dump(command: &str) -> bool {
     // We only block `set` with no args — `set -e`, `set -x`, `set VAR=val`
     // are legitimate and must be allowed.
     if is_bare_set_command(&normalised) {
+        return true;
+    }
+
+    // `declare -p` and `declare -x` dump all (or all exported) variables.
+    if command_invokes(&normalised, "declare")
+        && (normalised.contains(" -p") || normalised.contains(" -x"))
+    {
         return true;
     }
 
@@ -977,6 +1004,14 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
         }
         return HookOutput::warn(
             "Warning: network exfiltration command detected — verify the destination".to_owned(),
+        );
+    }
+
+    // Block /proc/*/environ access — dumps all environment variables
+    // (including secrets) from a running process.
+    if normalised.contains("/proc/") && normalised.contains("/environ") {
+        return HookOutput::block(
+            "Blocked: reading /proc/*/environ dumps process environment variables which may contain secrets".to_owned(),
         );
     }
 
@@ -1260,8 +1295,11 @@ fn infer_provider(model: &str) -> &'static str {
     if lower.starts_with("claude") || lower.contains("anthropic") {
         "anthropic"
     } else if lower.starts_with("gpt-")
+        || lower == "o1"
         || lower.starts_with("o1-")
+        || lower == "o3"
         || lower.starts_with("o3-")
+        || lower == "o4"
         || lower.starts_with("o4-")
         || lower.starts_with("chatgpt-")
     {
@@ -4294,5 +4332,231 @@ mod tests {
         // .vault-token-backup should not be blocked (word boundary)
         let output = pre_bash(&bash_input("cat .vault-token-backup"));
         assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- Fix 1: crypto/key tools in INDIRECT_READ_COMMANDS ----
+
+    #[test]
+    fn pre_bash_blocks_openssl_credential() {
+        let output = pre_bash(&bash_input("openssl x509 -in .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_gpg_credential() {
+        let output = pre_bash(&bash_input("gpg --decrypt .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_gpg2_credential() {
+        let output = pre_bash(&bash_input("gpg2 --export ~/.npmrc"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_ssh_keygen_credential() {
+        let output = pre_bash(&bash_input("ssh-keygen -y -f ~/.ssh/id_rsa"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_age_credential() {
+        let output = pre_bash(&bash_input("age --decrypt .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_age_keygen_credential() {
+        let output = pre_bash(&bash_input("age-keygen -o .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_allows_openssl_normal_file() {
+        let output = pre_bash(&bash_input("openssl x509 -in cert.pem"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- Fix 2: python3 -u -c flag reordering bypass ----
+
+    #[test]
+    fn pre_bash_blocks_python3_u_c_env_access() {
+        let output = pre_bash(&bash_input(
+            r#"python3 -u -c "import os; print(os.environ['AWS_SECRET_ACCESS_KEY'])""#,
+        ));
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "python3 -u -c should be detected as python inline script"
+        );
+    }
+
+    #[test]
+    fn pre_bash_blocks_python3_big_b_c_env_access() {
+        let output = pre_bash(&bash_input(
+            r#"python3 -B -c "import os; print(os.environ['GITHUB_TOKEN'])""#,
+        ));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_ruby_w_e_env_access() {
+        let output = pre_bash(&bash_input(r#"ruby -w -e "puts ENV['SECRET_KEY']""#));
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "ruby -w -e should be detected as ruby inline script"
+        );
+    }
+
+    // ---- Fix 3: /proc/self/environ detection ----
+
+    #[test]
+    fn pre_bash_blocks_cat_proc_self_environ() {
+        let output = pre_bash(&bash_input("cat /proc/self/environ"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_cat_proc_pid_environ() {
+        let output = pre_bash(&bash_input("cat /proc/1234/environ"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_strings_proc_environ() {
+        let output = pre_bash(&bash_input("strings /proc/self/environ"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_xxd_proc_environ() {
+        let output = pre_bash(&bash_input("xxd /proc/1/environ"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_allows_proc_non_environ() {
+        let output = pre_bash(&bash_input("cat /proc/self/status"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- Fix 4: declare -p / declare -x env dump detection ----
+
+    #[test]
+    fn pre_bash_blocks_declare_p() {
+        let output = pre_bash(&bash_input("declare -p"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_declare_x() {
+        let output = pre_bash(&bash_input("declare -x"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_declare_p_after_separator() {
+        let output = pre_bash(&bash_input("echo foo; declare -p"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_declare_x_piped() {
+        let output = pre_bash(&bash_input("declare -x | grep SECRET"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn env_dump_detects_declare_p() {
+        assert!(is_env_dump("declare -p"));
+    }
+
+    #[test]
+    fn env_dump_detects_declare_x() {
+        assert!(is_env_dump("declare -x"));
+    }
+
+    // ---- Fix 5: .env-backup / .env_old credential pattern gap ----
+
+    #[test]
+    fn pre_bash_blocks_cat_env_backup() {
+        let output = pre_bash(&bash_input("cat .env.backup"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_cat_env_bak() {
+        let output = pre_bash(&bash_input("cat .env.bak"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_cat_env_old() {
+        let output = pre_bash(&bash_input("cat .env.old"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_cat_env_save() {
+        let output = pre_bash(&bash_input("cat .env.save"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_cat_env_dash_backup() {
+        let output = pre_bash(&bash_input("cat .env-backup"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_cat_env_underscore_old() {
+        let output = pre_bash(&bash_input("cat .env_old"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_grep_env_dash_prod() {
+        let output = pre_bash(&bash_input("grep SECRET .env-prod"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_cat_env_underscore_staging() {
+        let output = pre_bash(&bash_input("cat .env_staging"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- Fix 6: infer_provider standalone model names ----
+
+    #[test]
+    fn infer_provider_standalone_o1() {
+        assert_eq!(infer_provider("o1"), "openai");
+    }
+
+    #[test]
+    fn infer_provider_standalone_o3() {
+        assert_eq!(infer_provider("o3"), "openai");
+    }
+
+    #[test]
+    fn infer_provider_standalone_o4() {
+        assert_eq!(infer_provider("o4"), "openai");
+    }
+
+    #[test]
+    fn infer_provider_o1_with_suffix() {
+        assert_eq!(infer_provider("o1-mini"), "openai");
+    }
+
+    #[test]
+    fn infer_provider_o3_with_suffix() {
+        assert_eq!(infer_provider("o3-mini"), "openai");
+    }
+
+    #[test]
+    fn infer_provider_o4_with_suffix() {
+        assert_eq!(infer_provider("o4-mini"), "openai");
     }
 }

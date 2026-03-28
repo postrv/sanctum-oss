@@ -102,9 +102,9 @@ pub struct NetworkConfig {
     pub transfer_threshold_bytes: u64,
     /// Processes to exclude from monitoring.
     pub process_allowlist: Vec<String>,
-    /// Known-safe destination networks (CIDR notation or IP addresses).
+    /// Known-safe destination IP addresses (CIDR ranges are not currently supported).
     pub destination_allowlist: Vec<String>,
-    /// Known-bad destination IPs or domains.
+    /// Known-bad destination IP addresses (CIDR ranges are not currently supported).
     pub destination_blocklist: Vec<String>,
     /// Ports that should never trigger "unusual port" alerts.
     pub safe_ports: Vec<u16>,

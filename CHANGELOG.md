@@ -31,9 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP built-in sensitive path restrictions**: All MCP tools are blocked from accessing `.ssh/`, `.aws/`, `.gnupg/`, `.env`, `.pth`, `sitecustomize.py`, and other sensitive paths, regardless of user rules
 - **macOS credential access tracing**: Best-effort `lsof` probe identifies which process accessed credential files (previously returned no process info on macOS)
 - **BudgetOverrun threat events**: Budget limit exceedances now emit `ThreatEvent` records to the audit log
-- **1,127 tests** across 8 crates (up from 899)
+- **1,170 tests** across 8 crates (up from 899)
 
 ### Fixed
+- **`sanctum scan` exit code**: Returns non-zero exit code when credential findings are detected, enabling CI/CD gate checks
+- **`sanctum doctor` exit code**: Returns non-zero exit code when health checks fail
+- **`BudgetSet` preserves unspecified limits**: `sanctum budget set --session $50` no longer silently clears the daily limit
+- **Budget display `daily_exceeded` flag**: `sanctum budget` now shows `[DAILY EXCEEDED]` when the daily budget is exceeded
+- **`hooks install claude` preserves existing hooks**: Merges Sanctum hooks with existing Claude Code hooks instead of overwriting them
+- **`python3 -u -c` bypass**: Script environment access detection no longer requires `-c` flag to be adjacent to the interpreter name
+- **`infer_provider` standalone models**: `o1`, `o3`, `o4` model names without trailing dash now correctly map to OpenAI
 - **Claude Code hooks JSON format**: Migrated from deprecated flat format to current three-level nested format (`hooks: [{ type: "command", command }]`) — without this fix, hooks were silently ignored by Claude Code
 - **Write-hook matcher**: Added `NotebookEdit` tool to pre-write matcher (`Write|Edit|MultiEdit|NotebookEdit`) — prevents credential-content bypass via NotebookEdit/MultiEdit tools
 - **MCP hook matcher**: Changed from `"mcp"` (literal, never matched) to `"mcp__.*"` (regex, matches all MCP tool invocations)
@@ -80,6 +87,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **High-risk write path blocking**: `authorized_keys`, crontab, systemd autostart paths now blocked (not just warned)
 - **Additional credential file patterns**: `.vault-token`, `.my.cnf`, `.boto`, `application-default-credentials.json`
 - **`ListThreats` iterator optimization**: Prevents unbounded memory allocation
+- **`/proc/self/environ` detection**: Commands reading process environment files are now blocked
+- **`declare -p` / `declare -x` env dump detection**: Bash builtins that dump all variables are now detected
+- **Crypto tool credential access**: `openssl`, `gpg`, `gpg2`, `ssh-keygen`, `age`, `age-keygen` added to indirect read command list
+- **`.env-backup` / `.env_old` credential patterns**: `.env-`, `.env_`, `.env.backup`, `.env.bak`, `.env.old`, `.env.save` variants now detected
+- **`ResolveThreat` action/note validation**: Action field capped at 64 chars, note at 2,048 chars
+- **`default_mcp_policy` security floor**: Project-local configs can no longer set MCP default policy to `allow` when global is stricter
+- **`credential_allowlist` subset enforcement**: Project-local allowlist must be a strict subset of global (was length-only check)
+- **`config --edit` file permissions**: Config files created via `--edit` now get 0o600 permissions
+- **Package manager lineage**: `pipenv`, `hatch`, `flit` added to known package managers (prevents false positive PTH alerts)
+- **Network config CIDR documentation**: Corrected doc comments to clarify that only exact IP addresses are supported (not CIDR ranges)
 
 ## [0.1.0] - 2026-03-27
 

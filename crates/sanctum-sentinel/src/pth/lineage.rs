@@ -15,10 +15,13 @@ const KNOWN_PACKAGE_MANAGERS: &[&str] = &[
     "conda",
     "pdm",
     "pipx",
+    "pipenv",
     "pip-compile",
     "pip-sync",
     "mamba",
     "micromamba",
+    "hatch",
+    "flit",
 ];
 
 /// Check if a process name is a known package manager.
@@ -394,8 +397,13 @@ mod tests {
             "conda",
             "pdm",
             "pipx",
+            "pipenv",
             "pip-compile",
             "pip-sync",
+            "mamba",
+            "micromamba",
+            "hatch",
+            "flit",
         ] {
             assert!(
                 is_known_package_manager(name),

@@ -4,6 +4,7 @@
 //! Rules use simple glob-style matching to restrict which paths a tool
 //! may access.
 
+use sanctum_types::config::McpDefaultPolicy;
 use serde::{Deserialize, Serialize};
 
 use crate::hooks::protocol::HookDecision;
@@ -81,20 +82,39 @@ impl McpPolicy {
 
     /// Evaluate a tool invocation against the policy.
     ///
-    /// Inspects the tool name and its arguments for path references, then
-    /// checks whether any restricted-path glob matches.
+    /// First checks all path arguments against built-in sensitive path
+    /// restrictions (`.ssh/`, `.aws/`, `.gnupg/`, `.env`, `.pth`, etc.).
+    /// Then inspects against user-defined rules. Finally, if no rules match,
+    /// falls back to `default_policy`.
     #[must_use]
-    pub fn evaluate(&self, tool: &str, args: &serde_json::Value) -> HookDecision {
-        // Find all rules that apply to this tool.
+    pub fn evaluate(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        default_policy: McpDefaultPolicy,
+    ) -> HookDecision {
+        // Extract any path-like string values from the arguments.
+        let paths = extract_path_values(args);
+
+        // Phase 1: Check built-in sensitive path restrictions.
+        // These apply to ALL MCP tools regardless of user rules.
+        for path in &paths {
+            if matches_builtin_restriction(path) {
+                return HookDecision::Block;
+            }
+        }
+
+        // Phase 2: Check user-defined rules.
         let applicable_rules: Vec<&PolicyRule> =
             self.rules.iter().filter(|r| r.tool == tool).collect();
 
         if applicable_rules.is_empty() {
-            return HookDecision::Allow;
+            return match default_policy {
+                McpDefaultPolicy::Allow => HookDecision::Allow,
+                McpDefaultPolicy::Warn => HookDecision::Warn,
+                McpDefaultPolicy::Deny => HookDecision::Block,
+            };
         }
-
-        // Extract any path-like string values from the arguments.
-        let paths = extract_path_values(args);
 
         for rule in &applicable_rules {
             for path in &paths {
@@ -108,6 +128,68 @@ impl McpPolicy {
 
         HookDecision::Allow
     }
+}
+
+/// Built-in sensitive directory segments that are always restricted for MCP tools.
+///
+/// If any of these appear as a path component, the path is blocked.
+const BUILTIN_SENSITIVE_DIRS: &[&str] = &[
+    "/.ssh/",
+    "/.aws/",
+    "/.gnupg/",
+    "/.config/gcloud/",
+    "/.config/gh/",
+];
+
+/// Built-in sensitive filename suffixes / exact names that are always restricted.
+const BUILTIN_SENSITIVE_FILENAMES: &[&str] = &[
+    "/.kube/config",
+    "/.npmrc",
+    "/.pypirc",
+    "/.docker/config.json",
+];
+
+/// Check whether a path matches any built-in sensitive restriction.
+///
+/// Uses direct substring/suffix matching rather than glob patterns for
+/// reliability. This is strictly more conservative than glob matching —
+/// it blocks more paths, which is the safe direction for security.
+fn matches_builtin_restriction(path: &str) -> bool {
+    // Check directory segments (e.g., "/.ssh/" anywhere in the path)
+    for dir in BUILTIN_SENSITIVE_DIRS {
+        if path.contains(dir) {
+            return true;
+        }
+    }
+
+    // Check exact filename matches
+    for name in BUILTIN_SENSITIVE_FILENAMES {
+        if path.ends_with(name) {
+            return true;
+        }
+    }
+
+    // Check .env files: must match exactly "/.env" or "/.env." followed by variant
+    // but NOT "/.envrc" or other non-dotenv files
+    if let Some(filename) = path.rsplit('/').next() {
+        if filename == ".env" || filename.starts_with(".env.") {
+            return true;
+        }
+    }
+
+    // Check .pth files and sitecustomize/usercustomize.
+    // Case-sensitive is correct: Python uses exactly ".pth", not ".PTH".
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    if path.ends_with(".pth") {
+        return true;
+    }
+    if let Some(filename) = path.rsplit('/').next() {
+        if filename == "sitecustomize.py" || filename == "usercustomize.py" {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Extract string values from a JSON value that look like file paths.
@@ -228,7 +310,11 @@ mod tests {
     #[test]
     fn empty_policy_allows_everything() {
         let policy = McpPolicy::from_config(vec![]);
-        let decision = policy.evaluate("any_tool", &json!({"path": "/etc/passwd"}));
+        let decision = policy.evaluate(
+            "any_tool",
+            &json!({"path": "/etc/passwd"}),
+            McpDefaultPolicy::Allow,
+        );
         assert_eq!(decision, HookDecision::Allow);
     }
 
@@ -238,7 +324,11 @@ mod tests {
             tool: "read_file".to_owned(),
             restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
         }]);
-        let decision = policy.evaluate("read_file", &json!({"path": "/home/user/.ssh/id_rsa"}));
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.ssh/id_rsa"}),
+            McpDefaultPolicy::Allow,
+        );
         assert_eq!(decision, HookDecision::Block);
     }
 
@@ -251,6 +341,7 @@ mod tests {
         let decision = policy.evaluate(
             "read_file",
             &json!({"path": "/home/user/project/src/main.rs"}),
+            McpDefaultPolicy::Allow,
         );
         assert_eq!(decision, HookDecision::Allow);
     }
@@ -259,10 +350,15 @@ mod tests {
     fn allows_different_tool() {
         let policy = McpPolicy::from_config(vec![PolicyRule {
             tool: "read_file".to_owned(),
-            restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+            restricted_paths: vec!["/tmp/restricted/**".to_owned()],
         }]);
-        // Rule is for read_file, not write_file
-        let decision = policy.evaluate("write_file", &json!({"path": "/home/user/.ssh/id_rsa"}));
+        // Rule is for read_file, not write_file — write_file should be allowed
+        // (using a non-sensitive path to avoid built-in restrictions)
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/tmp/restricted/secret.dat"}),
+            McpDefaultPolicy::Allow,
+        );
         assert_eq!(decision, HookDecision::Allow);
     }
 
@@ -275,6 +371,7 @@ mod tests {
         let decision = policy.evaluate(
             "write_file",
             &json!({"path": "/usr/lib/python3/site-packages/evil.pth"}),
+            McpDefaultPolicy::Allow,
         );
         assert_eq!(decision, HookDecision::Block);
     }
@@ -285,7 +382,11 @@ mod tests {
             tool: "read_file".to_owned(),
             restricted_paths: vec!["/etc/shadow".to_owned()],
         }]);
-        let decision = policy.evaluate("read_file", &json!({"path": "/etc/shadow"}));
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/etc/shadow"}),
+            McpDefaultPolicy::Allow,
+        );
         assert_eq!(decision, HookDecision::Block);
     }
 
@@ -301,9 +402,16 @@ mod tests {
                 restricted_paths: vec!["/home/user/.aws/**".to_owned()],
             },
         ]);
-        let decision1 = policy.evaluate("read_file", &json!({"path": "/home/user/.ssh/id_rsa"}));
-        let decision2 =
-            policy.evaluate("read_file", &json!({"path": "/home/user/.aws/credentials"}));
+        let decision1 = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.ssh/id_rsa"}),
+            McpDefaultPolicy::Allow,
+        );
+        let decision2 = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.aws/credentials"}),
+            McpDefaultPolicy::Allow,
+        );
         assert_eq!(decision1, HookDecision::Block);
         assert_eq!(decision2, HookDecision::Block);
     }
@@ -317,6 +425,7 @@ mod tests {
         let decision = policy.evaluate(
             "complex_tool",
             &json!({"nested": {"deep": {"path": "/secret/key.pem"}}}),
+            McpDefaultPolicy::Allow,
         );
         assert_eq!(decision, HookDecision::Block);
     }
@@ -359,15 +468,27 @@ mod tests {
         let policy = McpPolicy::from_config_rules(&config_rules);
 
         // read_file accessing .ssh should be blocked
-        let decision = policy.evaluate("read_file", &json!({"path": "/home/user/.ssh/id_rsa"}));
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.ssh/id_rsa"}),
+            McpDefaultPolicy::Allow,
+        );
         assert_eq!(decision, HookDecision::Block);
 
         // write_file writing a .pth should be blocked
-        let decision = policy.evaluate("write_file", &json!({"path": "/usr/lib/python3/evil.pth"}));
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/usr/lib/python3/evil.pth"}),
+            McpDefaultPolicy::Allow,
+        );
         assert_eq!(decision, HookDecision::Block);
 
         // read_file accessing a normal file should be allowed
-        let decision = policy.evaluate("read_file", &json!({"path": "/home/user/project/main.rs"}));
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/project/main.rs"}),
+            McpDefaultPolicy::Allow,
+        );
         assert_eq!(decision, HookDecision::Allow);
     }
 
@@ -429,6 +550,256 @@ mod tests {
         assert_eq!(policy.rules[0].restricted_paths.len(), 2);
         assert_eq!(policy.rules[0].restricted_paths[0], "/home/user/.ssh/**");
         assert_eq!(policy.rules[0].restricted_paths[1], "**/*.pth");
+    }
+
+    // ---- built-in sensitive path restriction tests ----
+
+    #[test]
+    fn builtin_blocks_ssh_with_no_rules() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "any_tool",
+            &json!({"path": "/home/user/.ssh/id_rsa"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            "built-in should block .ssh paths even with no rules"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_aws_credentials() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.aws/credentials"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_blocks_gnupg() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.gnupg/secring.gpg"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_blocks_env_file() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/app/project/.env"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_blocks_env_dotfile_variants() {
+        let policy = McpPolicy::from_config(vec![]);
+        for env_file in &[".env.local", ".env.production", ".env.staging"] {
+            let decision = policy.evaluate(
+                "read_file",
+                &json!({"path": format!("/app/{env_file}")}),
+                McpDefaultPolicy::Allow,
+            );
+            assert_eq!(decision, HookDecision::Block, "should block {env_file}");
+        }
+    }
+
+    #[test]
+    fn builtin_blocks_pth_files() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/usr/lib/python3/site-packages/evil.pth"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_blocks_sitecustomize() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/usr/lib/python3/site-packages/sitecustomize.py"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_blocks_kube_config() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.kube/config"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_allows_normal_paths() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/project/src/main.rs"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Allow,
+            "normal paths should not be blocked by built-in restrictions"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_before_user_rules() {
+        // Even with user rules that would allow a path, built-in restrictions
+        // take precedence.
+        let policy = McpPolicy::from_config(vec![PolicyRule {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/tmp/**".to_owned()], // Only restricts /tmp
+        }]);
+
+        // .ssh should be blocked by built-in even though user rule doesn't mention it
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.ssh/id_rsa"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_does_not_match_env_in_middle_of_filename() {
+        // ".env" should only match the exact filename, not substrings like ".envrc"
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.envrc"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Allow,
+            ".envrc should not be blocked by .env pattern"
+        );
+    }
+
+    // ---- default MCP policy tests ----
+
+    #[test]
+    fn unmatched_tool_allowed_by_default() {
+        // No rules at all, default policy is Allow — tool should be allowed.
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "some_tool",
+            &json!({"arg": "value"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn unmatched_tool_warned_when_policy_warn() {
+        // No rules at all, default policy is Warn — tool should get Warn.
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "some_tool",
+            &json!({"arg": "value"}),
+            McpDefaultPolicy::Warn,
+        );
+        assert_eq!(decision, HookDecision::Warn);
+    }
+
+    #[test]
+    fn unmatched_tool_blocked_when_policy_deny() {
+        // No rules at all, default policy is Deny — tool should be blocked.
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "some_tool",
+            &json!({"arg": "value"}),
+            McpDefaultPolicy::Deny,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn matched_tool_respects_rules_regardless_of_default() {
+        // Tool matches a rule that allows it (path not restricted).
+        // Even with Deny default, the rule match should take precedence.
+        let policy = McpPolicy::from_config(vec![PolicyRule {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+        }]);
+
+        // Path does NOT match restricted pattern — should be allowed regardless of default.
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/project/main.rs"}),
+            McpDefaultPolicy::Deny,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Allow,
+            "matched tool with non-restricted path should be allowed even with Deny default"
+        );
+
+        // Path DOES match restricted pattern — should be blocked regardless of default.
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.ssh/id_rsa"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            "matched tool with restricted path should be blocked even with Allow default"
+        );
+    }
+
+    #[test]
+    fn unmatched_tool_with_rules_for_other_tools_uses_default() {
+        // Rules exist but for a different tool — the queried tool is unmatched.
+        // Using non-sensitive paths to test default policy without built-in blocking.
+        let policy = McpPolicy::from_config(vec![PolicyRule {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/tmp/restricted/**".to_owned()],
+        }]);
+
+        // write_file has no rules, so default policy applies.
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/tmp/some/data.txt"}),
+            McpDefaultPolicy::Warn,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Warn,
+            "unmatched tool should use default policy (Warn)"
+        );
+
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/tmp/some/data.txt"}),
+            McpDefaultPolicy::Deny,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            "unmatched tool should use default policy (Deny)"
+        );
     }
 }
 

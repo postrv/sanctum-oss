@@ -4,6 +4,7 @@
 //! threat classifications, configuration structures, error types, and
 //! well-known filesystem paths.
 
+pub mod audit;
 pub mod config;
 pub mod errors;
 pub mod ipc;

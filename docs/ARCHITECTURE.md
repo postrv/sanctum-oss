@@ -170,3 +170,73 @@
 - All real-world policy rules use `/**` or `**/*` forms (e.g., `/home/user/.ssh/**`, `**/*.pth`)
 - The single-star form matches any substring (not just a single path segment), which is the safe direction for a security blocklist — it blocks more paths, not fewer
 - Unsupported patterns returning `false` (with a warning) is safer than silently falling through to exact match, which would make glob patterns appear to work but never actually match real paths
+
+### ADR-016: Hook audit event persistence via direct file write
+
+**Context**: Claude Code hooks (`sanctum hook pre-bash/pre-write/pre-read/post-bash`) are short-lived synchronous processes invoked by Claude Code for each tool call. When a hook blocks a credential leak or warns about a risky operation, that security event is not recorded anywhere persistent. The daemon maintains an NDJSON audit log, but hooks have no communication channel to the daemon. This means `sanctum audit` and `sanctum fix` are blind to hook-detected threats.
+
+**Decision**: Hooks write `ThreatEvent` records directly to the shared NDJSON audit log file, using the same `append_audit_event` function the daemon uses. The audit write module is extracted from `sanctum-daemon` into `sanctum-types` so both the daemon and CLI can use it without circular dependencies.
+
+**Rationale**:
+- **POSIX atomicity**: `O_APPEND` writes under `PIPE_BUF` (4KB on all platforms) are atomic. `ThreatEvent` JSON lines are well under 4KB, so concurrent writes from hooks and the daemon are safe without locking.
+- **Zero daemon dependency**: Hooks already work without the daemon running. Direct file write preserves this property. IPC-based alternatives would fail (and trigger fail-closed blocking) when the daemon is down.
+- **Fail-closed safety**: Audit write errors are swallowed (logged via tracing, never propagated). A failed audit write must not change the hook's allow/block decision and must not cause `exit(2)`.
+- **No new dependencies**: No tokio runtime needed in the CLI (audit writes are synchronous). No new IPC commands, no second socket, no async complexity.
+- **Alternatives considered**: (a) Synchronous IPC to daemon — rejected because daemon-down causes IPC failure, which under fail-closed semantics would block tool calls. (b) Fire-and-forget Unix datagram — rejected because it adds a second socket and the daemon wouldn't persist the event durably. (c) Separate hook audit log — rejected because two log files fragment the security picture.
+
+### ADR-017: Budget pipeline wiring strategy
+
+**Context**: The `RecordUsage` IPC command is fully implemented in the daemon but has zero callers. The `post_bash` hook extracts API usage data via `extract_budget_usage()` but never sends it. Documentation falsely claims budget tracking is wired into hooks. The `sanctum-proxy` crate contains only foundation code (provider identification); no actual HTTP proxy exists.
+
+**Decision**: Three-phase approach:
+1. **v0.1.0** (current): Wire `post_bash` hook usage extraction to IPC `RecordUsage`. Add `sanctum budget record` CLI subcommand for manual/scripted usage reporting. Fix false documentation. Document that automatic capture is limited to API responses visible in bash output.
+2. **v0.2.0**: Implement a local HTTP gateway proxy (not TLS MITM). Tools configure `OPENAI_BASE_URL=http://127.0.0.1:PORT/v1` etc. — all major AI SDKs support base URL override. The proxy makes upstream HTTPS calls, extracts usage from responses, and records via the budget tracker. Dramatically simpler than TLS interception.
+3. **v0.3.0**: Full TLS MITM proxy for tools that don't support base URL override.
+
+**Rationale**:
+- The `post_bash` hook captures API responses visible in command output (e.g., explicit `curl` calls). This is rare but honest — it makes existing code functional rather than dead.
+- The `sanctum budget record` command provides a scriptable endpoint for CI/CD and advanced users.
+- The local HTTP gateway approach (v0.2.0) is how LiteLLM, Helicone, and OpenRouter work. It avoids CA certificate generation, TLS termination, certificate pinning issues, and HTTP/2 complexity.
+- The false documentation is a security tool credibility issue and must be fixed immediately.
+
+### ADR-018: MCP policy — allow-by-default with configurable default and built-in path restrictions
+
+**Context**: The MCP policy engine uses a path-based blocklist model: rules restrict what paths specific tools can access. With no rules defined, all MCP tool calls are allowed. Industry consensus (ToolHive, Cerbos, MCP spec) recommends deny-by-default. However, Sanctum is a secondary enforcement layer — Claude Code already requires user approval for MCP tools at the host level.
+
+**Decision**: Keep the allow-by-default blocklist model but add three enhancements:
+1. A `default_mcp_policy` config field (`"allow"` | `"warn"` | `"deny"`) that controls the decision for tools with no matching rules.
+2. `Warn` decision for unmatched tools when policy is `"warn"` — gives visibility without breaking anything.
+3. Built-in default path restrictions that apply to all MCP tools regardless of user-defined rules, covering sensitive paths (`.ssh/`, `.aws/`, `.gnupg/`, `.env`, `.pth`).
+
+**Rationale**:
+- Sanctum is not the primary gate. Claude Code already deny-by-defaults MCP tools (user approval required). Adding another deny-by-default would create redundant double-gating friction.
+- The current path-based blocklist answers the right question for Sanctum's domain: "should this tool touch this path?" vs Claude Code's "should this tool run at all?"
+- The `default_mcp_policy` field gives security-conscious users the option to tighten the policy without forcing it on everyone.
+- Built-in path restrictions ensure zero-config Sanctum still blocks MCP tools from accessing credential paths.
+
+### ADR-019: macOS credential access tracing — accept limitation with best-effort lsof
+
+**Context**: On Linux, `try_find_accessor_info` scans `/proc/*/fd/` to identify which process accessed a credential file. On macOS, it returns `(None, None)`. The Endpoint Security Framework (ESF) would provide process attribution but requires root, `unsafe` code (C FFI), an Apple-provisioned entitlement, and App Bundle packaging — all incompatible with Sanctum's constraints (`unsafe_code = "deny"`, no root, no C dependencies).
+
+**Decision**: Accept the platform limitation. Optionally add a best-effort `lsof <path>` probe that mirrors the existing network collector pattern. Document the difference.
+
+**Rationale**:
+- Sanctum's constraints (no unsafe, no root, no C deps, SIP enabled) eliminate all high-fidelity options: ESF, DTrace, fs_usage, proc_pidinfo FFI.
+- `lsof <path>` is the only option that works within constraints. It will usually miss short-lived reads (credential reads are typically open-read-close) but may catch longer-held files (editors, scripts).
+- The existing network collector already uses `lsof` on macOS, so this is an established pattern in the codebase.
+- Credential access detection still works on macOS via FSEvents — users get the security value of knowing *a file was accessed*, even without process attribution.
+- Full process attribution on macOS would require a privileged helper daemon with ESF — a potential v0.3.0+ architectural expansion.
+
+### ADR-020: Wire dead threat categories and make credential scanning unconditional
+
+**Context**: Three `ThreatCategory` variants (`SiteCustomize`, `McpViolation`, `BudgetOverrun`) are defined in the type system but never produced as `ThreatEvent` records. Each has a natural emission point: `pre_write` blocks `sitecustomize.py` writes, `pre_mcp_tool_use` blocks policy violations, budget enforcement returns `Blocked`. Additionally, two `ResolutionAction` variants (`PolicyUpdated`, `BudgetAdjusted`) are defined but never constructed.
+
+Separately, `redact_credentials` gates credential scanning in `pre_write` but `pre_bash` credential blocking is unconditional. The config hardening forces `redact_credentials = true` for project-local configs, making the gate effectively dead code.
+
+**Decision**: Wire all three categories to emit `ThreatEvent` records at their natural emission points (via the hook audit write mechanism from ADR-016). Make credential scanning unconditional in `pre_write` — remove the `should_redact` gate. Keep the `redact_credentials` config field for schema stability.
+
+**Rationale**:
+- These categories represent real security events that Sanctum already detects and blocks. The gap is only that the detection is not recorded. Wiring them up makes `sanctum audit` and `sanctum fix` aware of the full threat picture.
+- Removing them would waste existing work (notify display strings, resolution actions) and create unnecessary churn when they're re-added later.
+- Keeping them as dead code erodes trust in the type system and creates confusion about what the audit log records.
+- Credential scanning should always be on (defense-in-depth). The config hardening that forces `redact_credentials = true` already signals this is the intended posture. Removing the gate eliminates the asymmetry between `pre_bash` (always scans) and `pre_write` (conditionally scans).

@@ -539,12 +539,14 @@ async fn handle_ipc_command(
             input_tokens,
             output_tokens,
         } => {
+            let audit_path = paths.log_dir.join("audit.log");
             handle_record_usage(
                 &shared_budget,
                 &provider,
                 &model,
                 input_tokens,
                 output_tokens,
+                &audit_path,
             )
             .await
         }
@@ -703,12 +705,16 @@ async fn handle_budget_extend(
 }
 
 /// Parse a provider string and record token usage, returning the budget status.
+///
+/// When recording pushes spend over a session or daily limit, emits a
+/// `BudgetOverrun` `ThreatEvent` to the audit log.
 async fn handle_record_usage(
     shared_budget: &Arc<Mutex<BudgetTracker>>,
     provider_str: &str,
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
+    audit_path: &Path,
 ) -> IpcResponse {
     let provider = match provider_str.to_lowercase().as_str() {
         "openai" => Provider::OpenAI,
@@ -729,6 +735,40 @@ async fn handle_record_usage(
     };
 
     let status = shared_budget.lock().await.record_usage(&usage);
+
+    // Emit BudgetOverrun threat event when a limit is exceeded
+    if status.session_exceeded || status.daily_exceeded {
+        let exceeded_type = if status.session_exceeded {
+            "session"
+        } else {
+            "daily"
+        };
+        let limit = if status.session_exceeded {
+            status.session_limit_cents.unwrap_or(0)
+        } else {
+            status.daily_limit_cents.unwrap_or(0)
+        };
+        let spent = if status.session_exceeded {
+            status.session_spent_cents
+        } else {
+            status.daily_spent_cents
+        };
+
+        let event = sanctum_types::threat::ThreatEvent {
+            timestamp: chrono::Utc::now(),
+            level: sanctum_types::threat::ThreatLevel::Critical,
+            category: sanctum_types::threat::ThreatCategory::BudgetOverrun,
+            description: format!(
+                "{provider} {exceeded_type} budget exceeded: {spent}c spent, {limit}c limit (model: {model})"
+            ),
+            source_path: std::path::PathBuf::from(format!("budget:{provider}")),
+            creator_pid: None,
+            creator_exe: None,
+            action_taken: sanctum_types::threat::Action::Blocked,
+        };
+
+        audit::append_audit_event(&event, audit_path);
+    }
 
     IpcResponse::Ok {
         message: format!(
@@ -1307,6 +1347,93 @@ mod tests {
             }
             other => panic!("expected ThreatList, got {other:?}"),
         }
+    }
+
+    // ============================================================
+    // BudgetOverrun ThreatEvent emission
+    // ============================================================
+
+    #[tokio::test]
+    async fn record_usage_emits_budget_overrun_when_session_exceeded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).expect("create log dir");
+        let audit_path = log_dir.join("audit.log");
+
+        // Create a tracker with a very low session limit (100 cents = $1)
+        let config = sanctum_types::config::BudgetConfig {
+            default_session: Some(sanctum_types::config::BudgetAmount { cents: 100 }),
+            default_daily: None,
+            alert_at_percent: 75,
+            providers: std::collections::HashMap::new(),
+        };
+        let tracker = BudgetTracker::new(&config);
+        let shared = Arc::new(Mutex::new(tracker));
+
+        // Record massive usage that exceeds the session limit
+        let response = handle_record_usage(
+            &shared,
+            "openai",
+            "gpt-4o",
+            10_000_000, // enough to exceed $1
+            0,
+            &audit_path,
+        )
+        .await;
+
+        // Should succeed (not an error response)
+        match &response {
+            IpcResponse::Ok { message } => {
+                assert!(
+                    message.contains("OpenAI"),
+                    "response should mention provider: {message}"
+                );
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // Verify BudgetOverrun event was written to audit log
+        assert!(audit_path.exists(), "audit log should be created");
+        let content = std::fs::read_to_string(&audit_path).expect("read audit");
+        let parsed: ThreatEvent = serde_json::from_str(content.trim()).expect("parse event");
+        assert_eq!(parsed.category, ThreatCategory::BudgetOverrun);
+        assert_eq!(parsed.level, ThreatLevel::Critical);
+        assert_eq!(parsed.action_taken, Action::Blocked);
+        assert!(
+            parsed.description.contains("session"),
+            "description should mention session: {}",
+            parsed.description
+        );
+        assert!(
+            parsed.source_path.to_string_lossy().starts_with("budget:"),
+            "source_path should start with budget:"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_usage_no_audit_when_within_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).expect("create log dir");
+        let audit_path = log_dir.join("audit.log");
+
+        // No limits set — unlimited budget
+        let config = sanctum_types::config::BudgetConfig {
+            default_session: None,
+            default_daily: None,
+            alert_at_percent: 75,
+            providers: std::collections::HashMap::new(),
+        };
+        let tracker = BudgetTracker::new(&config);
+        let shared = Arc::new(Mutex::new(tracker));
+
+        let _ = handle_record_usage(&shared, "openai", "gpt-4o", 1000, 500, &audit_path).await;
+
+        // No audit log should be created
+        assert!(
+            !audit_path.exists(),
+            "no audit log should be created when within budget"
+        );
     }
 
     #[test]

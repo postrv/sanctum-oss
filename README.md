@@ -122,7 +122,7 @@ enforce_budget = true
 enforce_allowed_models = true
 ```
 
-Budget tracking is wired into Claude Code hooks -- API usage detected in `post-bash` responses is automatically recorded via IPC.
+Budget usage can be reported via `sanctum budget record` or through post-bash hook detection when API responses are visible in command output.
 
 ## Composable architecture
 
@@ -175,7 +175,7 @@ Key guarantees:
 - **Zero `unsafe` code** in the entire codebase (denied by workspace lint)
 - **No panics on any input** (`unwrap` and `expect` are denied by clippy)
 - **All dependencies audited** and version-pinned (193 deps, 0 known CVEs)
-- **899 tests**, 0 clippy warnings (pedantic + nursery)
+- **974 tests**, 0 clippy warnings (pedantic + nursery)
 - **8 Kani bounded model checking proofs** with CI enforcement
 - **2 fuzz targets** for security-critical parsers
 - **9 property-based tests** verifying core invariants

@@ -142,6 +142,21 @@ enum BudgetAction {
     },
     /// Reset budget counters.
     Reset,
+    /// Record token usage for a provider/model.
+    Record {
+        /// API provider name (e.g. anthropic, openai, google).
+        #[arg(long)]
+        provider: String,
+        /// Model identifier (e.g. claude-sonnet-4-6, gpt-4o).
+        #[arg(long)]
+        model: String,
+        /// Number of input (prompt) tokens.
+        #[arg(long)]
+        input_tokens: u64,
+        /// Number of output (completion) tokens.
+        #[arg(long)]
+        output_tokens: u64,
+    },
 }
 
 #[derive(Subcommand)]

@@ -24,7 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Nightly extended fuzz testing**: 5-hour fuzz runs via cron schedule (2.5 hours per target)
 - **Release workflow gates**: `verify-ci` job checks CI status before building release artifacts
 - **Config version field**: `config_version` added to `SanctumConfig` for future migration support
-- **899 tests** across 8 crates (up from 511)
+- **Hook audit event persistence**: Hooks now write `ThreatEvent` records directly to the shared NDJSON audit log on block/warn decisions, making hook-detected threats visible in `sanctum audit` and `sanctum fix`
+- **Shared audit module**: `sanctum-types::audit` extracted from daemon, enabling both daemon and CLI to write to the same audit log with POSIX atomic guarantees
+- **`sanctum budget record` command**: Manual/scripted budget usage reporting (`--provider`, `--model`, `--input-tokens`, `--output-tokens`)
+- **MCP configurable default policy**: `default_mcp_policy` config field (`allow`/`warn`/`deny`) controls decisions for tools with no matching rules
+- **MCP built-in sensitive path restrictions**: All MCP tools are blocked from accessing `.ssh/`, `.aws/`, `.gnupg/`, `.env`, `.pth`, `sitecustomize.py`, and other sensitive paths, regardless of user rules
+- **macOS credential access tracing**: Best-effort `lsof` probe identifies which process accessed credential files (previously returned no process info on macOS)
+- **BudgetOverrun threat events**: Budget limit exceedances now emit `ThreatEvent` records to the audit log
+- **974 tests** across 8 crates (up from 899)
 
 ### Fixed
 - **Claude Code hooks JSON format**: Migrated from deprecated flat format to current three-level nested format (`hooks: [{ type: "command", command }]`) — without this fix, hooks were silently ignored by Claude Code
@@ -37,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Sensitive write path warnings**: Pre-write hook now warns on writes to `.bashrc`, `.zshrc`, `authorized_keys`, cron paths, systemd autostart
 - **Sensitive read path expansion**: Added `.gnupg/`, `.config/gcloud/`, `.config/gh/`, `.env.local`, `.env.production`, `.bash_history`, `.zsh_history` to pre-read blocking
 - **Property test fix**: `file_severity_is_max_of_lines` now correctly handles continuation-line semantics (severity >= max, not ==)
+- **Credential scanning unconditional**: `pre_write` now always scans for credentials regardless of `redact_credentials` config (defense-in-depth — config hardening already forced this to `true`)
+- **Dead threat categories wired**: `SiteCustomize`, `McpViolation`, and `BudgetOverrun` now emit `ThreatEvent` records at their natural detection points
+- **False budget docs corrected**: Documentation no longer claims automatic IPC-based budget recording from hooks (manual recording via `sanctum budget record` is available)
 - **Resolution log rotation**: Resolution log now rotates at 10MB (was unbounded)
 
 ### Security

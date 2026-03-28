@@ -5,6 +5,26 @@ use sanctum_types::errors::CliError;
 use crate::ipc_client::{self, IpcCommand, IpcResponse, ProviderBudgetInfo};
 use crate::BudgetAction;
 
+/// Send an IPC command and handle the common Ok/Error response pattern.
+///
+/// On `IpcResponse::Ok`, prints the message to stdout and returns `Ok(())`.
+fn send_and_print(command: &IpcCommand) -> Result<(), CliError> {
+    let response = ipc_client::send_command(command)?;
+    match response {
+        IpcResponse::Ok { message } => {
+            #[allow(clippy::print_stdout)]
+            {
+                println!("{message}");
+            }
+            Ok(())
+        }
+        IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
+        _ => Err(CliError::ConnectionFailed(
+            "unexpected response from daemon".to_string(),
+        )),
+    }
+}
+
 /// Run the budget command.
 pub fn run(action: Option<&BudgetAction>) -> Result<(), CliError> {
     match action {
@@ -25,24 +45,10 @@ pub fn run(action: Option<&BudgetAction>) -> Result<(), CliError> {
         Some(BudgetAction::Set { session, daily }) => {
             let session_cents = session.as_deref().map(parse_dollar_amount).transpose()?;
             let daily_cents = daily.as_deref().map(parse_dollar_amount).transpose()?;
-
-            let response = ipc_client::send_command(&IpcCommand::BudgetSet {
+            send_and_print(&IpcCommand::BudgetSet {
                 session_cents,
                 daily_cents,
-            })?;
-            match response {
-                IpcResponse::Ok { message } => {
-                    #[allow(clippy::print_stdout)]
-                    {
-                        println!("{message}");
-                    }
-                    Ok(())
-                }
-                IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-                _ => Err(CliError::ConnectionFailed(
-                    "unexpected response from daemon".to_string(),
-                )),
-            }
+            })
         }
         Some(BudgetAction::Extend { session }) => {
             let amount = match session.as_deref() {
@@ -53,40 +59,22 @@ pub fn run(action: Option<&BudgetAction>) -> Result<(), CliError> {
                     ));
                 }
             };
-
-            let response = ipc_client::send_command(&IpcCommand::BudgetExtend {
+            send_and_print(&IpcCommand::BudgetExtend {
                 additional_cents: amount,
-            })?;
-            match response {
-                IpcResponse::Ok { message } => {
-                    #[allow(clippy::print_stdout)]
-                    {
-                        println!("{message}");
-                    }
-                    Ok(())
-                }
-                IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-                _ => Err(CliError::ConnectionFailed(
-                    "unexpected response from daemon".to_string(),
-                )),
-            }
+            })
         }
-        Some(BudgetAction::Reset) => {
-            let response = ipc_client::send_command(&IpcCommand::BudgetReset)?;
-            match response {
-                IpcResponse::Ok { message } => {
-                    #[allow(clippy::print_stdout)]
-                    {
-                        println!("{message}");
-                    }
-                    Ok(())
-                }
-                IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-                _ => Err(CliError::ConnectionFailed(
-                    "unexpected response from daemon".to_string(),
-                )),
-            }
-        }
+        Some(BudgetAction::Reset) => send_and_print(&IpcCommand::BudgetReset),
+        Some(BudgetAction::Record {
+            provider,
+            model,
+            input_tokens,
+            output_tokens,
+        }) => send_and_print(&IpcCommand::RecordUsage {
+            provider: provider.clone(),
+            model: model.clone(),
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
+        }),
     }
 }
 
@@ -189,6 +177,7 @@ pub fn format_budget_summary(providers: &[ProviderBudgetInfo]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -310,5 +299,64 @@ mod tests {
         }];
         let summary = format_budget_summary(&providers);
         assert!(summary.contains("WARNING"));
+    }
+
+    // ---- Record command IPC construction tests ----
+
+    #[test]
+    fn record_usage_constructs_correct_ipc_command() {
+        let cmd = IpcCommand::RecordUsage {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            input_tokens: 1000,
+            output_tokens: 500,
+        };
+        let json = serde_json::to_string(&cmd).expect("serialise");
+        assert!(json.contains("\"command\":\"RecordUsage\""));
+        assert!(json.contains("\"provider\":\"anthropic\""));
+        assert!(json.contains("\"model\":\"claude-sonnet-4-6\""));
+        assert!(json.contains("\"input_tokens\":1000"));
+        assert!(json.contains("\"output_tokens\":500"));
+    }
+
+    #[test]
+    fn record_usage_roundtrips_via_json() {
+        let cmd = IpcCommand::RecordUsage {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            input_tokens: 42,
+            output_tokens: 17,
+        };
+        let json = serde_json::to_string(&cmd).expect("serialise");
+        let roundtripped: IpcCommand = serde_json::from_str(&json).expect("deserialise");
+        match roundtripped {
+            IpcCommand::RecordUsage {
+                provider,
+                model,
+                input_tokens,
+                output_tokens,
+            } => {
+                assert_eq!(provider, "openai");
+                assert_eq!(model, "gpt-4o");
+                assert_eq!(input_tokens, 42);
+                assert_eq!(output_tokens, 17);
+            }
+            other => panic!("expected RecordUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_daemon_not_running_produces_error() {
+        // When the daemon isn't running, send_command should return DaemonNotRunning.
+        // We can't easily call run() here because it needs a socket, but we can
+        // verify the ipc_client handles a missing socket correctly.
+        let result = ipc_client::send_command(&IpcCommand::RecordUsage {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+        });
+        // Should fail gracefully, not crash.
+        assert!(result.is_err());
     }
 }

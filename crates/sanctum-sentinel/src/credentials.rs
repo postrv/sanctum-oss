@@ -223,16 +223,22 @@ fn is_credential_path(path: &Path, credential_paths: &[PathBuf]) -> bool {
 /// Best-effort attempt to find the PID and name of the process accessing a file.
 ///
 /// On Linux, scans `/proc/*/fd/` for open file descriptors pointing to the path.
-/// On macOS, this is very difficult without elevated privileges, so we skip it.
+/// On macOS, runs `lsof <path>` to find the accessor process.
 /// Returns `(None, None)` if the accessor cannot be determined.
-const fn try_find_accessor_info(_path: &Path) -> (Option<u32>, Option<String>) {
+fn try_find_accessor_info(path: &Path) -> (Option<u32>, Option<String>) {
     #[cfg(target_os = "linux")]
     {
-        linux_find_accessor(_path)
+        linux_find_accessor(path)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
+        macos_find_accessor(path)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = path;
         (None, None)
     }
 }
@@ -271,6 +277,127 @@ fn linux_find_accessor(path: &Path) -> (Option<u32>, Option<String>) {
                 }
             }
         }
+    }
+
+    (None, None)
+}
+
+/// macOS-specific: run `lsof <path>` to find a process with the given file open.
+///
+/// Uses `std::process::Command` with a thread-based timeout to prevent
+/// blocking indefinitely if `lsof` stalls. Without `sudo`, `lsof` only
+/// shows processes owned by the current user -- this is acceptable for
+/// the threat model (detecting same-UID credential theft).
+///
+/// This is best-effort: the file may already be closed by the time `lsof`
+/// runs, or `lsof` may not be installed.
+#[cfg(target_os = "macos")]
+fn macos_find_accessor(path: &Path) -> (Option<u32>, Option<String>) {
+    use std::process::Command;
+    use std::time::Duration;
+
+    let path_str = path.to_string_lossy();
+
+    // Spawn lsof as a child process so we can enforce a timeout.
+    let child = Command::new("lsof")
+        .arg(&*path_str)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(%e, "failed to spawn lsof for credential access tracing");
+            return (None, None);
+        }
+    };
+
+    // Wait with a 5-second timeout using a thread.
+    let timeout = Duration::from_secs(5);
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    // The child's PID is needed so the timeout thread can kill it if necessary.
+    let child_id = child.id();
+
+    std::thread::spawn(move || {
+        std::thread::sleep(timeout);
+        // Signal the main thread that the timeout has elapsed.
+        let _ = tx.send(());
+    });
+
+    // Poll: try wait in a loop with small sleeps, checking for timeout.
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                // Process has exited -- collect output.
+                break child.wait_with_output().ok();
+            }
+            Ok(None) => {
+                // Still running -- check if timeout has elapsed.
+                if rx.try_recv().is_ok() {
+                    // Timeout elapsed -- kill the process.
+                    tracing::debug!("lsof timed out during credential access tracing");
+                    // Best-effort kill; ignore errors (process may have exited between
+                    // try_wait and kill).
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return (None, None);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                tracing::debug!(%e, "error waiting for lsof during credential access tracing");
+                // Best-effort kill on error.
+                let _ = child.kill();
+                let _ = child.wait();
+                return (None, None);
+            }
+        }
+    };
+
+    // Suppress "unused variable" warning for child_id when the kill-by-PID
+    // approach is not used (we kill via the Child handle instead).
+    let _ = child_id;
+
+    match output {
+        Some(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            parse_lsof_credential_output(&stdout)
+        }
+        _ => (None, None),
+    }
+}
+
+/// Parse `lsof` default-format output for a single file to extract the first
+/// accessor's PID and command name.
+///
+/// The default `lsof <path>` output has a header line followed by one row per
+/// open file descriptor, with whitespace-separated columns:
+///
+/// ```text
+/// COMMAND   PID  USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+/// vim      1234  alice   4r   REG    1,5     8192  ... /path/to/file
+/// ```
+///
+/// We extract the COMMAND and PID from the first non-header row. The COMMAND
+/// column is index 0 and PID is index 1 in the whitespace-split fields.
+#[cfg(any(target_os = "macos", test))]
+#[must_use]
+fn parse_lsof_credential_output(output: &str) -> (Option<u32>, Option<String>) {
+    for line in output.lines().skip(1) {
+        // Skip the header line
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 2 {
+            continue;
+        }
+
+        let command = fields[0];
+        let Ok(pid) = fields[1].parse::<u32>() else {
+            continue;
+        };
+
+        return (Some(pid), Some(command.to_owned()));
     }
 
     (None, None)
@@ -459,5 +586,92 @@ mod tests {
 
         // Unknown process is still rejected
         assert!(!is_allowed_accessor_with_custom("malware", &custom));
+    }
+
+    // ============================================================
+    // LSOF CREDENTIAL ACCESS PARSING (macOS)
+    // ============================================================
+
+    #[test]
+    fn test_parse_lsof_output_with_process() {
+        let output = "\
+COMMAND   PID  USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+vim      1234  alice   4r   REG    1,5     8192 1234 /home/alice/.ssh/id_rsa
+";
+        let (pid, name) = parse_lsof_credential_output(output);
+        assert_eq!(pid, Some(1234));
+        assert_eq!(name.as_deref(), Some("vim"));
+    }
+
+    #[test]
+    fn test_parse_lsof_output_empty() {
+        let (pid, name) = parse_lsof_credential_output("");
+        assert_eq!(pid, None);
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn test_parse_lsof_output_malformed() {
+        // Header only, no data rows
+        let (pid, name) = parse_lsof_credential_output(
+            "COMMAND   PID  USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n",
+        );
+        assert_eq!(pid, None);
+        assert_eq!(name, None);
+
+        // Completely garbled output
+        let (pid, name) = parse_lsof_credential_output("some random garbage\nmore garbage");
+        assert_eq!(pid, None);
+        assert_eq!(name, None);
+
+        // Single field per line (not enough columns)
+        let (pid, name) = parse_lsof_credential_output("HEADER\nx");
+        assert_eq!(pid, None);
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn test_parse_lsof_output_multiple_accessors() {
+        // lsof may return multiple rows; we take the first one
+        let output = "\
+COMMAND   PID  USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+vim      1234  alice   4r   REG    1,5     8192 1234 /home/alice/.ssh/id_rsa
+cat      5678  alice   3r   REG    1,5     8192 1234 /home/alice/.ssh/id_rsa
+";
+        let (pid, name) = parse_lsof_credential_output(output);
+        assert_eq!(pid, Some(1234));
+        assert_eq!(name.as_deref(), Some("vim"));
+    }
+
+    #[test]
+    fn test_parse_lsof_output_header_only_empty_lines() {
+        let output = "COMMAND   PID  USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n\n\n";
+        let (pid, name) = parse_lsof_credential_output(output);
+        assert_eq!(pid, None);
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn test_lsof_timeout_returns_none() {
+        // We cannot easily simulate a real timeout in a unit test, but we can
+        // verify that the parse function returns (None, None) for output that
+        // would result from a killed/timed-out lsof (empty output).
+        let (pid, name) = parse_lsof_credential_output("");
+        assert_eq!(pid, None);
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn test_parse_lsof_output_pid_not_numeric() {
+        // If the PID field is not a number, skip that line gracefully
+        let output = "\
+COMMAND   PID  USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+vim      abc   alice   4r   REG    1,5     8192 1234 /path
+cat      5678  alice   3r   REG    1,5     8192 1234 /path
+";
+        let (pid, name) = parse_lsof_credential_output(output);
+        // Should skip vim (bad PID) and return cat
+        assert_eq!(pid, Some(5678));
+        assert_eq!(name.as_deref(), Some("cat"));
     }
 }

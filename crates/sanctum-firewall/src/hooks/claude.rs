@@ -593,8 +593,11 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
 
-    let should_redact = input.config.as_ref().is_none_or(|c| c.redact_credentials);
-    if should_redact && !content.is_empty() {
+    // Credential scanning is unconditional — defense-in-depth.
+    // The `redact_credentials` config field is intentionally NOT consulted here;
+    // pre_bash credential blocking is already unconditional, and config hardening
+    // forces the flag to true anyway.
+    if !content.is_empty() {
         let (_, events) = redact_credentials(content);
         if !events.is_empty() {
             let types: Vec<&str> = events.iter().map(|e| e.credential_type.as_str()).collect();
@@ -612,7 +615,7 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
             .get(*field)
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        if should_redact && !field_content.is_empty() {
+        if !field_content.is_empty() {
             let (_, events) = redact_credentials(field_content);
             if !events.is_empty() {
                 let types: Vec<&str> = events.iter().map(|e| e.credential_type.as_str()).collect();
@@ -705,14 +708,14 @@ pub fn pre_mcp_tool_use(input: &HookInput, audit_log: Option<&mut McpAuditLog>) 
         }
     }
 
-    // Load MCP policy rules from config (empty vec if no config is present).
-    let mcp_rules = input
-        .config
-        .as_ref()
-        .map_or_else(Vec::new, |cfg| cfg.mcp_rules.clone());
+    // Load MCP policy rules and default policy from config.
+    let (mcp_rules, default_mcp_policy) = input.config.as_ref().map_or_else(
+        || (Vec::new(), sanctum_types::config::McpDefaultPolicy::Allow),
+        |cfg| (cfg.mcp_rules.clone(), cfg.default_mcp_policy),
+    );
 
     let policy = McpPolicy::from_config_rules(&mcp_rules);
-    let decision = policy.evaluate(&input.tool_name, &input.tool_input);
+    let decision = policy.evaluate(&input.tool_name, &input.tool_input, default_mcp_policy);
 
     let mcp_audit_enabled = input.config.as_ref().is_none_or(|cfg| cfg.mcp_audit);
 
@@ -721,7 +724,11 @@ pub fn pre_mcp_tool_use(input: &HookInput, audit_log: Option<&mut McpAuditLog>) 
             "Blocked: MCP tool '{}' violates path restriction policy",
             input.tool_name
         )),
-        _ => HookOutput::allow(),
+        crate::hooks::protocol::HookDecision::Warn => HookOutput::warn(format!(
+            "Warning: MCP tool '{}' has no explicit policy rule",
+            input.tool_name
+        )),
+        crate::hooks::protocol::HookDecision::Allow => HookOutput::allow(),
     };
 
     // Record to audit log if auditing is enabled.
@@ -737,6 +744,81 @@ pub fn pre_mcp_tool_use(input: &HookInput, audit_log: Option<&mut McpAuditLog>) 
     }
 
     output
+}
+
+/// Structured usage data extracted from an LLM API response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedUsage {
+    /// The API provider (e.g. "anthropic", "openai", "google").
+    pub provider: String,
+    /// The model identifier (e.g. "claude-sonnet-4-6", "gpt-4o").
+    pub model: String,
+    /// Number of input/prompt tokens consumed.
+    pub input_tokens: u64,
+    /// Number of output/completion tokens consumed.
+    pub output_tokens: u64,
+}
+
+/// Infer the API provider from a model name string.
+///
+/// Uses simple prefix matching:
+/// - `claude-*` or `anthropic` -> `"anthropic"`
+/// - `gpt-*` or `o1-*` or `o3-*` or `o4-*` or `chatgpt-*` -> `"openai"`
+/// - `gemini-*` -> `"google"`
+/// - otherwise -> `"unknown"`
+fn infer_provider(model: &str) -> &'static str {
+    let lower = model.to_lowercase();
+    if lower.starts_with("claude") || lower.contains("anthropic") {
+        "anthropic"
+    } else if lower.starts_with("gpt-")
+        || lower.starts_with("o1-")
+        || lower.starts_with("o3-")
+        || lower.starts_with("o4-")
+        || lower.starts_with("chatgpt-")
+    {
+        "openai"
+    } else if lower.starts_with("gemini") {
+        "google"
+    } else {
+        "unknown"
+    }
+}
+
+/// Scan command output for LLM API response JSON and extract structured usage data.
+///
+/// Like [`extract_budget_usage`] but returns an [`ExtractedUsage`] struct suitable
+/// for forwarding to the daemon via IPC.
+#[must_use]
+pub fn extract_budget_usage_structured(output_text: &str) -> Option<ExtractedUsage> {
+    for line in output_text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(obj) = value.as_object() {
+                let has_usage = obj.contains_key("usage") || obj.contains_key("usageMetadata");
+                if has_usage {
+                    let model = obj
+                        .get("model")
+                        .or_else(|| obj.get("modelVersion"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+
+                    let (input_tokens, output_tokens) = extract_token_counts(obj);
+                    let provider = infer_provider(model);
+
+                    return Some(ExtractedUsage {
+                        provider: provider.to_owned(),
+                        model: model.to_owned(),
+                        input_tokens,
+                        output_tokens,
+                    });
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Scan command output for LLM API response JSON and extract budget usage data.
@@ -937,6 +1019,7 @@ pub fn post_bash(input: &HookInput) -> HookOutput {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::hooks::protocol::HookDecision;
@@ -1872,7 +1955,9 @@ mod tests {
     }
 
     #[test]
-    fn test_redaction_disabled_by_config() {
+    fn pre_write_blocks_credentials_even_when_redact_disabled() {
+        // Credential scanning in pre_write is unconditional — the
+        // `redact_credentials` config flag must NOT gate detection.
         let mut input = make_input(
             "write",
             json!({
@@ -1885,7 +1970,7 @@ mod tests {
             ..Default::default()
         });
         let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Allow);
+        assert_eq!(output.decision, HookDecision::Block);
     }
 
     #[test]
@@ -2098,10 +2183,17 @@ mod tests {
     }
 
     #[test]
-    fn pre_mcp_allows_when_no_rules() {
-        let input = mcp_input("read_file", json!({"path": "/home/user/.ssh/id_rsa"}));
+    fn pre_mcp_allows_when_no_rules_and_safe_path() {
+        let input = mcp_input("read_file", json!({"path": "/home/user/project/main.rs"}));
         let output = pre_mcp_tool_use(&input, None);
         assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_mcp_blocks_ssh_via_builtin_even_without_rules() {
+        let input = mcp_input("read_file", json!({"path": "/home/user/.ssh/id_rsa"}));
+        let output = pre_mcp_tool_use(&input, None);
+        assert_eq!(output.decision, HookDecision::Block);
     }
 
     #[test]
@@ -2136,10 +2228,25 @@ mod tests {
     }
 
     #[test]
-    fn pre_mcp_allows_different_tool() {
+    fn pre_mcp_allows_different_tool_with_safe_path() {
         let rules = vec![sanctum_types::config::McpPolicyRuleConfig {
             tool: "read_file".to_owned(),
             restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+        }];
+        let input = mcp_input_with_rules(
+            "write_file",
+            json!({"path": "/home/user/project/main.rs"}),
+            rules,
+        );
+        let output = pre_mcp_tool_use(&input, None);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_mcp_blocks_ssh_path_regardless_of_tool_rules() {
+        let rules = vec![sanctum_types::config::McpPolicyRuleConfig {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/tmp/**".to_owned()],
         }];
         let input = mcp_input_with_rules(
             "write_file",
@@ -2147,7 +2254,7 @@ mod tests {
             rules,
         );
         let output = pre_mcp_tool_use(&input, None);
-        assert_eq!(output.decision, HookDecision::Allow);
+        assert_eq!(output.decision, HookDecision::Block);
     }
 
     #[test]
@@ -2921,5 +3028,102 @@ mod tests {
         );
         let output = pre_read(&input);
         assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- extract_budget_usage_structured tests ----
+
+    #[test]
+    fn structured_extracts_openai_response() {
+        let output_text = r#"{"id":"chatcmpl-abc","model":"gpt-4o","usage":{"prompt_tokens":100,"completion_tokens":50}}"#;
+        let result = extract_budget_usage_structured(output_text);
+        assert!(result.is_some());
+        let usage = result.unwrap();
+        assert_eq!(usage.provider, "openai");
+        assert_eq!(usage.model, "gpt-4o");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn structured_extracts_anthropic_response() {
+        let output_text = r#"{"type":"message","model":"claude-sonnet-4-6","usage":{"input_tokens":200,"output_tokens":100}}"#;
+        let result = extract_budget_usage_structured(output_text);
+        assert!(result.is_some());
+        let usage = result.unwrap();
+        assert_eq!(usage.provider, "anthropic");
+        assert_eq!(usage.model, "claude-sonnet-4-6");
+        assert_eq!(usage.input_tokens, 200);
+        assert_eq!(usage.output_tokens, 100);
+    }
+
+    #[test]
+    fn structured_extracts_google_response() {
+        let output_text = r#"{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":300,"candidatesTokenCount":150}}"#;
+        let result = extract_budget_usage_structured(output_text);
+        assert!(result.is_some());
+        let usage = result.unwrap();
+        assert_eq!(usage.provider, "google");
+        assert_eq!(usage.model, "gemini-2.5-pro");
+        assert_eq!(usage.input_tokens, 300);
+        assert_eq!(usage.output_tokens, 150);
+    }
+
+    #[test]
+    fn structured_returns_none_for_non_api_output() {
+        let output_text = "total 0\ndrwxr-xr-x  2 user user 40 Jan  1 00:00 .";
+        assert!(extract_budget_usage_structured(output_text).is_none());
+    }
+
+    #[test]
+    fn structured_returns_none_for_empty_string() {
+        assert!(extract_budget_usage_structured("").is_none());
+    }
+
+    #[test]
+    fn structured_returns_none_for_json_without_usage() {
+        let output_text = r#"{"status":"ok","data":[1,2,3]}"#;
+        assert!(extract_budget_usage_structured(output_text).is_none());
+    }
+
+    #[test]
+    fn structured_unknown_model_produces_unknown_provider() {
+        let output_text =
+            r#"{"model":"custom-model-v1","usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let result = extract_budget_usage_structured(output_text);
+        assert!(result.is_some());
+        let usage = result.unwrap();
+        assert_eq!(usage.provider, "unknown");
+        assert_eq!(usage.model, "custom-model-v1");
+    }
+
+    // ---- infer_provider tests ----
+
+    #[test]
+    fn infer_provider_claude_models() {
+        assert_eq!(infer_provider("claude-sonnet-4-6"), "anthropic");
+        assert_eq!(infer_provider("claude-3-opus-20240229"), "anthropic");
+        assert_eq!(infer_provider("claude-3-haiku-20240307"), "anthropic");
+    }
+
+    #[test]
+    fn infer_provider_openai_models() {
+        assert_eq!(infer_provider("gpt-4o"), "openai");
+        assert_eq!(infer_provider("gpt-4-turbo"), "openai");
+        assert_eq!(infer_provider("o1-preview"), "openai");
+        assert_eq!(infer_provider("o3-mini"), "openai");
+        assert_eq!(infer_provider("chatgpt-4o-latest"), "openai");
+    }
+
+    #[test]
+    fn infer_provider_google_models() {
+        assert_eq!(infer_provider("gemini-2.5-pro"), "google");
+        assert_eq!(infer_provider("gemini-1.5-flash"), "google");
+    }
+
+    #[test]
+    fn infer_provider_unknown_models() {
+        assert_eq!(infer_provider("unknown"), "unknown");
+        assert_eq!(infer_provider("custom-model"), "unknown");
+        assert_eq!(infer_provider("llama-3-70b"), "unknown");
     }
 }

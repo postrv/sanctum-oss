@@ -1,105 +1,19 @@
 //! Audit log persistence for threat events.
 //!
-//! Appends `ThreatEvent` entries as NDJSON (one JSON object per line) to the
-//! audit log file, which can be queried via `sanctum audit`.
+//! Delegates to `sanctum_types::audit` for the shared implementation.
+//! This module re-exports the shared `append_audit_event` function so that
+//! existing daemon code does not need to change its import paths.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::Path;
 
 use sanctum_types::threat::ThreatEvent;
 
-/// Maximum audit log file size before rotation (50 MB).
-const MAX_AUDIT_LOG_BYTES: u64 = 50 * 1024 * 1024;
-
 /// Append a threat event to the NDJSON audit log.
 ///
-/// Creates the parent directory and file if they don't exist.
-/// Sets file permissions to 0o600 on Unix.
-/// Rotates the log file if it exceeds `MAX_AUDIT_LOG_BYTES`.
-/// Errors are logged via tracing but never propagated — audit logging
-/// must not crash the daemon.
+/// Delegates to the shared implementation in `sanctum_types::audit`.
+/// See that module for full documentation of safety invariants.
 pub fn append_audit_event(event: &ThreatEvent, audit_path: &Path) {
-    if let Err(e) = maybe_rotate(audit_path) {
-        tracing::warn!("failed to rotate audit log: {e}");
-    }
-    if let Err(e) = append_audit_event_inner(event, audit_path) {
-        tracing::warn!("failed to write audit log entry: {e}");
-    }
-}
-
-/// Rotate the audit log if it exceeds the size threshold.
-///
-/// Renames the current log to `audit.log.1` (removing any existing `.1` file),
-/// so that subsequent writes go to a fresh `audit.log`.
-fn maybe_rotate(audit_path: &Path) -> Result<(), std::io::Error> {
-    let metadata = match fs::metadata(audit_path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
-
-    if metadata.len() < MAX_AUDIT_LOG_BYTES {
-        return Ok(());
-    }
-
-    let mut rotated = audit_path.as_os_str().to_os_string();
-    rotated.push(".1");
-    let rotated_path = std::path::PathBuf::from(rotated);
-
-    // Rename current log to .1 — on POSIX, rename() atomically replaces the target
-    fs::rename(audit_path, &rotated_path)?;
-
-    tracing::info!("rotated audit log (exceeded {} bytes)", MAX_AUDIT_LOG_BYTES);
-
-    Ok(())
-}
-
-fn append_audit_event_inner(event: &ThreatEvent, audit_path: &Path) -> Result<(), std::io::Error> {
-    // Ensure parent directory exists with secure permissions
-    if let Some(parent) = audit_path.parent() {
-        // Create parent directories (grandparents etc.) first
-        if let Some(grandparent) = parent.parent() {
-            fs::create_dir_all(grandparent)?;
-        }
-        // Create the final directory with restricted permissions atomically
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            let mut builder = fs::DirBuilder::new();
-            builder.mode(0o700);
-            match builder.create(parent) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            fs::create_dir_all(parent)?;
-        }
-    }
-
-    // Open in append mode, create if needed
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(audit_path)?;
-
-    // Set restrictive permissions on first creation
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(audit_path, perms)?;
-    }
-
-    // Serialize as single JSON line
-    let json = serde_json::to_string(event).map_err(std::io::Error::other)?;
-
-    writeln!(file, "{json}")?;
-    file.sync_all()?;
-    Ok(())
+    sanctum_types::audit::append_audit_event(event, audit_path);
 }
 
 #[cfg(test)]
@@ -108,7 +22,12 @@ mod tests {
     use super::*;
     use sanctum_types::threat::{Action, ThreatCategory, ThreatLevel};
     use std::io::BufRead;
+    use std::io::Write;
     use std::path::PathBuf;
+
+    /// Maximum audit log file size before rotation (50 MB).
+    /// Mirrors the constant in `sanctum_types::audit` for test assertions.
+    const MAX_AUDIT_LOG_BYTES: u64 = 50 * 1024 * 1024;
 
     fn make_test_event() -> ThreatEvent {
         ThreatEvent {
@@ -124,7 +43,7 @@ mod tests {
     }
 
     #[test]
-    fn appends_valid_ndjson() {
+    fn delegates_to_shared_module() {
         let dir = tempfile::tempdir().expect("tempdir for test");
         let log_path = dir.path().join("audit.log");
 
@@ -194,7 +113,6 @@ mod tests {
         // Create a file that exceeds the rotation threshold
         {
             let mut file = std::fs::File::create(&log_path).expect("create audit log");
-            // Write enough bytes to exceed MAX_AUDIT_LOG_BYTES
             let chunk = vec![b'x'; 1024];
             let iterations = (MAX_AUDIT_LOG_BYTES / 1024) + 1;
             for _ in 0..iterations {

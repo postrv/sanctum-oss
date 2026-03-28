@@ -45,7 +45,7 @@
 - **Model allowlists**: Per-provider `allowed_models` lists restrict which models can be used (case-insensitive matching).
 - **Session management**: Budgets can be extended, reset, queried, and configured via IPC commands (`BudgetStatus`, `BudgetSet`, `BudgetExtend`, `BudgetReset`).
 - **Persistence**: Tracker state is serialized to disk as JSON with 0o600 permissions, allowing recovery across daemon restarts.
-- **Budget recording via hooks**: Budget tracking is wired into Claude Code hooks -- API usage detected in `post-bash` responses is automatically recorded via the `RecordUsage` IPC command.
+- **Budget recording**: Usage can be reported manually via `sanctum budget record --provider <name> --model <model> --input-tokens <n> --output-tokens <n>`. The `post-bash` hook detects API usage in command output and logs a warning. Automatic IPC-based recording from hooks is planned for a future release.
 
 **Residual risk**: Cost tracking relies on token-based pricing tables, which must be kept in sync with provider pricing. The `sanctum-proxy` crate provides the foundation for transparent API interception; until the full MITM proxy is active, enforcement requires the AI tool to participate via hook-based IPC integration.
 

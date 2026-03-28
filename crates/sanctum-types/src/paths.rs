@@ -150,14 +150,12 @@ fn platform_dirs(home: &std::path::Path) -> (PathBuf, PathBuf) {
     {
         let data = std::env::var_os("XDG_DATA_HOME")
             .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/share"))
+            .map_or_else(|| home.join(".local/share"), PathBuf::from)
             .join("sanctum");
 
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config"))
+            .map_or_else(|| home.join(".config"), PathBuf::from)
             .join("sanctum");
 
         (data, config)

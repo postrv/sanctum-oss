@@ -293,7 +293,9 @@ fn linux_find_accessor(path: &Path) -> (Option<u32>, Option<String>) {
 /// runs, or `lsof` may not be installed.
 /// Maximum concurrent `lsof` invocations. Each spawns a thread that lives
 /// up to 5 seconds, so this caps worst-case thread accumulation at 4.
+#[cfg(target_os = "macos")]
 static LSOF_IN_FLIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(target_os = "macos")]
 const MAX_CONCURRENT_LSOF: u32 = 4;
 
 #[cfg(target_os = "macos")]

@@ -72,6 +72,7 @@ async fn collect_macos() -> HashSet<ConnectionInfo> {
 ///
 /// Records are delimited by `p` lines (new process) and `f` lines (new file descriptor).
 /// We only care about TCP connections that have both local and remote addresses.
+#[cfg(any(target_os = "macos", test))]
 #[must_use]
 fn parse_lsof_output(output: &str) -> HashSet<ConnectionInfo> {
     let mut connections = HashSet::new();
@@ -130,6 +131,7 @@ fn parse_lsof_output(output: &str) -> HashSet<ConnectionInfo> {
 /// - `local_ip:port->remote_ip:port` (established connection)
 /// - `*:port` (listening, no remote -- skipped)
 /// - `local_ip:port` (listening or partial -- skipped)
+#[cfg(any(target_os = "macos", test))]
 fn parse_connection_name(
     name: &str,
     pid: Option<u32>,
@@ -153,6 +155,7 @@ fn parse_connection_name(
 ///
 /// IPv4: `127.0.0.1:8080`
 /// IPv6: `[::1]:8080` or `::1:8080` (lsof sometimes omits brackets)
+#[cfg(any(target_os = "macos", test))]
 fn parse_socket_addr(s: &str) -> Option<SocketAddr> {
     // Try direct parse first (handles standard formats)
     if let Ok(addr) = s.parse::<SocketAddr>() {

@@ -27,16 +27,18 @@ impl DaemonManager {
     ///
     /// Returns an error on I/O failures.
     pub fn check_existing(&self) -> Result<Option<u32>, DaemonError> {
-        if !self.pid_file.exists() {
-            return Ok(None);
-        }
-
-        let pid_str = fs::read_to_string(&self.pid_file).map_err(|e| {
-            DaemonError::PidFile {
-                path: self.pid_file.clone(),
-                source: e,
+        let pid_str = match fs::read_to_string(&self.pid_file) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
             }
-        })?;
+            Err(e) => {
+                return Err(DaemonError::PidFile {
+                    path: self.pid_file.clone(),
+                    source: e,
+                });
+            }
+        };
 
         let pid: u32 = if let Ok(p) = pid_str.trim().parse() { p } else {
             // Corrupt PID file — remove it
@@ -71,16 +73,38 @@ impl DaemonManager {
     pub fn write_pid_file(&self) -> Result<(), DaemonError> {
         let pid = std::process::id();
 
-        // Ensure parent directory exists
+        // Ensure parent directory exists with secure permissions
         if let Some(parent) = self.pid_file.parent() {
-            fs::create_dir_all(parent).map_err(|e| DaemonError::PidFile {
-                path: self.pid_file.clone(),
-                source: e,
-            })?;
+            // Create parent directories (grandparents etc.) first
+            if let Some(grandparent) = parent.parent() {
+                fs::create_dir_all(grandparent).map_err(|e| DaemonError::PidFile {
+                    path: self.pid_file.clone(),
+                    source: e,
+                })?;
+            }
+            // Create the final directory with restricted permissions atomically
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+                use std::os::unix::fs::DirBuilderExt;
+                let mut builder = fs::DirBuilder::new();
+                builder.mode(0o700);
+                match builder.create(parent) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => {
+                        return Err(DaemonError::PidFile {
+                            path: self.pid_file.clone(),
+                            source: e,
+                        });
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                fs::create_dir_all(parent).map_err(|e| DaemonError::PidFile {
+                    path: self.pid_file.clone(),
+                    source: e,
+                })?;
             }
         }
 
@@ -162,9 +186,20 @@ impl DaemonManager {
 
     /// Remove the PID file (called on shutdown).
     pub fn remove_pid_file(&self) {
-        if self.pid_file.exists() {
-            let _ = fs::remove_file(&self.pid_file);
-            tracing::info!("PID file removed");
+        match fs::remove_file(&self.pid_file) {
+            Ok(()) => {
+                tracing::info!("PID file removed");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Already gone — nothing to do
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.pid_file.display(),
+                    %e,
+                    "failed to remove PID file"
+                );
+            }
         }
     }
 }
@@ -194,5 +229,56 @@ fn is_process_running(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_existing_returns_none_for_nonexistent_pid_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("nonexistent.pid");
+        let manager = DaemonManager::new(pid_file);
+
+        let result = manager.check_existing().expect("should not error");
+        assert!(result.is_none(), "should return None when PID file does not exist");
+
+        // Prevent Drop from trying to remove the non-existent file (no-op anyway)
+        std::mem::forget(manager);
+    }
+
+    #[test]
+    fn check_existing_returns_none_for_stale_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("stale.pid");
+        // Write a PID that definitely isn't running (PID 999999999)
+        fs::write(&pid_file, "999999999").expect("write pid");
+
+        let manager = DaemonManager::new(pid_file);
+        let result = manager.check_existing().expect("should not error");
+        assert!(result.is_none(), "should return None for stale PID");
+
+        std::mem::forget(manager);
+    }
+
+    #[test]
+    fn remove_pid_file_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("test.pid");
+        fs::write(&pid_file, "12345").expect("write pid");
+
+        let manager = DaemonManager::new(pid_file.clone());
+
+        // First remove should succeed
+        manager.remove_pid_file();
+        assert!(!pid_file.exists());
+
+        // Second remove should not panic (NotFound is ignored)
+        manager.remove_pid_file();
+
+        std::mem::forget(manager);
     }
 }

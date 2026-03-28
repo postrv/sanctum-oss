@@ -6,6 +6,7 @@
 
 use std::fs;
 
+use sanctum_sentinel::pth::analyser::content_hash;
 use sanctum_sentinel::pth::quarantine::{Quarantine, QuarantineMetadata};
 
 #[test]
@@ -147,11 +148,12 @@ fn e2e_concurrent_quarantine_operations() {
     let mut entry_ids = Vec::new();
     for i in 0..5 {
         let pth_path = dir.path().join(format!("file_{i}.pth"));
-        fs::write(&pth_path, format!("exec('payload_{i}')")).expect("write");
+        let file_content = format!("exec('payload_{i}')");
+        fs::write(&pth_path, &file_content).expect("write");
 
         let metadata = QuarantineMetadata {
             original_path: pth_path.clone(),
-            content_hash: format!("sha256:hash_{i}"),
+            content_hash: content_hash(file_content.as_bytes()),
             creator_pid: None,
             reason: format!("reason {i}"),
             quarantined_at: chrono::Utc::now(),

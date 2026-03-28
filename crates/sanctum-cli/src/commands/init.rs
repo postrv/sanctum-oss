@@ -1,6 +1,7 @@
 //! `sanctum init` — Initialise Sanctum in a directory.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use sanctum_types::errors::CliError;
@@ -115,7 +116,14 @@ mcp_audit = true
 alert_at_percent = 75
 "#;
 
-    fs::write(config_path, default_config)?;
+    // Atomic write: write to temp file, sync, then rename into place
+    let tmp_path = config_path.with_extension("tmp");
+    {
+        let mut file = fs::File::create(&tmp_path)?;
+        file.write_all(default_config.as_bytes())?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp_path, config_path)?;
     Ok(true)
 }
 

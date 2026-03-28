@@ -27,7 +27,7 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
 deny = [
     { name = "openssl-sys", wrappers = [] },
     { name = "libz-sys", wrappers = [] },

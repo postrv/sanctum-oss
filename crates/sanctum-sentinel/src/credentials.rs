@@ -25,9 +25,22 @@ const ALLOWED_ACCESSORS: &[&str] = &[
 ];
 
 /// Check if a process name is an expected credential file accessor.
+///
+/// Only checks the hardcoded default list. For user-configured allowlists,
+/// use [`is_allowed_accessor_with_custom`].
 #[must_use]
 pub(crate) fn is_allowed_accessor(process_name: &str) -> bool {
     ALLOWED_ACCESSORS.contains(&process_name)
+}
+
+/// Check if a process name is an expected credential file accessor,
+/// merging a user-supplied allowlist with the hardcoded defaults.
+#[must_use]
+pub fn is_allowed_accessor_with_custom(process_name: &str, custom_allowlist: &[String]) -> bool {
+    if is_allowed_accessor(process_name) {
+        return true;
+    }
+    custom_allowlist.iter().any(|entry| entry == process_name)
 }
 
 /// An event emitted by the credential file watcher.
@@ -71,12 +84,17 @@ impl CredentialWatcher {
     /// Individual files (like `~/.aws/credentials`) have their parent
     /// directory watched, with events filtered to the specific file.
     ///
+    /// The `custom_allowlist` parameter lets the caller supply additional
+    /// process names that should be considered allowed accessors, on top
+    /// of the hardcoded [`ALLOWED_ACCESSORS`] list.
+    ///
     /// # Errors
     ///
     /// Returns an error if the watcher cannot be initialised.
     pub fn start(
         watch_paths: &[PathBuf],
         tx: mpsc::Sender<CredentialEvent>,
+        custom_allowlist: Vec<String>,
     ) -> Result<Self, sanctum_types::errors::SentinelError> {
         let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let alive_clone = alive.clone();
@@ -86,6 +104,8 @@ impl CredentialWatcher {
         // For files, we watch the parent directory and filter by filename.
         let credential_paths: std::sync::Arc<Vec<PathBuf>> =
             std::sync::Arc::new(watch_paths.to_owned());
+
+        let custom_al = std::sync::Arc::new(custom_allowlist);
 
         let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
             let event = match res {
@@ -114,7 +134,7 @@ impl CredentialWatcher {
                 let (accessor_pid, accessor_name) = try_find_accessor_info(path);
                 let allowed = accessor_name
                     .as_deref()
-                    .is_some_and(is_allowed_accessor);
+                    .is_some_and(|name| is_allowed_accessor_with_custom(name, &custom_al));
 
                 let credential_event = CredentialEvent::AccessDetected {
                     path: path.clone(),
@@ -308,7 +328,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<CredentialEvent>(16);
 
-        let _watcher = CredentialWatcher::start(&[cred_file.clone()], tx)
+        let _watcher = CredentialWatcher::start(&[cred_file.clone()], tx, Vec::new())
             .expect("watcher should start");
 
         // Give the watcher a moment to register
@@ -348,7 +368,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<CredentialEvent>(16);
 
         // Only watch the specific credential file
-        let _watcher = CredentialWatcher::start(&[cred_file.clone()], tx)
+        let _watcher = CredentialWatcher::start(&[cred_file.clone()], tx, Vec::new())
             .expect("watcher should start");
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -376,6 +396,7 @@ mod tests {
         let result = CredentialWatcher::start(
             &[PathBuf::from("/nonexistent/path/that/does/not/exist")],
             tx,
+            Vec::new(),
         );
         // Should succeed (just skip nonexistent paths)
         assert!(result.is_ok());
@@ -389,7 +410,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<CredentialEvent>(16);
 
-        let _watcher = CredentialWatcher::start(&[cred_file.clone()], tx)
+        let _watcher = CredentialWatcher::start(&[cred_file.clone()], tx, Vec::new())
             .expect("watcher should start");
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -420,5 +441,28 @@ mod tests {
                 tracing::warn!("credential event not received within timeout -- platform-dependent");
             }
         }
+    }
+
+    // ============================================================
+    // CUSTOM CREDENTIAL ALLOWLIST (W2)
+    // ============================================================
+
+    #[test]
+    fn custom_allowlist_recognises_additional_accessors() {
+        // "python3" is not in the hardcoded defaults
+        assert!(!is_allowed_accessor("python3"));
+        assert!(!is_allowed_accessor_with_custom("python3", &[]));
+
+        // But with a custom allowlist it should be recognised
+        let custom = vec!["python3".to_string(), "node".to_string()];
+        assert!(is_allowed_accessor_with_custom("python3", &custom));
+        assert!(is_allowed_accessor_with_custom("node", &custom));
+
+        // Hardcoded defaults still work
+        assert!(is_allowed_accessor_with_custom("ssh", &custom));
+        assert!(is_allowed_accessor_with_custom("git", &custom));
+
+        // Unknown process is still rejected
+        assert!(!is_allowed_accessor_with_custom("malware", &custom));
     }
 }

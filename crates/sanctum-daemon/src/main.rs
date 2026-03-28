@@ -150,7 +150,7 @@ async fn run_daemon(
     let audit_path = paths.data_dir.join("audit.log");
 
     let (watcher, mut watch_rx) = start_pth_watcher(&shared_config).await;
-    let quarantine = Quarantine::new(paths.quarantine_dir.clone());
+    let shared_quarantine = Arc::new(Mutex::new(Quarantine::new(paths.quarantine_dir.clone())));
     let (_cred_watcher, mut cred_rx) = start_credential_watcher(&shared_config).await;
 
     // Start network watcher if configured
@@ -212,7 +212,7 @@ async fn run_daemon(
         shutdown_rx: &mut shutdown_rx,
         watcher: watcher.as_ref(),
         watch_rx: &mut watch_rx,
-        quarantine: &quarantine,
+        shared_quarantine: &shared_quarantine,
         cred_rx: &mut cred_rx,
         net_rx: &mut net_rx,
         sigterm: &mut sigterm,
@@ -274,12 +274,13 @@ async fn start_credential_watcher(
 
     let cred_watcher = if shared_config.read().await.sentinel.watch_credentials {
         let cred_paths = sanctum_types::paths::credential_paths();
+        let custom_cred_allowlist = shared_config.read().await.sentinel.credential_allowlist.clone();
         if cred_paths.is_empty() {
             tracing::warn!("no credential paths found to watch");
             None
         } else {
             tracing::info!(count = cred_paths.len(), "watching credential paths");
-            match CredentialWatcher::start(&cred_paths, cred_tx) {
+            match CredentialWatcher::start(&cred_paths, cred_tx, custom_cred_allowlist) {
                 Ok(w) => {
                     tracing::info!("credential watcher started");
                     Some(w)
@@ -315,10 +316,11 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                         let uptime = ctx.start_time.elapsed().as_secs();
                         let watchers_active = ctx.watcher.map_or(0, |w| u32::from(w.is_alive()));
                         #[allow(clippy::cast_possible_truncation)] // quarantine entries are bounded well below u32::MAX
-                        let quarantine_count = ctx.quarantine.list().map_or(0, |l| l.len() as u32);
+                        let quarantine_count = ctx.shared_quarantine.lock().await.list().map_or(0, |l| l.len() as u32);
                         let shutdown_tx = ctx.shutdown_tx.clone();
                         let ipc_config = Arc::clone(ctx.shared_config);
                         let ipc_budget = Arc::clone(ctx.shared_budget);
+                        let ipc_quarantine = Arc::clone(ctx.shared_quarantine);
 
                         tokio::spawn(async move {
                             let _permit = permit;
@@ -332,6 +334,7 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                                     shutdown_tx,
                                     ipc_config,
                                     ipc_budget,
+                                    ipc_quarantine,
                                 ),
                             ).await {
                                 Ok(Ok(())) => {}
@@ -353,7 +356,9 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
             // Handle filesystem events
             Some(event) = ctx.watch_rx.recv() => {
                 let config_snapshot = ctx.shared_config.read().await.clone();
-                event_handler::handle_watch_event(&event, ctx.quarantine, &config_snapshot, ctx.audit_path);
+                let quarantine_guard = ctx.shared_quarantine.lock().await;
+                event_handler::handle_watch_event(&event, &quarantine_guard, &config_snapshot, ctx.audit_path);
+                drop(quarantine_guard);
             }
 
             // Handle credential file events
@@ -411,6 +416,7 @@ async fn save_budget_state(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // handler needs all shared state references
 async fn handle_ipc_command(
     conn: &mut ipc::IpcConnection,
     uptime: u64,
@@ -419,11 +425,11 @@ async fn handle_ipc_command(
     shutdown_tx: tokio::sync::mpsc::Sender<()>,
     shared_config: Arc<RwLock<SanctumConfig>>,
     shared_budget: Arc<Mutex<BudgetTracker>>,
+    shared_quarantine: Arc<Mutex<Quarantine>>,
 ) -> Result<(), sanctum_types::errors::DaemonError> {
     let command = conn.read_command().await?;
 
     let paths = WellKnownPaths::default();
-    let quarantine = Quarantine::new(paths.quarantine_dir.clone());
 
     let mut should_shutdown = false;
     let mut should_reload = false;
@@ -435,9 +441,18 @@ async fn handle_ipc_command(
             watchers_active,
             quarantine_count,
         },
-        IpcCommand::ListQuarantine => handle_quarantine_list(&quarantine),
-        IpcCommand::RestoreQuarantine { id } => handle_quarantine_restore(&quarantine, &id),
-        IpcCommand::DeleteQuarantine { id } => handle_quarantine_delete(&quarantine, &id),
+        IpcCommand::ListQuarantine => {
+            let quarantine = shared_quarantine.lock().await;
+            handle_quarantine_list(&quarantine)
+        }
+        IpcCommand::RestoreQuarantine { id } => {
+            let quarantine = shared_quarantine.lock().await;
+            handle_quarantine_restore(&quarantine, &id)
+        }
+        IpcCommand::DeleteQuarantine { id } => {
+            let quarantine = shared_quarantine.lock().await;
+            handle_quarantine_delete(&quarantine, &id)
+        }
         IpcCommand::ReloadConfig => {
             should_reload = true;
             IpcResponse::Ok {
@@ -473,12 +488,24 @@ async fn handle_ipc_command(
                 .await
         }
         IpcCommand::ListThreats { category, level } => {
-            handle_list_threats(&paths, category.as_deref(), level.as_deref())
+            let paths_clone = paths.clone();
+            let cat = category.clone();
+            let lvl = level.clone();
+            match tokio::task::spawn_blocking(move || {
+                handle_list_threats(&paths_clone, cat.as_deref(), lvl.as_deref())
+            }).await {
+                Ok(resp) => resp,
+                Err(e) => IpcResponse::Error {
+                    message: format!("task failed: {e}"),
+                },
+            }
         }
         IpcCommand::GetThreatDetails { id } => {
+            let quarantine = shared_quarantine.lock().await;
             handle_get_threat_details(&paths, &quarantine, &id)
         }
         IpcCommand::ResolveThreat { id, action, note } => {
+            let quarantine = shared_quarantine.lock().await;
             handle_resolve_threat(&paths, &quarantine, &id, &action, &note)
         }
     };

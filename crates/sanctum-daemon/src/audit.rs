@@ -47,12 +47,7 @@ fn maybe_rotate(audit_path: &Path) -> Result<(), std::io::Error> {
     rotated.push(".1");
     let rotated_path = std::path::PathBuf::from(rotated);
 
-    // Remove old rotated file if it exists
-    if rotated_path.exists() {
-        fs::remove_file(&rotated_path)?;
-    }
-
-    // Rename current log to .1
+    // Rename current log to .1 — on POSIX, rename() atomically replaces the target
     fs::rename(audit_path, &rotated_path)?;
 
     tracing::info!("rotated audit log (exceeded {} bytes)", MAX_AUDIT_LOG_BYTES);
@@ -64,13 +59,27 @@ fn append_audit_event_inner(
     event: &ThreatEvent,
     audit_path: &Path,
 ) -> Result<(), std::io::Error> {
-    // Ensure parent directory exists
+    // Ensure parent directory exists with secure permissions
     if let Some(parent) = audit_path.parent() {
-        fs::create_dir_all(parent)?;
+        // Create parent directories (grandparents etc.) first
+        if let Some(grandparent) = parent.parent() {
+            fs::create_dir_all(grandparent)?;
+        }
+        // Create the final directory with restricted permissions atomically
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(parent) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            fs::create_dir_all(parent)?;
         }
     }
 

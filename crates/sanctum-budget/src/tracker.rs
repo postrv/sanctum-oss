@@ -70,16 +70,34 @@ struct PersistedState {
 
 impl BudgetTracker {
     /// Create a new budget tracker from configuration.
+    ///
+    /// Loads the default session/daily limits and then applies any
+    /// per-provider overrides from `config.providers`.
     #[must_use]
     pub fn new(config: &BudgetConfig) -> Self {
         let now = Utc::now();
+        let mut session_limits = HashMap::new();
+        let mut daily_limits = HashMap::new();
+
+        // Apply per-provider overrides from config
+        for (key, prov_cfg) in &config.providers {
+            if let Some(provider) = parse_provider(key) {
+                if let Some(ref amount) = prov_cfg.session {
+                    session_limits.insert(provider, Some(amount.cents));
+                }
+                if let Some(ref amount) = prov_cfg.daily {
+                    daily_limits.insert(provider, Some(amount.cents));
+                }
+            }
+        }
+
         Self {
             session_start: now,
             daily_start: now,
             session_spend: HashMap::new(),
             daily_spend: HashMap::new(),
-            session_limits: HashMap::new(),
-            daily_limits: HashMap::new(),
+            session_limits,
+            daily_limits,
             default_session_limit: config.default_session.as_ref().map(|b| b.cents),
             default_daily_limit: config.default_daily.as_ref().map(|b| b.cents),
             alert_at_percent: config.alert_at_percent,
@@ -233,13 +251,27 @@ impl BudgetTracker {
         let data = std::fs::read_to_string(path)?;
         let state: PersistedState = serde_json::from_str(&data)?;
 
+        let mut session_limits = HashMap::new();
+        let mut daily_limits = HashMap::new();
+
+        for (key, prov_cfg) in &config.providers {
+            if let Some(provider) = parse_provider(key) {
+                if let Some(ref amount) = prov_cfg.session {
+                    session_limits.insert(provider, Some(amount.cents));
+                }
+                if let Some(ref amount) = prov_cfg.daily {
+                    daily_limits.insert(provider, Some(amount.cents));
+                }
+            }
+        }
+
         Ok(Self {
             session_start: state.session_start,
             daily_start: state.daily_start,
             session_spend: state.session_spend,
             daily_spend: state.daily_spend,
-            session_limits: HashMap::new(),
-            daily_limits: HashMap::new(),
+            session_limits,
+            daily_limits,
             default_session_limit: config.default_session.as_ref().map(|b| b.cents),
             default_daily_limit: config.default_daily.as_ref().map(|b| b.cents),
             alert_at_percent: config.alert_at_percent,
@@ -257,6 +289,16 @@ impl BudgetTracker {
         } else {
             false
         }
+    }
+}
+
+/// Parse a provider name string (case-insensitive) into a `Provider`.
+fn parse_provider(key: &str) -> Option<Provider> {
+    match key.to_lowercase().as_str() {
+        "openai" => Some(Provider::OpenAI),
+        "anthropic" => Some(Provider::Anthropic),
+        "google" => Some(Provider::Google),
+        _ => None,
     }
 }
 
@@ -696,5 +738,93 @@ mod tests {
 
         let result = BudgetTracker::load_from_file(&path, &test_config());
         assert!(result.is_err(), "corrupted JSON should produce an error");
+    }
+
+    // ============================================================
+    // PER-PROVIDER BUDGET OVERRIDES (W3)
+    // ============================================================
+
+    #[test]
+    fn per_provider_limits_loaded_from_config() {
+        use sanctum_types::config::ProviderBudgetConfig;
+
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderBudgetConfig {
+                session: Some(BudgetAmount { cents: 1000 }),
+                daily: Some(BudgetAmount { cents: 5000 }),
+                allowed_models: None,
+            },
+        );
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderBudgetConfig {
+                session: Some(BudgetAmount { cents: 2000 }),
+                daily: None,
+                allowed_models: None,
+            },
+        );
+
+        let config = BudgetConfig {
+            default_session: Some(BudgetAmount { cents: 9999 }),
+            default_daily: Some(BudgetAmount { cents: 50000 }),
+            alert_at_percent: 75,
+            providers,
+        };
+
+        let tracker = BudgetTracker::new(&config);
+
+        // OpenAI should use its per-provider limits, not the defaults
+        let openai_status = tracker.status(Provider::OpenAI);
+        assert_eq!(openai_status.session_limit_cents, Some(1000));
+        assert_eq!(openai_status.daily_limit_cents, Some(5000));
+
+        // Anthropic should use per-provider session limit, default daily
+        let anthropic_status = tracker.status(Provider::Anthropic);
+        assert_eq!(anthropic_status.session_limit_cents, Some(2000));
+        assert_eq!(anthropic_status.daily_limit_cents, Some(50000));
+
+        // Google has no per-provider override, should use defaults
+        let google_status = tracker.status(Provider::Google);
+        assert_eq!(google_status.session_limit_cents, Some(9999));
+        assert_eq!(google_status.daily_limit_cents, Some(50000));
+    }
+
+    #[test]
+    fn per_provider_limits_survive_load_from_file() {
+        use sanctum_types::config::ProviderBudgetConfig;
+
+        let Ok(dir) = tempfile::tempdir() else { return };
+        let path = dir.path().join("budget.json");
+
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderBudgetConfig {
+                session: Some(BudgetAmount { cents: 3000 }),
+                daily: Some(BudgetAmount { cents: 10000 }),
+                allowed_models: None,
+            },
+        );
+
+        let config = BudgetConfig {
+            default_session: Some(BudgetAmount { cents: 5000 }),
+            default_daily: Some(BudgetAmount { cents: 20000 }),
+            alert_at_percent: 75,
+            providers,
+        };
+
+        let tracker = BudgetTracker::new(&config);
+        let save_result = tracker.save_to_file(&path);
+        assert!(save_result.is_ok());
+
+        let loaded = BudgetTracker::load_from_file(&path, &config);
+        assert!(loaded.is_ok());
+
+        let Ok(loaded) = loaded else { return };
+        let openai_status = loaded.status(Provider::OpenAI);
+        assert_eq!(openai_status.session_limit_cents, Some(3000));
+        assert_eq!(openai_status.daily_limit_cents, Some(10000));
     }
 }

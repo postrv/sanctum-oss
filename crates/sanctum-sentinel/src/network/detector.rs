@@ -10,9 +10,15 @@ use super::{AnomalyKind, ConnectionInfo, NetworkEvent};
 /// Check a connection for anomalies.
 ///
 /// Returns `Some(NetworkEvent)` if an anomaly is detected, `None` otherwise.
-/// Checks are ordered by priority: blocklist first, then port heuristics.
+/// Checks are ordered by priority: allowlist first (skip all checks),
+/// then blocklist, then port heuristics.
 #[must_use]
 pub fn check(conn: &ConnectionInfo, config: &NetworkConfig) -> Option<NetworkEvent> {
+    // If the destination is in the allowlist, skip all anomaly checks
+    if is_destination_allowlisted(conn, config) {
+        return None;
+    }
+
     // Check blocklist first (highest priority)
     if let Some(event) = check_blocklist(conn, config) {
         return Some(event);
@@ -24,6 +30,16 @@ pub fn check(conn: &ConnectionInfo, config: &NetworkConfig) -> Option<NetworkEve
     }
 
     None
+}
+
+/// Check if a destination IP is in the configured allowlist.
+///
+/// Allowlisted destinations bypass all anomaly detection, including
+/// unusual-port checks. Blocklist entries are NOT overridden by the
+/// allowlist -- the allowlist check runs first so blocklist never fires.
+fn is_destination_allowlisted(conn: &ConnectionInfo, config: &NetworkConfig) -> bool {
+    let remote_ip = conn.remote_addr.ip().to_string();
+    config.destination_allowlist.contains(&remote_ip)
 }
 
 /// Check if `remote_addr.ip()` matches any entry in `config.destination_blocklist`.
@@ -202,5 +218,42 @@ mod tests {
         let mut config = default_config();
         config.safe_ports.push(9999);
         assert!(check(&conn, &config).is_none());
+    }
+
+    // ============================================================
+    // DESTINATION ALLOWLIST (W5)
+    // ============================================================
+
+    #[test]
+    fn allowlisted_destination_not_flagged_on_unusual_port() {
+        // Without allowlist, an unusual port triggers an alert
+        let conn = make_conn(Some("myapp"), "10.0.0.50:4444");
+        let config = default_config();
+        assert!(check(&conn, &config).is_some());
+
+        // With allowlist, the same destination should be skipped
+        let mut config_with_al = default_config();
+        config_with_al.destination_allowlist = vec!["10.0.0.50".to_owned()];
+        assert!(check(&conn, &config_with_al).is_none());
+    }
+
+    #[test]
+    fn allowlisted_destination_overrides_blocklist() {
+        // If a destination is both allowlisted and blocklisted,
+        // the allowlist wins (checked first)
+        let conn = make_conn(Some("curl"), "10.0.0.99:443");
+        let mut config = default_config();
+        config.destination_blocklist = vec!["10.0.0.99".to_owned()];
+        config.destination_allowlist = vec!["10.0.0.99".to_owned()];
+        assert!(check(&conn, &config).is_none());
+    }
+
+    #[test]
+    fn non_allowlisted_destination_still_flagged() {
+        let conn = make_conn(Some("suspicious"), "10.0.0.1:4444");
+        let mut config = default_config();
+        config.destination_allowlist = vec!["10.0.0.50".to_owned()];
+        // 10.0.0.1 is NOT in the allowlist, should still be flagged
+        assert!(check(&conn, &config).is_some());
     }
 }

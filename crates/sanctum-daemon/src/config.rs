@@ -43,6 +43,11 @@ pub fn find_config_path() -> Option<PathBuf> {
     // Check current directory first
     let local = PathBuf::from(".sanctum/config.toml");
     if local.exists() {
+        tracing::warn!(
+            path = %local.display(),
+            "Loading project-local config from {} \u{2014} verify this file is trusted",
+            local.display()
+        );
         return Some(local);
     }
 

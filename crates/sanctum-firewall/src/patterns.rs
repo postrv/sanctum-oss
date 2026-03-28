@@ -41,34 +41,34 @@ macro_rules! static_regex {
     };
 }
 
-static_regex!(OPENAI_RE, r"\bsk-[a-zA-Z0-9\-_]{20,}\b");
-static_regex!(ANTHROPIC_RE, r"\bsk-ant-[a-zA-Z0-9\-]{20,}\b");
+static_regex!(OPENAI_RE, r"\bsk-[a-zA-Z0-9\-_]{20,}");
+static_regex!(ANTHROPIC_RE, r"\bsk-ant-[a-zA-Z0-9\-_]{20,}");
 static_regex!(GOOGLE_AI_RE, r"\bAIza[a-zA-Z0-9_\-]{35}\b");
-static_regex!(AWS_ACCESS_KEY_RE, r"\bAKIA[A-Z0-9]{16}\b");
+static_regex!(AWS_ACCESS_KEY_RE, r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b");
 static_regex!(
     AWS_SECRET_KEY_RE,
-    r"\b(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)[=: ]+[A-Za-z0-9/+=]{40}\b"
+    r"\b(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)[=: ]+[A-Za-z0-9/+=]{40}"
 );
 static_regex!(GITHUB_PAT_RE, r"\bghp_[a-zA-Z0-9]{36}\b");
 static_regex!(GITHUB_FINE_GRAINED_RE, r"\bgithub_pat_[a-zA-Z0-9_]{82}\b");
 static_regex!(GITLAB_RE, r"\bglpat-[a-zA-Z0-9_\-]{20}\b");
-static_regex!(SLACK_BOT_RE, r"\bxoxb-[0-9]{10,13}-[a-zA-Z0-9\-]+\b");
-static_regex!(STRIPE_SECRET_RE, r"\bsk_live_[a-zA-Z0-9]{24,}\b");
+static_regex!(SLACK_BOT_RE, r"\bxoxb-[0-9]{10,13}-[a-zA-Z0-9\-]+");
+static_regex!(STRIPE_SECRET_RE, r"\b(?:sk_live_|sk_test_|rk_live_|rk_test_)[a-zA-Z0-9]{24,}\b");
 static_regex!(SENDGRID_RE, r"\bSG\.[a-zA-Z0-9_\-]{22}\.[a-zA-Z0-9_\-]{43}\b");
 static_regex!(
     JWT_RE,
-    r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"
+    r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
 );
 static_regex!(
     BEARER_TOKEN_RE,
-    r"\b(?i:authorization)[=: ]+Bearer [A-Za-z0-9_\-]{20,}\b"
+    r"\b(?i:authorization)[=: ]+Bearer [A-Za-z0-9_\-]{20,}"
 );
 static_regex!(PRIVATE_KEY_RE, r"-----BEGIN[A-Z ]*PRIVATE KEY-----");
-static_regex!(CONNECTION_STRING_RE, r"\b(postgresql|postgres|mongodb|redis|mysql)://[^\s@]+@[^\s]+\b");
+static_regex!(CONNECTION_STRING_RE, r"\b(postgresql|postgres|mongodb|redis|mysql|mariadb|mssql|sqlserver|amqp|amqps)://[^\s@]+@[^\s]+\b");
 static_regex!(SLACK_USER_RE, r"\bxoxp-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,34}\b");
 static_regex!(SLACK_APP_RE, r"\bxapp-[0-9]-[A-Z0-9]{10,13}-[0-9]{13}-[a-zA-Z0-9]{64}\b");
 static_regex!(NPM_TOKEN_RE, r"\bnpm_[a-zA-Z0-9]{36}\b");
-static_regex!(PYPI_TOKEN_RE, r"\bpypi-[A-Za-z0-9_\-]{16,}\b");
+static_regex!(PYPI_TOKEN_RE, r"\bpypi-[A-Za-z0-9_\-]{16,}");
 static_regex!(DIGITALOCEAN_RE, r"\bdop_v1_[a-f0-9]{64}\b");
 static_regex!(DATADOG_RE, r"\bdd(?:api|app)_[a-z0-9]{32,}\b");
 static_regex!(AZURE_SAS_RE, r"\bsig=[A-Za-z0-9%+/=]{20,}");
@@ -690,5 +690,110 @@ mod tests {
     fn stripe_pattern_matches_after_equals() {
         let text = "STRIPE_KEY=sk_live_abcdefghijklmnopqrstuvwx";
         assert!(STRIPE_SECRET_RE.is_match(text));
+    }
+
+    // ---- D1: Trailing \b truncation fix — keys ending with non-word chars ----
+
+    #[test]
+    fn aws_secret_key_ending_in_equals_still_matched() {
+        // AWS secret keys are base64-encoded and can end with '=' padding
+        let input = "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY=";
+        assert!(AWS_SECRET_KEY_RE.is_match(input));
+    }
+
+    #[test]
+    fn openai_key_ending_in_dash_still_matched() {
+        let key = "sk-proj-abcdefghijklmnop-";
+        assert!(OPENAI_RE.is_match(key));
+    }
+
+    #[test]
+    fn anthropic_key_with_underscore_still_matched() {
+        let key = "sk-ant-api03-abcdefghijklmnopqrst_extra";
+        assert!(ANTHROPIC_RE.is_match(key));
+    }
+
+    #[test]
+    fn jwt_ending_in_dash_still_matched() {
+        let input = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.SflKxwRJSMeKKF2QT4fwpM-";
+        assert!(JWT_RE.is_match(input));
+    }
+
+    #[test]
+    fn bearer_token_ending_in_dash_still_matched() {
+        let input = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz1234-";
+        assert!(BEARER_TOKEN_RE.is_match(input));
+    }
+
+    #[test]
+    fn pypi_token_ending_in_dash_still_matched() {
+        let key = "pypi-AbCdEfGhIjKlMnOpQrStUvWx-";
+        assert!(PYPI_TOKEN_RE.is_match(key));
+    }
+
+    // ---- D4: AWS ASIA temporary credentials ----
+
+    #[test]
+    fn aws_temporary_credential_asia_prefix_detected() {
+        let key = "ASIAIOSFODNN7EXAMPLE";
+        assert!(AWS_ACCESS_KEY_RE.is_match(key));
+    }
+
+    #[test]
+    fn aws_akia_still_detected_after_asia_addition() {
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        assert!(AWS_ACCESS_KEY_RE.is_match(key));
+    }
+
+    // ---- D5: Additional connection string schemes ----
+
+    #[test]
+    fn connection_string_matches_mariadb() {
+        let conn = "mariadb://user:password@localhost:3306/db";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    #[test]
+    fn connection_string_matches_mssql() {
+        let conn = "mssql://sa:password@dbhost:1433/mydb";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    #[test]
+    fn connection_string_matches_sqlserver() {
+        let conn = "sqlserver://sa:password@dbhost:1433/mydb";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    #[test]
+    fn connection_string_matches_amqp() {
+        let conn = "amqp://guest:guest@localhost:5672/vhost";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    #[test]
+    fn connection_string_matches_amqps() {
+        let conn = "amqps://user:pass@broker.example.com:5671/vhost";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    // ---- D6: Stripe test and restricted keys ----
+
+    #[test]
+    fn stripe_test_key_detected() {
+        let key = format!("sk_test_{}", "a".repeat(24));
+        assert!(STRIPE_SECRET_RE.is_match(&key));
+    }
+
+    #[test]
+    fn stripe_restricted_live_key_detected() {
+        let key = format!("rk_live_{}", "b".repeat(24));
+        assert!(STRIPE_SECRET_RE.is_match(&key));
+    }
+
+    #[test]
+    fn stripe_restricted_test_key_detected() {
+        let key = format!("rk_test_{}", "c".repeat(24));
+        assert!(STRIPE_SECRET_RE.is_match(&key));
     }
 }

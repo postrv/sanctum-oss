@@ -1,6 +1,7 @@
 //! `sanctum config` — View or edit configuration.
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 use sanctum_types::errors::CliError;
@@ -29,7 +30,14 @@ pub fn run(edit: bool, recommended: bool) -> Result<(), CliError> {
             fs::create_dir_all(&paths.config_dir)?;
 
             if !config_file.exists() {
-                fs::write(&config_file, default_config())?;
+                // Atomic write: write to temp file, sync, then rename into place
+                let tmp_path = config_file.with_extension("tmp");
+                {
+                    let mut file = fs::File::create(&tmp_path)?;
+                    file.write_all(default_config().as_bytes())?;
+                    file.sync_all()?;
+                }
+                fs::rename(&tmp_path, &config_file)?;
             }
             config_file
         };

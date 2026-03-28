@@ -6,7 +6,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use sanctum_sentinel::pth::analyser::{analyse_pth_file_with_context, content_hash, FileAnalysis, FileVerdict};
+use sanctum_sentinel::pth::analyser::{analyse_pth_file_with_custom_allowlist, content_hash, FileAnalysis, FileVerdict};
 use sanctum_sentinel::pth::lineage::{LineageAssessment, ProcessLineage, SystemProcSource};
 use sanctum_sentinel::pth::quarantine::{Quarantine, QuarantineMetadata};
 use sanctum_sentinel::watcher::{WatchEvent, WatchEventKind};
@@ -76,7 +76,18 @@ pub fn handle_watch_event(
                 .unwrap_or("unknown");
 
             let hash = content_hash(content.as_bytes());
-            let analysis = analyse_pth_file_with_context(&content, package_name, &hash);
+            // Merge user-configured pth_allowlist with the built-in defaults
+            let custom_allowlist = if config.sentinel.pth_allowlist.is_empty() {
+                None
+            } else {
+                Some(config.sentinel.pth_allowlist.as_slice())
+            };
+            let analysis = analyse_pth_file_with_custom_allowlist(
+                &content,
+                package_name,
+                &hash,
+                custom_allowlist,
+            );
 
             // Attempt to determine the creator process (best-effort)
             let (creator_pid, creator_exe, lineage_assessment) =
@@ -418,6 +429,21 @@ fn handle_critical_verdict(
                 creator_pid = ?ctx.creator_pid,
                 "malicious .pth detected (log-only mode)"
             );
+            let threat_event = sanctum_types::threat::ThreatEvent {
+                timestamp: chrono::Utc::now(),
+                level: sanctum_types::threat::ThreatLevel::Critical,
+                category: sanctum_types::threat::ThreatCategory::PthInjection,
+                description: format!(
+                    "Malicious .pth file detected (log-only): {}",
+                    ctx.event.path.display()
+                ),
+                source_path: ctx.event.path.clone(),
+                creator_pid: ctx.creator_pid,
+                creator_exe: ctx.creator_exe.clone(),
+                action_taken: sanctum_types::threat::Action::Logged,
+            };
+            sanctum_notify::notify_threat(&threat_event);
+            audit::append_audit_event(&threat_event, ctx.audit_path);
         }
     }
 }
@@ -509,6 +535,7 @@ fn trace_creator_lineage(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -567,5 +594,47 @@ mod tests {
     fn bounded_read_returns_error_for_nonexistent_file() {
         let result = bounded_read_file(Path::new("/nonexistent/file.txt"), 1024);
         assert!(result.is_err(), "expected error for nonexistent file");
+    }
+
+    // ============================================================
+    // W4: PthResponse::Log generates audit events
+    // ============================================================
+
+    #[test]
+    fn pth_response_log_generates_audit_event() {
+        use sanctum_types::config::PthResponse;
+
+        let Some((dir, pth_path)) = create_temp_file(
+            "evil.pth",
+            b"import base64;exec(base64.b64decode('...'))",
+        ) else {
+            return;
+        };
+        let audit_path = dir.path().join("audit.log");
+
+        let mut config = SanctumConfig::default();
+        config.sentinel.pth_response = PthResponse::Log;
+
+        let quarantine = sanctum_sentinel::pth::quarantine::Quarantine::new(
+            dir.path().join("quarantine"),
+        );
+
+        let event = WatchEvent {
+            path: pth_path,
+            kind: sanctum_sentinel::watcher::WatchEventKind::Created,
+        };
+
+        handle_watch_event(&event, &quarantine, &config, &audit_path);
+
+        // The audit log should now contain an entry for the detected threat
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert!(
+            audit_contents.contains("PthInjection"),
+            "audit log should contain a PthInjection entry for log-mode events, got: {audit_contents}"
+        );
+        assert!(
+            audit_contents.contains("Logged"),
+            "audit log should record action as Logged, got: {audit_contents}"
+        );
     }
 }

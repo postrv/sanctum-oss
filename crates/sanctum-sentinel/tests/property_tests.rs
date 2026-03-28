@@ -47,7 +47,7 @@ proptest! {
 
         let meta = QuarantineMetadata {
             original_path: path.clone(),
-            content_hash: "sha256:test".into(),
+            content_hash: content_hash(content.as_bytes()),
             creator_pid: None,
             reason: "test".into(),
             quarantined_at: chrono::Utc::now(),

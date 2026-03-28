@@ -156,6 +156,18 @@ const SENSITIVE_PREFIXES: &[&str] = &[
     "/usr/lib", "/System", "/Library",
 ];
 
+/// Home-directory patterns that are never valid restore targets.
+/// Checked via `contains()` so they match regardless of the actual $HOME prefix.
+const SENSITIVE_HOME_PATTERNS: &[&str] = &[
+    "/.ssh/",
+    "/.bashrc",
+    "/.bash_profile",
+    "/.profile",
+    "/.zshrc",
+    "/.config/autostart",
+    "/.local/bin/",
+];
+
 /// Validate that a restore path is safe to write to.
 /// Rejects paths that are non-absolute, contain traversal components,
 /// or target sensitive system directories.
@@ -198,6 +210,19 @@ fn validate_restore_path(path: &Path) -> Result<(), SentinelError> {
         }
     }
 
+    // Reject home-directory credential/autostart paths
+    for pattern in SENSITIVE_HOME_PATTERNS {
+        if path_str.contains(pattern) {
+            return Err(SentinelError::Quarantine {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("restore path targets sensitive home directory location: {}", path.display()),
+                ),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -235,20 +260,36 @@ impl Quarantine {
         /// Maximum size for a .pth file to be quarantined (1 MB).
         const MAX_PTH_FILE_SIZE: u64 = 1_048_576;
 
-        // Ensure quarantine dir exists
-        fs::create_dir_all(&self.quarantine_dir).map_err(|e| {
-            SentinelError::Quarantine {
-                path: self.quarantine_dir.clone(),
-                source: e,
-            }
-        })?;
-
-        // Restrict quarantine directory to owner-only access
+        // Ensure quarantine dir exists with secure permissions
+        // Create parent directories first
+        if let Some(parent) = self.quarantine_dir.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                SentinelError::Quarantine {
+                    path: self.quarantine_dir.clone(),
+                    source: e,
+                }
+            })?;
+        }
+        // Create the final quarantine directory with restricted permissions atomically
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = fs::Permissions::from_mode(0o700);
-            fs::set_permissions(&self.quarantine_dir, perms).map_err(|e| {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(&self.quarantine_dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(SentinelError::Quarantine {
+                        path: self.quarantine_dir.clone(),
+                        source: e,
+                    });
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            fs::create_dir_all(&self.quarantine_dir).map_err(|e| {
                 SentinelError::Quarantine {
                     path: self.quarantine_dir.clone(),
                     source: e,
@@ -282,11 +323,16 @@ impl Quarantine {
 
         let quarantine_path = self.quarantine_dir.join(&id);
 
-        // Reject files larger than 1MB (legitimate .pth files are small text files)
-        let file_size = fs::metadata(path).map_err(|e| SentinelError::Quarantine {
+        // Single-fd open: use the file handle for metadata + bounded read to avoid TOCTOU
+        let file = fs::File::open(path).map_err(|e| SentinelError::Quarantine {
             path: path.to_path_buf(),
             source: e,
-        })?.len();
+        })?;
+        let file_meta = file.metadata().map_err(|e| SentinelError::Quarantine {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        let file_size = file_meta.len();
         if file_size > MAX_PTH_FILE_SIZE {
             return Err(SentinelError::Quarantine {
                 path: path.to_path_buf(),
@@ -297,17 +343,17 @@ impl Quarantine {
             });
         }
 
-        // Read original content
-        let content = fs::read(path).map_err(|e| SentinelError::Quarantine {
+        // Bounded read via the same fd — no TOCTOU between size check and read
+        let mut reader = std::io::Read::take(file, MAX_PTH_FILE_SIZE + 1);
+        let mut content = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut content).map_err(|e| SentinelError::Quarantine {
             path: path.to_path_buf(),
             source: e,
         })?;
 
-        // Read original permissions
+        // Read original permissions from the same metadata
         #[cfg(unix)]
-        let original_permissions = fs::metadata(path)
-            .map(|m| m.permissions())
-            .ok();
+        let original_permissions = Some(file_meta.permissions());
 
         // Write content to quarantine and fsync to ensure durability
         {
@@ -415,6 +461,21 @@ impl Quarantine {
             }
         })?;
 
+        // Verify content integrity: SHA-256 hash must match the stored metadata hash
+        let actual_hash = crate::pth::analyser::content_hash(&content);
+        if actual_hash != metadata.content_hash {
+            return Err(SentinelError::Quarantine {
+                path: quarantine_path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "quarantined file has been tampered with: expected hash {}, got {}",
+                        metadata.content_hash, actual_hash
+                    ),
+                ),
+            });
+        }
+
         // Validate the restore path before writing
         validate_restore_path(&metadata.original_path)?;
 
@@ -443,13 +504,23 @@ impl Quarantine {
         let quarantine_path = self.quarantine_dir.join(id);
         let meta_path = quarantine_path.with_extension("json");
 
-        if !quarantine_path.exists() {
-            return Err(SentinelError::QuarantineEntryNotFound {
-                id: id.to_string(),
-            });
+        // Remove the quarantined file directly; treat NotFound as "entry not found"
+        match fs::remove_file(&quarantine_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SentinelError::QuarantineEntryNotFound {
+                    id: id.to_string(),
+                });
+            }
+            Err(e) => {
+                return Err(SentinelError::Quarantine {
+                    path: quarantine_path,
+                    source: e,
+                });
+            }
         }
 
-        let _ = fs::remove_file(&quarantine_path);
+        // Best-effort removal of metadata file
         let _ = fs::remove_file(&meta_path);
 
         Ok(())
@@ -517,6 +588,17 @@ mod tests {
         }
     }
 
+    /// Create metadata with the correct SHA-256 hash for the given content.
+    fn meta_with_hash(path: &Path, content: &[u8]) -> QuarantineMetadata {
+        QuarantineMetadata {
+            original_path: path.to_path_buf(),
+            content_hash: crate::pth::analyser::content_hash(content),
+            creator_pid: Some(12345),
+            reason: "test quarantine".into(),
+            quarantined_at: Utc::now(),
+        }
+    }
+
     #[test]
     fn quarantine_moves_file_to_quarantine_dir() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -564,7 +646,7 @@ mod tests {
 
         let q = Quarantine::new(dir.path().join("quarantine"));
         let entry = q
-            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .quarantine_file(&pth_path, &meta_with_hash(&pth_path, content.as_bytes()))
             .expect("quarantine");
 
         q.restore(&entry.id).expect("restore should succeed");
@@ -662,7 +744,7 @@ mod tests {
 
         let q = Quarantine::new(dir.path().join("quarantine"));
         let entry = q
-            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .quarantine_file(&pth_path, &meta_with_hash(&pth_path, content.as_bytes()))
             .expect("quarantine");
 
         // A valid ID produced by quarantine_file should be accepted
@@ -788,7 +870,7 @@ mod tests {
 
         let q = Quarantine::new(dir.path().join("quarantine"));
         let entry = q
-            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .quarantine_file(&pth_path, &meta_with_hash(&pth_path, content.as_bytes()))
             .expect("quarantine");
 
         // The original_path in metadata should be valid (temp dir)
@@ -943,11 +1025,12 @@ mod tests {
         let nested_dir = dir.path().join("subdir").join("nested");
         fs::create_dir_all(&nested_dir).expect("create dirs");
         let pth_path = nested_dir.join("target.pth");
-        fs::write(&pth_path, "payload").expect("write");
+        let content = b"payload";
+        fs::write(&pth_path, content).expect("write");
 
         let q = Quarantine::new(dir.path().join("quarantine"));
         let entry = q
-            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .quarantine_file(&pth_path, &meta_with_hash(&pth_path, content))
             .expect("quarantine");
 
         // Remove the entire parent directory tree so the original path
@@ -958,6 +1041,76 @@ mod tests {
         // Restore should fail because the parent directory is gone.
         let result = q.restore(&entry.id);
         assert!(result.is_err(), "restore should fail when parent directory is deleted");
+    }
+
+    // ── F1 test: delete on non-existent ID ──────────────────────────────
+
+    #[test]
+    fn delete_nonexistent_id_returns_not_found() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let q = Quarantine::new(dir.path().join("quarantine"));
+
+        // Create the quarantine directory so the ID is technically valid
+        fs::create_dir_all(dir.path().join("quarantine")).expect("mkdir");
+
+        let result = q.delete("nonexistent-id-12345");
+        assert!(result.is_err(), "delete of non-existent ID should fail");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, SentinelError::QuarantineEntryNotFound { .. }),
+            "expected QuarantineEntryNotFound, got: {err:?}"
+        );
+    }
+
+    // ── F2 test: quarantine_file reads content correctly via single fd ───
+
+    #[test]
+    fn quarantine_file_reads_content_via_single_fd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("test.pth");
+        let content = "import os; exec('malicious')";
+        fs::write(&pth_path, content).expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine should succeed");
+
+        // Verify the quarantined file has the correct content
+        let quarantined_content =
+            fs::read_to_string(&entry.quarantine_path).expect("read quarantined");
+        assert_eq!(quarantined_content, content);
+
+        // Verify the original was replaced with an empty stub
+        let stub_content = fs::read_to_string(&pth_path).expect("read stub");
+        assert!(stub_content.is_empty(), "original should be empty stub");
+    }
+
+    // ── F4 test: restore fails when content hash doesn't match ──────────
+
+    #[test]
+    fn restore_fails_when_content_hash_tampered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("target.pth");
+        let content = "original payload";
+        fs::write(&pth_path, content).expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&pth_path, &meta_with_hash(&pth_path, content.as_bytes()))
+            .expect("quarantine");
+
+        // Tamper with the quarantined file content
+        fs::write(&entry.quarantine_path, "tampered payload").expect("tamper");
+
+        // Restore should fail because the hash no longer matches
+        let result = q.restore(&entry.id);
+        assert!(result.is_err(), "restore should fail when content has been tampered with");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("tampered"),
+            "error should mention tampering, got: {err_msg}"
+        );
     }
 }
 

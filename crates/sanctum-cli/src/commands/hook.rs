@@ -38,26 +38,49 @@ pub fn run(action: &str, verbose: bool) -> Result<(), CliError> {
 
     // Load config to respect ai_firewall settings.
     // Try local (.sanctum/config.toml) then global config, falling back to None.
-    let ai_config = {
+    let (ai_config, is_project_local) = {
         let local = std::path::PathBuf::from(".sanctum/config.toml");
-        let config_path = if local.exists() {
-            Some(local)
+        let (config_path, is_local) = if local.exists() {
+            tracing::warn!(
+                path = %local.display(),
+                "Loading project-local config from {} \u{2014} verify this file is trusted",
+                local.display()
+            );
+            (Some(local), true)
         } else {
             let paths = sanctum_types::paths::WellKnownPaths::default();
             let global = paths.config_dir.join("config.toml");
             if global.exists() {
-                Some(global)
+                (Some(global), false)
             } else {
-                None
+                (None, false)
             }
         };
-        config_path.and_then(|p| {
+        let cfg = config_path.and_then(|p| {
             std::fs::read_to_string(&p)
                 .ok()
                 .and_then(|s| toml::from_str::<sanctum_types::config::SanctumConfig>(&s).ok())
                 .map(|c| c.ai_firewall)
-        })
+        });
+        (cfg, is_local)
     };
+
+    // Warn if project-local config disables security features
+    if is_project_local {
+        if let Some(ref cfg) = ai_config {
+            if !cfg.redact_credentials {
+                tracing::warn!(
+                    "Project-local config disables credential redaction (redact_credentials = false)"
+                );
+            }
+            if !cfg.claude_hooks {
+                tracing::warn!(
+                    "Project-local config disables Claude hooks (claude_hooks = false)"
+                );
+            }
+        }
+    }
+
     input.config.clone_from(&ai_config);
     tracing::debug!(config_loaded = ai_config.is_some(), "firewall config");
 

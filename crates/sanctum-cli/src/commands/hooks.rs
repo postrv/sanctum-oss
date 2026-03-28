@@ -1,6 +1,7 @@
 //! `sanctum hooks` — Install or remove hooks for AI coding tools.
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 use sanctum_types::errors::CliError;
@@ -96,7 +97,14 @@ fn install_claude_hooks() -> Result<(), CliError> {
     let json_str = serde_json::to_string_pretty(&settings).map_err(|e| {
         CliError::InvalidArgs(format!("Failed to serialize settings: {e}"))
     })?;
-    fs::write(&settings_path, json_str)?;
+    // Atomic write: write to temp file, sync, then rename into place
+    let tmp_path = settings_path.with_extension("tmp");
+    {
+        let mut file = fs::File::create(&tmp_path)?;
+        file.write_all(json_str.as_bytes())?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp_path, &settings_path)?;
 
     #[allow(clippy::print_stdout)]
     {
@@ -139,7 +147,14 @@ fn remove_claude_hooks() -> Result<(), CliError> {
     let json_str = serde_json::to_string_pretty(&settings).map_err(|e| {
         CliError::InvalidArgs(format!("Failed to serialize settings: {e}"))
     })?;
-    fs::write(&settings_path, json_str)?;
+    // Atomic write: write to temp file, sync, then rename into place
+    let tmp_path = settings_path.with_extension("tmp");
+    {
+        let mut file = fs::File::create(&tmp_path)?;
+        file.write_all(json_str.as_bytes())?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp_path, &settings_path)?;
 
     #[allow(clippy::print_stdout)]
     {

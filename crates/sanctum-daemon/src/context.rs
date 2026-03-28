@@ -26,7 +26,7 @@ pub struct EventLoopContext<'a> {
     pub shutdown_rx: &'a mut tokio::sync::mpsc::Receiver<()>,
     pub watcher: Option<&'a PthWatcher>,
     pub watch_rx: &'a mut tokio::sync::mpsc::Receiver<WatchEvent>,
-    pub quarantine: &'a Quarantine,
+    pub shared_quarantine: &'a Arc<Mutex<Quarantine>>,
     pub cred_rx: &'a mut tokio::sync::mpsc::Receiver<CredentialEvent>,
     pub net_rx: &'a mut tokio::sync::mpsc::Receiver<NetworkEvent>,
     pub sigterm: &'a mut tokio::signal::unix::Signal,

@@ -231,7 +231,7 @@ fn platform_get_process_info(pid: u32) -> Option<ProcessInfo> {
     }
 
     // Read PPID from /proc/<pid>/status
-    let ppid = fs::read_to_string(proc_dir.join("status"))
+    let parent_pid = fs::read_to_string(proc_dir.join("status"))
         .ok()
         .and_then(|content| {
             for line in content.lines() {
@@ -249,7 +249,7 @@ fn platform_get_process_info(pid: u32) -> Option<ProcessInfo> {
         pid,
         name,
         exe,
-        ppid,
+        ppid: parent_pid,
     })
 }
 

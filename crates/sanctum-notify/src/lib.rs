@@ -30,6 +30,7 @@ const MIN_NOTIFICATION_INTERVAL_MS: u64 = 1000;
 /// characters, and non-ASCII — is replaced with an underscore. This is
 /// deliberately aggressive: a notification losing some cosmetic fidelity
 /// is far preferable to an injection vulnerability.
+#[cfg(any(target_os = "macos", test))]
 fn sanitize_for_applescript(input: &str) -> String {
     input
         .chars()

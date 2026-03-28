@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use super::ConnectionInfo;
 
 /// Collect current network connections.
+#[allow(clippy::unused_async)] // Linux impl is sync but callers require a uniform async API
 pub async fn collect_connections() -> HashSet<ConnectionInfo> {
     #[cfg(target_os = "macos")]
     {

@@ -40,30 +40,59 @@ fn claude_hooks_dir() -> Option<PathBuf> {
 }
 
 /// Build the hooks JSON value for Claude Code settings.
+///
+/// Uses the current Claude Code hooks API format: three-level nesting with
+/// event → matcher group → hooks array. Each hook handler specifies
+/// `type: "command"` and the command string.
 fn build_hooks_json() -> serde_json::Value {
     serde_json::json!({
         "PreToolUse": [
             {
                 "matcher": "Bash",
-                "command": "sanctum hook pre-bash"
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "sanctum hook pre-bash"
+                    }
+                ]
             },
             {
-                "matcher": "Write|Edit",
-                "command": "sanctum hook pre-write"
+                "matcher": "Write|Edit|MultiEdit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "sanctum hook pre-write"
+                    }
+                ]
             },
             {
                 "matcher": "Read",
-                "command": "sanctum hook pre-read"
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "sanctum hook pre-read"
+                    }
+                ]
             },
             {
-                "matcher": "mcp",
-                "command": "sanctum hook pre-mcp"
+                "matcher": "mcp__.*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "sanctum hook pre-mcp"
+                    }
+                ]
             }
         ],
         "PostToolUse": [
             {
                 "matcher": "Bash",
-                "command": "sanctum hook post-bash"
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "sanctum hook post-bash"
+                    }
+                ]
             }
         ]
     })
@@ -183,21 +212,33 @@ mod tests {
         let pre_arr = pre.as_array().expect("PreToolUse should be array");
         assert_eq!(pre_arr.len(), 4);
 
-        // Bash hook
+        // Bash hook — nested format with type: "command"
         assert_eq!(pre_arr[0]["matcher"], "Bash");
-        assert_eq!(pre_arr[0]["command"], "sanctum hook pre-bash");
+        let bash_hooks = pre_arr[0]["hooks"].as_array().expect("hooks array");
+        assert_eq!(bash_hooks.len(), 1);
+        assert_eq!(bash_hooks[0]["type"], "command");
+        assert_eq!(bash_hooks[0]["command"], "sanctum hook pre-bash");
 
-        // Write|Edit hook
-        assert_eq!(pre_arr[1]["matcher"], "Write|Edit");
-        assert_eq!(pre_arr[1]["command"], "sanctum hook pre-write");
+        // Write|Edit|MultiEdit hook
+        assert_eq!(pre_arr[1]["matcher"], "Write|Edit|MultiEdit");
+        let write_hooks = pre_arr[1]["hooks"].as_array().expect("hooks array");
+        assert_eq!(write_hooks.len(), 1);
+        assert_eq!(write_hooks[0]["type"], "command");
+        assert_eq!(write_hooks[0]["command"], "sanctum hook pre-write");
 
         // Read hook
         assert_eq!(pre_arr[2]["matcher"], "Read");
-        assert_eq!(pre_arr[2]["command"], "sanctum hook pre-read");
+        let read_hooks = pre_arr[2]["hooks"].as_array().expect("hooks array");
+        assert_eq!(read_hooks.len(), 1);
+        assert_eq!(read_hooks[0]["type"], "command");
+        assert_eq!(read_hooks[0]["command"], "sanctum hook pre-read");
 
-        // MCP hook
-        assert_eq!(pre_arr[3]["matcher"], "mcp");
-        assert_eq!(pre_arr[3]["command"], "sanctum hook pre-mcp");
+        // MCP hook — regex pattern for mcp__* tools
+        assert_eq!(pre_arr[3]["matcher"], "mcp__.*");
+        let mcp_hooks = pre_arr[3]["hooks"].as_array().expect("hooks array");
+        assert_eq!(mcp_hooks.len(), 1);
+        assert_eq!(mcp_hooks[0]["type"], "command");
+        assert_eq!(mcp_hooks[0]["command"], "sanctum hook pre-mcp");
 
         // Check PostToolUse
         let post = hooks.get("PostToolUse").expect("should have PostToolUse");
@@ -205,7 +246,10 @@ mod tests {
         assert_eq!(post_arr.len(), 1);
 
         assert_eq!(post_arr[0]["matcher"], "Bash");
-        assert_eq!(post_arr[0]["command"], "sanctum hook post-bash");
+        let post_bash_hooks = post_arr[0]["hooks"].as_array().expect("hooks array");
+        assert_eq!(post_bash_hooks.len(), 1);
+        assert_eq!(post_bash_hooks[0]["type"], "command");
+        assert_eq!(post_bash_hooks[0]["command"], "sanctum hook post-bash");
     }
 
     #[test]
@@ -214,6 +258,29 @@ mod tests {
         let serialized = serde_json::to_string(&hooks).expect("should serialize");
         assert!(!serialized.contains("firewall"));
         assert!(!serialized.contains("--tool"));
+    }
+
+    #[test]
+    fn hooks_json_uses_nested_format_with_type_field() {
+        let hooks = build_hooks_json();
+        let serialized = serde_json::to_string(&hooks).expect("should serialize");
+        // Every hook handler must have a "type" field
+        assert!(serialized.contains(r#""type":"command"#));
+        // Must NOT have top-level "command" keys (flat format)
+        // In the correct nested format, "command" only appears inside
+        // a handler object that also has "type"
+        let pre = hooks.get("PreToolUse").expect("PreToolUse");
+        for matcher_group in pre.as_array().expect("array") {
+            // Each matcher group must have a "hooks" array, not a direct "command"
+            assert!(
+                matcher_group.get("hooks").is_some(),
+                "matcher group missing 'hooks' array: {matcher_group}"
+            );
+            assert!(
+                matcher_group.get("command").is_none(),
+                "matcher group has flat 'command' key (deprecated format): {matcher_group}"
+            );
+        }
     }
 
     #[test]
@@ -229,7 +296,7 @@ mod tests {
             serde_json::to_string_pretty(&settings).expect("should serialize");
         fs::write(&settings_path, &json_str).expect("should write");
 
-        // Read back and verify
+        // Read back and verify nested format
         let content = fs::read_to_string(&settings_path).expect("should read");
         let parsed: serde_json::Value =
             serde_json::from_str(&content).expect("should parse JSON");
@@ -242,10 +309,14 @@ mod tests {
             .expect("PreToolUse should be array");
 
         assert_eq!(pre.len(), 4);
-        assert_eq!(pre[0]["command"], "sanctum hook pre-bash");
-        assert_eq!(pre[1]["command"], "sanctum hook pre-write");
-        assert_eq!(pre[2]["command"], "sanctum hook pre-read");
-        assert_eq!(pre[3]["command"], "sanctum hook pre-mcp");
+        // Verify nested format: command is inside hooks[0], not at top level
+        assert_eq!(pre[0]["hooks"][0]["command"], "sanctum hook pre-bash");
+        assert_eq!(pre[0]["hooks"][0]["type"], "command");
+        assert_eq!(pre[1]["hooks"][0]["command"], "sanctum hook pre-write");
+        assert_eq!(pre[1]["matcher"], "Write|Edit|MultiEdit");
+        assert_eq!(pre[2]["hooks"][0]["command"], "sanctum hook pre-read");
+        assert_eq!(pre[3]["hooks"][0]["command"], "sanctum hook pre-mcp");
+        assert_eq!(pre[3]["matcher"], "mcp__.*");
 
         let post = hooks
             .get("PostToolUse")
@@ -254,7 +325,8 @@ mod tests {
             .expect("PostToolUse should be array");
 
         assert_eq!(post.len(), 1);
-        assert_eq!(post[0]["command"], "sanctum hook post-bash");
+        assert_eq!(post[0]["hooks"][0]["command"], "sanctum hook post-bash");
+        assert_eq!(post[0]["hooks"][0]["type"], "command");
     }
 
     #[test]

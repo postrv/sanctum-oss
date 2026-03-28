@@ -24,7 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Nightly extended fuzz testing**: 5-hour fuzz runs via cron schedule (2.5 hours per target)
 - **Release workflow gates**: `verify-ci` job checks CI status before building release artifacts
 - **Config version field**: `config_version` added to `SanctumConfig` for future migration support
-- **827 tests** across 8 crates (up from 511)
+- **828 tests** across 8 crates (up from 511)
+
+### Fixed
+- **Claude Code hooks JSON format**: Migrated from deprecated flat format to current three-level nested format (`hooks: [{ type: "command", command }]`) — without this fix, hooks were silently ignored by Claude Code
+- **Write-hook matcher**: Added `MultiEdit` tool to pre-write matcher (`Write|Edit|MultiEdit`) — prevents credential-content bypass via MultiEdit tool
+- **MCP hook matcher**: Changed from `"mcp"` (literal, never matched) to `"mcp__.*"` (regex, matches all MCP tool invocations)
 
 ### Security
 - **Project-local config hardening**: Security-critical settings (`claude_hooks`, `redact_credentials`, `watch_pth`, `pth_response`) are pinned to global config values and cannot be weakened by project-local `.sanctum/config.toml` — prevents malicious repos from disabling protections

@@ -195,9 +195,15 @@ mod tests {
     }
 
     /// Inner test executed only via the subprocess spawned above.
+    /// The parent test unsets HOME before spawning this. If HOME is present
+    /// (e.g. when run directly via `--ignored`), the test skips itself.
     #[test]
     #[ignore = "executed only via subprocess from require_returns_err_when_home_unset"]
     fn require_returns_err_when_home_unset_inner() {
+        if std::env::var_os("HOME").is_some() {
+            // Running directly (not via the subprocess wrapper) — skip.
+            return;
+        }
         let result = WellKnownPaths::require();
         assert!(result.is_err(), "require() should fail without HOME");
         let msg = result.expect_err("already checked is_err");

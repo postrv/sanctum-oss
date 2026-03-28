@@ -14,7 +14,7 @@ use sanctum_types::errors::CliError;
 
 /// Run a hook action.
 ///
-/// `action` is one of `pre-bash`, `pre-write`, `pre-read`, or `post-bash`.
+/// `action` is one of `pre-bash`, `pre-write`, `pre-read`, `pre-mcp`, or `post-bash`.
 /// Tool invocation JSON is read from stdin.
 pub fn run(action: &str, verbose: bool) -> Result<(), CliError> {
     use std::io::Read;
@@ -67,10 +67,11 @@ pub fn run(action: &str, verbose: bool) -> Result<(), CliError> {
         "pre-bash" => claude::pre_bash(&input),
         "pre-write" => claude::pre_write(&input),
         "pre-read" => claude::pre_read(&input),
+        "pre-mcp" => claude::pre_mcp_tool_use(&input, None),
         "post-bash" => claude::post_bash(&input),
         _ => {
             return Err(CliError::InvalidArgs(format!(
-                "unknown hook action '{action}'. Supported: pre-bash, pre-write, pre-read, post-bash"
+                "unknown hook action '{action}'. Supported: pre-bash, pre-write, pre-read, pre-mcp, post-bash"
             )));
         }
     };

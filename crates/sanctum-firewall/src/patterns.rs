@@ -41,36 +41,36 @@ macro_rules! static_regex {
     };
 }
 
-static_regex!(OPENAI_RE, r"sk-[a-zA-Z0-9\-_]{20,}");
-static_regex!(ANTHROPIC_RE, r"sk-ant-[a-zA-Z0-9\-]{20,}");
-static_regex!(GOOGLE_AI_RE, r"AIza[a-zA-Z0-9_\-]{35}");
-static_regex!(AWS_ACCESS_KEY_RE, r"AKIA[A-Z0-9]{16}");
+static_regex!(OPENAI_RE, r"\bsk-[a-zA-Z0-9\-_]{20,}\b");
+static_regex!(ANTHROPIC_RE, r"\bsk-ant-[a-zA-Z0-9\-]{20,}\b");
+static_regex!(GOOGLE_AI_RE, r"\bAIza[a-zA-Z0-9_\-]{35}\b");
+static_regex!(AWS_ACCESS_KEY_RE, r"\bAKIA[A-Z0-9]{16}\b");
 static_regex!(
     AWS_SECRET_KEY_RE,
-    r"(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)[=: ]+[A-Za-z0-9/+=]{40}"
+    r"\b(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)[=: ]+[A-Za-z0-9/+=]{40}\b"
 );
-static_regex!(GITHUB_PAT_RE, r"ghp_[a-zA-Z0-9]{36}");
-static_regex!(GITHUB_FINE_GRAINED_RE, r"github_pat_[a-zA-Z0-9_]{82}");
-static_regex!(GITLAB_RE, r"glpat-[a-zA-Z0-9_\-]{20}");
-static_regex!(SLACK_BOT_RE, r"xoxb-[0-9]{10,13}-[a-zA-Z0-9\-]+");
-static_regex!(STRIPE_SECRET_RE, r"sk_live_[a-zA-Z0-9]{24,}");
-static_regex!(SENDGRID_RE, r"SG\.[a-zA-Z0-9_\-]{22}\.[a-zA-Z0-9_\-]{43}");
+static_regex!(GITHUB_PAT_RE, r"\bghp_[a-zA-Z0-9]{36}\b");
+static_regex!(GITHUB_FINE_GRAINED_RE, r"\bgithub_pat_[a-zA-Z0-9_]{82}\b");
+static_regex!(GITLAB_RE, r"\bglpat-[a-zA-Z0-9_\-]{20}\b");
+static_regex!(SLACK_BOT_RE, r"\bxoxb-[0-9]{10,13}-[a-zA-Z0-9\-]+\b");
+static_regex!(STRIPE_SECRET_RE, r"\bsk_live_[a-zA-Z0-9]{24,}\b");
+static_regex!(SENDGRID_RE, r"\bSG\.[a-zA-Z0-9_\-]{22}\.[a-zA-Z0-9_\-]{43}\b");
 static_regex!(
     JWT_RE,
-    r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
+    r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"
 );
 static_regex!(
     BEARER_TOKEN_RE,
-    r"(?i:authorization)[=: ]+Bearer [A-Za-z0-9_\-]{20,}"
+    r"\b(?i:authorization)[=: ]+Bearer [A-Za-z0-9_\-]{20,}\b"
 );
 static_regex!(PRIVATE_KEY_RE, r"-----BEGIN[A-Z ]*PRIVATE KEY-----");
-static_regex!(CONNECTION_STRING_RE, r"(postgresql|postgres|mongodb|redis|mysql)://[^\s@]+@[^\s]+");
-static_regex!(SLACK_USER_RE, r"xoxp-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,34}");
-static_regex!(SLACK_APP_RE, r"xapp-[0-9]-[A-Z0-9]{10,13}-[0-9]{13}-[a-zA-Z0-9]{64}");
-static_regex!(NPM_TOKEN_RE, r"npm_[a-zA-Z0-9]{36}");
-static_regex!(PYPI_TOKEN_RE, r"pypi-[A-Za-z0-9_\-]{16,}");
-static_regex!(DIGITALOCEAN_RE, r"dop_v1_[a-f0-9]{64}");
-static_regex!(DATADOG_RE, r"dd(?:api|app)_[a-z0-9]{32,}");
+static_regex!(CONNECTION_STRING_RE, r"\b(postgresql|postgres|mongodb|redis|mysql)://[^\s@]+@[^\s]+\b");
+static_regex!(SLACK_USER_RE, r"\bxoxp-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,34}\b");
+static_regex!(SLACK_APP_RE, r"\bxapp-[0-9]-[A-Z0-9]{10,13}-[0-9]{13}-[a-zA-Z0-9]{64}\b");
+static_regex!(NPM_TOKEN_RE, r"\bnpm_[a-zA-Z0-9]{36}\b");
+static_regex!(PYPI_TOKEN_RE, r"\bpypi-[A-Za-z0-9_\-]{16,}\b");
+static_regex!(DIGITALOCEAN_RE, r"\bdop_v1_[a-f0-9]{64}\b");
+static_regex!(DATADOG_RE, r"\bdd(?:api|app)_[a-z0-9]{32,}\b");
 static_regex!(AZURE_SAS_RE, r"\bsig=[A-Za-z0-9%+/=]{20,}");
 
 /// All registered credential patterns.
@@ -638,5 +638,57 @@ mod tests {
     #[test]
     fn pattern_count_is_correct() {
         assert_eq!(PATTERNS.len(), 22, "Expected 22 credential patterns");
+    }
+
+    // ---- Word-boundary tests: prevent substring false positives ----
+
+    #[test]
+    fn openai_pattern_does_not_match_embedded_in_word() {
+        // A key-like string embedded in a larger alphanumeric token should not match
+        let embedded = "prefixsk-abcdefghijklmnopqrstuvwxyz";
+        assert!(!OPENAI_RE.is_match(embedded));
+    }
+
+    #[test]
+    fn anthropic_pattern_does_not_match_embedded_in_word() {
+        let embedded = "prefixsk-ant-abcdefghijklmnopqrstuvwxyz";
+        assert!(!ANTHROPIC_RE.is_match(embedded));
+    }
+
+    #[test]
+    fn github_pat_does_not_match_embedded() {
+        let embedded = format!("prefixghp_{}", "a".repeat(36));
+        assert!(!GITHUB_PAT_RE.is_match(&embedded));
+    }
+
+    #[test]
+    fn aws_access_key_does_not_match_embedded() {
+        let embedded = "XAKIAIOSFODNN7EXAMPLE";
+        assert!(!AWS_ACCESS_KEY_RE.is_match(embedded));
+    }
+
+    #[test]
+    fn stripe_pattern_does_not_match_embedded() {
+        let embedded = format!("prefixsk_live_{}", "a".repeat(24));
+        assert!(!STRIPE_SECRET_RE.is_match(&embedded));
+    }
+
+    #[test]
+    fn openai_pattern_still_matches_at_word_boundary() {
+        // Preceded by whitespace
+        let text = "key: sk-abcdefghijklmnopqrstuvwxyz";
+        assert!(OPENAI_RE.is_match(text));
+    }
+
+    #[test]
+    fn openai_pattern_matches_at_start_of_string() {
+        let text = "sk-abcdefghijklmnopqrstuvwxyz";
+        assert!(OPENAI_RE.is_match(text));
+    }
+
+    #[test]
+    fn stripe_pattern_matches_after_equals() {
+        let text = "STRIPE_KEY=sk_live_abcdefghijklmnopqrstuvwx";
+        assert!(STRIPE_SECRET_RE.is_match(text));
     }
 }

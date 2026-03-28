@@ -3,8 +3,23 @@
 //! Provides pre- and post-tool-call handlers that enforce security policy for
 //! Claude Code sessions. Each handler inspects the tool name and arguments to
 //! detect dangerous operations.
+//!
+//! ## MCP policy enforcement
+//!
+//! The [`pre_mcp_tool_use`] handler evaluates MCP tool calls against the
+//! configured policy rules (`ai_firewall.mcp_rules`). When `mcp_audit` is
+//! enabled, every invocation is recorded to an [`McpAuditLog`].
+//!
+//! ## Budget usage extraction
+//!
+//! The [`extract_budget_usage`] function scans command output for LLM API
+//! response JSON and, if found, extracts token usage data via the budget
+//! parser. The [`post_bash`] handler uses this to include budget usage
+//! information in its warnings.
 
 use crate::hooks::protocol::{HookInput, HookOutput};
+use crate::mcp::audit::McpAuditLog;
+use crate::mcp::policy::McpPolicy;
 use crate::redaction::redact_credentials;
 
 /// Sensitive file path prefixes that should never be read.
@@ -119,10 +134,69 @@ fn command_invokes(command: &str, word: &str) -> bool {
     false
 }
 
+/// Constructs known to enable indirect file access via eval, subshell, or
+/// source.
+const INDIRECT_ACCESS_CONSTRUCTS: &[&str] = &["eval ", "source ", "$(", "`"];
+
+/// Credential path indicators — substrings whose presence in a command
+/// alongside an indirect construct signals a bypass attempt.
+const CREDENTIAL_PATH_INDICATORS: &[&str] = &[
+    ".ssh/",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    "aws/credentials",
+    "gnupg",
+    ".env",
+    "credentials.json",
+    "token.json",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".pgpass",
+    ".docker/config.json",
+    ".kube/config",
+    "service-account",
+];
+
+/// Returns `true` if the command uses an indirect shell construct (`eval`,
+/// `source`, `$(...)`, backticks) in combination with a credential path
+/// indicator. This catches bypass attempts like:
+/// - `eval "cat ~/.ssh/id_rsa"`
+/// - `f=~/.ssh/id_rsa; cat $f`  (caught via `.ssh/` indicator)
+/// - `$(cat ~/.ssh/id_rsa)`
+fn has_indirect_credential_access(command: &str) -> bool {
+    let normalised = command.replace('\t', " ");
+    for construct in INDIRECT_ACCESS_CONSTRUCTS {
+        if normalised.contains(construct) {
+            for indicator in CREDENTIAL_PATH_INDICATORS {
+                if normalised.contains(indicator) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Also detect variable assignments containing credential paths followed
+    // by variable expansion (e.g. "f=~/.ssh/id_rsa; cat $f")
+    for indicator in CREDENTIAL_PATH_INDICATORS {
+        if normalised.contains(indicator) && normalised.contains('$') {
+            // Look for assignment pattern: word=...indicator... ; ... $var
+            if normalised.contains('=') && normalised.contains(';') {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Returns `true` if `command` appears to access a credential file through any
 /// reading mechanism — direct commands (cat, less, ...) or indirect commands
 /// (grep, awk, sed, python, base64, xxd, cp, mv) — including bypass attempts
-/// such as tab-delimited arguments and shell input redirections.
+/// such as tab-delimited arguments, shell input redirections, and indirect
+/// shell constructs (eval, source, subshell, backticks).
 fn is_credential_file_access(command: &str) -> bool {
     // Normalise the command for matching: we keep the original for precise
     // checks but also build a version where tabs are turned into spaces so
@@ -163,6 +237,12 @@ fn is_credential_file_access(command: &str) -> bool {
         if normalised.contains(&redir_no_space) || normalised.contains(&redir_space) {
             return true;
         }
+    }
+
+    // 4. Indirect access via eval, source, subshell, backticks, or variable
+    //    assignment + expansion containing credential path indicators.
+    if has_indirect_credential_access(command) {
+        return true;
     }
 
     false
@@ -452,6 +532,138 @@ pub fn pre_read(input: &HookInput) -> HookOutput {
     HookOutput::allow()
 }
 
+/// Evaluate an MCP tool call against the configured policy rules.
+///
+/// Loads `mcp_rules` from the `AiFirewallConfig` attached to the hook input,
+/// constructs an [`McpPolicy`], and evaluates the tool invocation. If the
+/// config's `mcp_audit` flag is `true`, the invocation is also recorded in
+/// the provided audit log.
+///
+/// - **BLOCK**: The tool call matches a restricted-path policy rule.
+/// - **ALLOW**: No policy rules matched or MCP rules are empty.
+#[must_use]
+pub fn pre_mcp_tool_use(input: &HookInput, audit_log: Option<&mut McpAuditLog>) -> HookOutput {
+    // If hooks are explicitly disabled, allow everything.
+    if let Some(ref cfg) = input.config {
+        if !cfg.claude_hooks {
+            return HookOutput::allow();
+        }
+    }
+
+    // Load MCP policy rules from config (empty vec if no config is present).
+    let mcp_rules = input
+        .config
+        .as_ref()
+        .map_or_else(Vec::new, |cfg| cfg.mcp_rules.clone());
+
+    let policy = McpPolicy::from_config_rules(&mcp_rules);
+    let decision = policy.evaluate(&input.tool_name, &input.tool_input);
+
+    let mcp_audit_enabled = input
+        .config
+        .as_ref()
+        .is_none_or(|cfg| cfg.mcp_audit);
+
+    let output = match decision {
+        crate::hooks::protocol::HookDecision::Block => HookOutput::block(format!(
+            "Blocked: MCP tool '{}' violates path restriction policy",
+            input.tool_name
+        )),
+        _ => HookOutput::allow(),
+    };
+
+    // Record to audit log if auditing is enabled.
+    if mcp_audit_enabled {
+        if let Some(log) = audit_log {
+            log.record(
+                &input.tool_name,
+                input.tool_input.clone(),
+                output.decision,
+                output.message.clone(),
+            );
+        }
+    }
+
+    output
+}
+
+/// Scan command output for LLM API response JSON and extract budget usage data.
+///
+/// Searches through `output_text` for JSON objects that look like API responses
+/// (containing usage/token data). Returns a human-readable summary if usage
+/// data is found, or `None` if no API usage data is detected.
+///
+/// This is intentionally best-effort: not all command output will contain API
+/// responses, and the parser may not recognise every format.
+#[must_use]
+pub fn extract_budget_usage(output_text: &str) -> Option<String> {
+    // Look for JSON objects in the output. We scan for '{' at the start of a
+    // line (or after whitespace) and try to parse from there.
+    for line in output_text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        // Try to parse as a JSON object with usage data.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(obj) = value.as_object() {
+                // Check for markers that indicate this is an API response with usage data.
+                let has_usage = obj.contains_key("usage")
+                    || obj.contains_key("usageMetadata");
+                if has_usage {
+                    // Format a summary. Extract what we can without depending on
+                    // sanctum-budget (which is a separate crate not in our deps).
+                    let model = obj
+                        .get("model")
+                        .or_else(|| obj.get("modelVersion"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+
+                    let (input_tokens, output_tokens) = extract_token_counts(obj);
+
+                    return Some(format!(
+                        "API usage detected: model={model}, \
+                         input_tokens={input_tokens}, output_tokens={output_tokens}"
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract input and output token counts from a JSON API response object.
+fn extract_token_counts(obj: &serde_json::Map<String, serde_json::Value>) -> (u64, u64) {
+    // OpenAI format: usage.prompt_tokens / usage.completion_tokens
+    // Anthropic format: usage.input_tokens / usage.output_tokens
+    // Google format: usageMetadata.promptTokenCount / usageMetadata.candidatesTokenCount
+    if let Some(usage) = obj.get("usage").and_then(serde_json::Value::as_object) {
+        let input = usage
+            .get("input_tokens")
+            .or_else(|| usage.get("prompt_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let output = usage
+            .get("output_tokens")
+            .or_else(|| usage.get("completion_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        return (input, output);
+    }
+    if let Some(meta) = obj.get("usageMetadata").and_then(serde_json::Value::as_object) {
+        let input = meta
+            .get("promptTokenCount")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let output = meta
+            .get("candidatesTokenCount")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        return (input, output);
+    }
+    (0, 0)
+}
+
 /// Package manager install commands that may create `.pth` files.
 const INSTALL_COMMANDS: &[&str] = &[
     "pip install",
@@ -556,6 +768,12 @@ pub fn post_bash(input: &HookInput) -> HookOutput {
              Verify this is expected and not a backdoor."
                 .to_owned(),
         );
+    }
+
+    // 5. Check for API usage data in command output (budget tracking)
+    if let Some(usage_summary) = extract_budget_usage(&combined_output) {
+        tracing::info!(usage = %usage_summary, "budget usage detected in post-bash output");
+        warnings.push(format!("Budget: {usage_summary}"));
     }
 
     if warnings.is_empty() {
@@ -930,6 +1148,93 @@ mod tests {
     #[test]
     fn helper_rejects_grep_normal() {
         assert!(!is_credential_file_access("grep TODO src/lib.rs"));
+    }
+
+    // ---- pre_bash: indirect credential access (eval/subshell/variable bypass) ----
+
+    #[test]
+    fn indirect_access_detects_eval_cat_ssh() {
+        assert!(has_indirect_credential_access("eval \"cat ~/.ssh/id_rsa\""));
+    }
+
+    #[test]
+    fn indirect_access_detects_eval_env() {
+        assert!(has_indirect_credential_access("eval \"cat .env\""));
+    }
+
+    #[test]
+    fn indirect_access_detects_subshell_ssh() {
+        assert!(has_indirect_credential_access("echo $(cat ~/.ssh/id_rsa)"));
+    }
+
+    #[test]
+    fn indirect_access_detects_backtick_ssh() {
+        assert!(has_indirect_credential_access("echo `cat ~/.ssh/id_rsa`"));
+    }
+
+    #[test]
+    fn indirect_access_detects_source_env() {
+        assert!(has_indirect_credential_access("source .env"));
+    }
+
+    #[test]
+    fn indirect_access_detects_var_assignment_ssh() {
+        assert!(has_indirect_credential_access("f=~/.ssh/id_rsa; cat $f"));
+    }
+
+    #[test]
+    fn indirect_access_detects_var_assignment_env() {
+        assert!(has_indirect_credential_access("x=.env; cat $x"));
+    }
+
+    #[test]
+    fn indirect_access_detects_eval_id_ed25519() {
+        assert!(has_indirect_credential_access("eval \"cat ~/.ssh/id_ed25519\""));
+    }
+
+    #[test]
+    fn indirect_access_rejects_normal_eval() {
+        assert!(!has_indirect_credential_access("eval \"echo hello\""));
+    }
+
+    #[test]
+    fn indirect_access_rejects_normal_subshell() {
+        assert!(!has_indirect_credential_access("echo $(date)"));
+    }
+
+    #[test]
+    fn indirect_access_rejects_normal_source() {
+        assert!(!has_indirect_credential_access("source setup.sh"));
+    }
+
+    #[test]
+    fn pre_bash_blocks_eval_cat_ssh_key() {
+        let output = pre_bash(&bash_input("eval \"cat ~/.ssh/id_rsa\""));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_subshell_ssh_key() {
+        let output = pre_bash(&bash_input("echo $(cat ~/.ssh/id_rsa)"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_var_assign_ssh_key() {
+        let output = pre_bash(&bash_input("f=~/.ssh/id_rsa; cat $f"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_backtick_env() {
+        let output = pre_bash(&bash_input("echo `cat .env`"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_allows_normal_eval() {
+        let output = pre_bash(&bash_input("eval \"echo hello world\""));
+        assert_eq!(output.decision, HookDecision::Allow);
     }
 
     // ---- pre_bash: is_env_dump helper tests ----
@@ -1550,5 +1855,277 @@ mod tests {
         let input = make_input("read", json!({ "file_path": ".ssh/id_rsa" }));
         let output = pre_read(&input);
         assert_eq!(output.decision, HookDecision::Block, "relative .ssh path should be blocked");
+    }
+
+    // ---- pre_mcp_tool_use tests ----
+
+    fn mcp_input(tool_name: &str, tool_input: serde_json::Value) -> HookInput {
+        HookInput {
+            tool_name: tool_name.to_owned(),
+            tool_input,
+            config: None,
+        }
+    }
+
+    fn mcp_input_with_rules(
+        tool_name: &str,
+        tool_input: serde_json::Value,
+        rules: Vec<sanctum_types::config::McpPolicyRuleConfig>,
+    ) -> HookInput {
+        HookInput {
+            tool_name: tool_name.to_owned(),
+            tool_input,
+            config: Some(sanctum_types::config::AiFirewallConfig {
+                mcp_rules: rules,
+                mcp_audit: true,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn pre_mcp_allows_when_no_rules() {
+        let input = mcp_input("read_file", json!({"path": "/home/user/.ssh/id_rsa"}));
+        let output = pre_mcp_tool_use(&input, None);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_mcp_blocks_restricted_path() {
+        let rules = vec![sanctum_types::config::McpPolicyRuleConfig {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+        }];
+        let input = mcp_input_with_rules(
+            "read_file",
+            json!({"path": "/home/user/.ssh/id_rsa"}),
+            rules,
+        );
+        let output = pre_mcp_tool_use(&input, None);
+        assert_eq!(output.decision, HookDecision::Block);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("MCP tool"));
+    }
+
+    #[test]
+    fn pre_mcp_allows_unrestricted_path() {
+        let rules = vec![sanctum_types::config::McpPolicyRuleConfig {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+        }];
+        let input = mcp_input_with_rules(
+            "read_file",
+            json!({"path": "/home/user/project/main.rs"}),
+            rules,
+        );
+        let output = pre_mcp_tool_use(&input, None);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_mcp_allows_different_tool() {
+        let rules = vec![sanctum_types::config::McpPolicyRuleConfig {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+        }];
+        let input = mcp_input_with_rules(
+            "write_file",
+            json!({"path": "/home/user/.ssh/id_rsa"}),
+            rules,
+        );
+        let output = pre_mcp_tool_use(&input, None);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_mcp_records_audit_log_on_allow() {
+        let rules = vec![sanctum_types::config::McpPolicyRuleConfig {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+        }];
+        let input = mcp_input_with_rules(
+            "read_file",
+            json!({"path": "/home/user/project/main.rs"}),
+            rules,
+        );
+        let mut log = McpAuditLog::new();
+        let output = pre_mcp_tool_use(&input, Some(&mut log));
+        assert_eq!(output.decision, HookDecision::Allow);
+        assert_eq!(log.entries().len(), 1);
+        assert_eq!(log.entries()[0].tool_name, "read_file");
+        assert_eq!(log.entries()[0].decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_mcp_records_audit_log_on_block() {
+        let rules = vec![sanctum_types::config::McpPolicyRuleConfig {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+        }];
+        let input = mcp_input_with_rules(
+            "read_file",
+            json!({"path": "/home/user/.ssh/id_rsa"}),
+            rules,
+        );
+        let mut log = McpAuditLog::new();
+        let output = pre_mcp_tool_use(&input, Some(&mut log));
+        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(log.entries().len(), 1);
+        assert_eq!(log.entries()[0].decision, HookDecision::Block);
+        assert!(log.entries()[0].reason.is_some());
+    }
+
+    #[test]
+    fn pre_mcp_skips_audit_when_disabled() {
+        let input = HookInput {
+            tool_name: "read_file".to_owned(),
+            tool_input: json!({"path": "/home/user/file.txt"}),
+            config: Some(sanctum_types::config::AiFirewallConfig {
+                mcp_audit: false,
+                ..Default::default()
+            }),
+        };
+        let mut log = McpAuditLog::new();
+        let _output = pre_mcp_tool_use(&input, Some(&mut log));
+        assert!(log.entries().is_empty(), "audit log should be empty when mcp_audit is false");
+    }
+
+    #[test]
+    fn pre_mcp_disabled_by_config() {
+        let input = HookInput {
+            tool_name: "read_file".to_owned(),
+            tool_input: json!({"path": "/home/user/.ssh/id_rsa"}),
+            config: Some(sanctum_types::config::AiFirewallConfig {
+                claude_hooks: false,
+                mcp_rules: vec![sanctum_types::config::McpPolicyRuleConfig {
+                    tool: "read_file".to_owned(),
+                    restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+                }],
+                ..Default::default()
+            }),
+        };
+        let output = pre_mcp_tool_use(&input, None);
+        assert_eq!(output.decision, HookDecision::Allow, "hooks disabled should allow everything");
+    }
+
+    #[test]
+    fn pre_mcp_blocks_pth_extension_glob() {
+        let rules = vec![sanctum_types::config::McpPolicyRuleConfig {
+            tool: "write_file".to_owned(),
+            restricted_paths: vec!["**/*.pth".to_owned()],
+        }];
+        let input = mcp_input_with_rules(
+            "write_file",
+            json!({"path": "/usr/lib/python3/site-packages/evil.pth"}),
+            rules,
+        );
+        let output = pre_mcp_tool_use(&input, None);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_mcp_multiple_rules_checked() {
+        let rules = vec![
+            sanctum_types::config::McpPolicyRuleConfig {
+                tool: "read_file".to_owned(),
+                restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
+            },
+            sanctum_types::config::McpPolicyRuleConfig {
+                tool: "read_file".to_owned(),
+                restricted_paths: vec!["/home/user/.aws/**".to_owned()],
+            },
+        ];
+        let input1 = mcp_input_with_rules(
+            "read_file",
+            json!({"path": "/home/user/.ssh/id_rsa"}),
+            rules.clone(),
+        );
+        let input2 = mcp_input_with_rules(
+            "read_file",
+            json!({"path": "/home/user/.aws/credentials"}),
+            rules,
+        );
+        assert_eq!(pre_mcp_tool_use(&input1, None).decision, HookDecision::Block);
+        assert_eq!(pre_mcp_tool_use(&input2, None).decision, HookDecision::Block);
+    }
+
+    // ---- extract_budget_usage tests ----
+
+    #[test]
+    fn extract_budget_usage_finds_openai_response() {
+        let output_text = r#"{"id":"chatcmpl-abc","model":"gpt-4o","usage":{"prompt_tokens":100,"completion_tokens":50}}"#;
+        let result = extract_budget_usage(output_text);
+        assert!(result.is_some());
+        let msg = result.unwrap_or_default();
+        assert!(msg.contains("gpt-4o"));
+        assert!(msg.contains("100"));
+        assert!(msg.contains("50"));
+    }
+
+    #[test]
+    fn extract_budget_usage_finds_anthropic_response() {
+        let output_text = r#"{"type":"message","model":"claude-sonnet-4-6","usage":{"input_tokens":200,"output_tokens":100}}"#;
+        let result = extract_budget_usage(output_text);
+        assert!(result.is_some());
+        let msg = result.unwrap_or_default();
+        assert!(msg.contains("claude-sonnet-4-6"));
+        assert!(msg.contains("200"));
+        assert!(msg.contains("100"));
+    }
+
+    #[test]
+    fn extract_budget_usage_finds_google_response() {
+        let output_text = r#"{"modelVersion":"gemini-2.5-pro","usageMetadata":{"promptTokenCount":300,"candidatesTokenCount":150}}"#;
+        let result = extract_budget_usage(output_text);
+        assert!(result.is_some());
+        let msg = result.unwrap_or_default();
+        assert!(msg.contains("gemini-2.5-pro"));
+        assert!(msg.contains("300"));
+        assert!(msg.contains("150"));
+    }
+
+    #[test]
+    fn extract_budget_usage_returns_none_for_non_api_output() {
+        let output_text = "total 0\ndrwxr-xr-x  2 user user 40 Jan  1 00:00 .";
+        assert!(extract_budget_usage(output_text).is_none());
+    }
+
+    #[test]
+    fn extract_budget_usage_returns_none_for_empty_string() {
+        assert!(extract_budget_usage("").is_none());
+    }
+
+    #[test]
+    fn extract_budget_usage_returns_none_for_json_without_usage() {
+        let output_text = r#"{"status":"ok","data":[1,2,3]}"#;
+        assert!(extract_budget_usage(output_text).is_none());
+    }
+
+    #[test]
+    fn post_bash_detects_api_usage_in_output() {
+        let input = make_input("bash", json!({
+            "command": "curl https://api.openai.com/v1/chat/completions",
+            "stdout": r#"{"id":"chatcmpl-abc","model":"gpt-4o","usage":{"prompt_tokens":500,"completion_tokens":200}}"#,
+            "stderr": ""
+        }));
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("Budget:"), "should contain budget usage warning");
+        assert!(msg.contains("gpt-4o"));
+    }
+
+    #[test]
+    fn post_bash_no_budget_warning_without_usage() {
+        let input = make_input("bash", json!({
+            "command": "curl https://example.com",
+            "stdout": r#"{"status":"ok"}"#,
+            "stderr": ""
+        }));
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
     }
 }

@@ -114,11 +114,13 @@ impl ProcessLineage {
     }
 
     /// Get the root ancestor (furthest from the target process).
+    ///
+    /// Returns `None` if the chain is empty (which should not happen
+    /// with a validly-constructed `ProcessLineage`, but is safe against
+    /// future changes).
     #[must_use]
-    pub fn root_ancestor(&self) -> &ProcessInfo {
-        self.chain
-            .last()
-            .unwrap_or_else(|| &self.chain[0])
+    pub fn root_ancestor(&self) -> Option<&ProcessInfo> {
+        self.chain.last()
     }
 
     /// Depth of the process chain.
@@ -335,7 +337,8 @@ mod tests {
         let lineage = ProcessLineage::trace(101, &mock)
             .expect("lineage should succeed");
         assert!(lineage.has_ancestor_named("pip"));
-        assert_eq!(lineage.root_ancestor().name, "pip");
+        let root = lineage.root_ancestor().expect("root should exist");
+        assert_eq!(root.name, "pip");
     }
 
     #[test]
@@ -405,6 +408,38 @@ mod tests {
         assert!(!is_known_package_manager("curl"));
         assert!(!is_known_package_manager("python3"));
         assert!(!is_known_package_manager("bash"));
+    }
+
+    #[test]
+    fn root_ancestor_returns_last_in_chain() {
+        let mock = MockProcFs::new()
+            .process(1, "init", None)
+            .process(50, "bash", Some(1))
+            .process(100, "python3", Some(50));
+
+        let lineage = ProcessLineage::trace(100, &mock)
+            .expect("lineage should succeed");
+
+        let root = lineage.root_ancestor();
+        assert!(root.is_some(), "root_ancestor should return Some for non-empty chain");
+        let root = root.expect("just checked");
+        assert_eq!(root.name, "init");
+        assert_eq!(root.pid, 1);
+    }
+
+    #[test]
+    fn root_ancestor_single_process() {
+        let mock = MockProcFs::new()
+            .process(42, "solo", None);
+
+        let lineage = ProcessLineage::trace(42, &mock)
+            .expect("lineage should succeed");
+
+        let root = lineage.root_ancestor();
+        assert!(root.is_some());
+        let root = root.expect("just checked");
+        assert_eq!(root.name, "solo");
+        assert_eq!(root.pid, 42);
     }
 
     #[test]

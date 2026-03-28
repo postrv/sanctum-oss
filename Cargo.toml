@@ -19,6 +19,7 @@ rust-version = "1.94.0"
 license = "MIT"
 repository = "https://github.com/postrv/sanctum"
 homepage = "https://sanctum.dev"
+readme = "README.md"
 description = "The developer security daemon for the AI coding era"
 keywords = ["security", "supply-chain", "daemon", "ai", "credentials"]
 categories = ["command-line-utilities", "development-tools"]

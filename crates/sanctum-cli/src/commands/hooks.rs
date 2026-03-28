@@ -53,6 +53,10 @@ fn build_hooks_json() -> serde_json::Value {
             {
                 "matcher": "Read",
                 "command": "sanctum hook pre-read"
+            },
+            {
+                "matcher": "mcp",
+                "command": "sanctum hook pre-mcp"
             }
         ],
         "PostToolUse": [
@@ -156,7 +160,7 @@ mod tests {
         // Check PreToolUse
         let pre = hooks.get("PreToolUse").expect("should have PreToolUse");
         let pre_arr = pre.as_array().expect("PreToolUse should be array");
-        assert_eq!(pre_arr.len(), 3);
+        assert_eq!(pre_arr.len(), 4);
 
         // Bash hook
         assert_eq!(pre_arr[0]["matcher"], "Bash");
@@ -169,6 +173,10 @@ mod tests {
         // Read hook
         assert_eq!(pre_arr[2]["matcher"], "Read");
         assert_eq!(pre_arr[2]["command"], "sanctum hook pre-read");
+
+        // MCP hook
+        assert_eq!(pre_arr[3]["matcher"], "mcp");
+        assert_eq!(pre_arr[3]["command"], "sanctum hook pre-mcp");
 
         // Check PostToolUse
         let post = hooks.get("PostToolUse").expect("should have PostToolUse");
@@ -212,10 +220,11 @@ mod tests {
             .as_array()
             .expect("PreToolUse should be array");
 
-        assert_eq!(pre.len(), 3);
+        assert_eq!(pre.len(), 4);
         assert_eq!(pre[0]["command"], "sanctum hook pre-bash");
         assert_eq!(pre[1]["command"], "sanctum hook pre-write");
         assert_eq!(pre[2]["command"], "sanctum hook pre-read");
+        assert_eq!(pre[3]["command"], "sanctum hook pre-mcp");
 
         let post = hooks
             .get("PostToolUse")

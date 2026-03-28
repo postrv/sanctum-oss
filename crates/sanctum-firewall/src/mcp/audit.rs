@@ -82,6 +82,17 @@ impl McpAuditLog {
             .create(true)
             .append(true)
             .open(path)?;
+
+        // Set restrictive permissions (owner-only read/write) so that audit
+        // logs are not world-readable. The `let _ =` deliberately ignores
+        // errors (e.g. on non-Unix platforms where this is a no-op).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+
         for entry in &self.entries {
             // Serialisation of our well-known types should never fail, but we
             // handle the error gracefully rather than panicking.
@@ -186,6 +197,29 @@ mod tests {
             entry.reason.as_deref(),
             Some("path restriction violated")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_to_file_sets_restrictive_permissions() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut log = McpAuditLog::new();
+        log.record("tool_z", json!({"arg": 1}), HookDecision::Allow, None);
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("audit_perms.ndjson");
+
+        log.write_to_file(&path)?;
+
+        let metadata = std::fs::metadata(&path)?;
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "audit log file should have 0600 permissions, got {mode:o}"
+        );
+
+        Ok(())
     }
 
     #[test]

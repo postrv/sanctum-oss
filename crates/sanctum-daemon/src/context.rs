@@ -30,6 +30,7 @@ pub struct EventLoopContext<'a> {
     pub cred_rx: &'a mut tokio::sync::mpsc::Receiver<CredentialEvent>,
     pub net_rx: &'a mut tokio::sync::mpsc::Receiver<NetworkEvent>,
     pub sigterm: &'a mut tokio::signal::unix::Signal,
+    pub sigint: &'a mut tokio::signal::unix::Signal,
     pub sighup: &'a mut tokio::signal::unix::Signal,
     pub audit_path: &'a Path,
     pub ipc_semaphore: &'a Arc<Semaphore>,

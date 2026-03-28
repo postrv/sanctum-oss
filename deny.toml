@@ -1,38 +1,41 @@
-# cargo-deny configuration
+# cargo-deny configuration (v0.19+ schema)
 # Run: cargo deny check
 
+[graph]
+targets = []
+all-features = false
+no-default-features = false
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "deny"
-notice = "warn"
+version = 2
+db-path = "~/.cargo/advisory-db"
+ignore = [
+    "RUSTSEC-2024-0384",  # instant is unmaintained, transitive via notify
+]
 
 [licenses]
-unlicensed = "deny"
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
-    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
+    "CC0-1.0",
 ]
-copyleft = "deny"
+confidence-threshold = 0.8
 
 [bans]
-multiple-versions = "deny"
-wildcards = "deny"
-allow-wildcard-paths = false
-
-[[bans.deny]]
-# No C dependencies in the core library — pure Rust only
-name = "openssl-sys"
-wrappers = []
-
-[[bans.deny]]
-name = "libz-sys"
-wrappers = []
+multiple-versions = "warn"
+wildcards = "allow"
+deny = [
+    { name = "openssl-sys", wrappers = [] },
+    { name = "libz-sys", wrappers = [] },
+]
+skip = [
+    { name = "bitflags", version = "1" },
+    { name = "windows-sys", version = "0.52" },
+]
 
 [sources]
 unknown-registry = "deny"

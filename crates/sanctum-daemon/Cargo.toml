@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Sanctum background daemon — filesystem watching, IPC server, event processing"
 
 [[bin]]
@@ -14,10 +15,10 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-sanctum-types = { path = "../sanctum-types" }
-sanctum-sentinel = { path = "../sanctum-sentinel" }
-sanctum-notify = { path = "../sanctum-notify" }
-sanctum-budget = { path = "../sanctum-budget" }
+sanctum-types = { path = "../sanctum-types", version = "0.1.0" }
+sanctum-sentinel = { path = "../sanctum-sentinel", version = "0.1.0" }
+sanctum-notify = { path = "../sanctum-notify", version = "0.1.0" }
+sanctum-budget = { path = "../sanctum-budget", version = "0.1.0" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

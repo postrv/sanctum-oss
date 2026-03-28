@@ -3,6 +3,7 @@
 //! Extracted from `main.rs` to reduce its size and improve testability.
 //! Each handler receives a [`VerdictContext`] that bundles the common parameters.
 
+use std::io::Read;
 use std::path::Path;
 
 use sanctum_sentinel::pth::analyser::{analyse_pth_file_with_context, content_hash, FileAnalysis, FileVerdict};
@@ -16,13 +17,29 @@ use crate::context::VerdictContext;
 
 // ── Filesystem (.pth) event handling ────────────────────────────────────────
 
+/// Maximum size for a .pth file to be read for analysis (1 MB).
+const MAX_PTH_READ_SIZE: u64 = 1_048_576;
+
+/// Read a file with a bounded size limit, avoiding TOCTOU races.
+///
+/// Opens the file and reads up to `max_size + 1` bytes via `Read::take()`.
+/// Returns `Ok(None)` if the file exceeds `max_size` bytes, `Ok(Some(content))`
+/// on success, or `Err` on I/O failure.
+fn bounded_read_file(path: &Path, max_size: u64) -> Result<Option<String>, std::io::Error> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = file.take(max_size + 1);
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf)?;
+    if buf.len() as u64 > max_size {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
 /// Handle a filesystem watch event for a `.pth` file.
 ///
 /// Reads the file, analyses its content, traces process lineage, and dispatches
 /// to the appropriate verdict handler based on the analysis result.
-/// Maximum size for a .pth file to be read for analysis (1 MB).
-const MAX_PTH_READ_SIZE: u64 = 1_048_576;
-
 pub fn handle_watch_event(
     event: &WatchEvent,
     quarantine: &Quarantine,
@@ -33,27 +50,18 @@ pub fn handle_watch_event(
         WatchEventKind::Created | WatchEventKind::Modified => {
             tracing::info!(path = %event.path.display(), "detected .pth file change");
 
-            // Reject files larger than 1MB to prevent OOM from malicious large .pth files
-            match std::fs::metadata(&event.path) {
-                Ok(meta) if meta.len() > MAX_PTH_READ_SIZE => {
+            // Perform a single bounded read to avoid TOCTOU: instead of checking
+            // metadata then reading, we open the file and use `Read::take()` to
+            // limit the number of bytes consumed in one atomic operation.
+            let content = match bounded_read_file(&event.path, MAX_PTH_READ_SIZE) {
+                Ok(Some(c)) => c,
+                Ok(None) => {
                     tracing::warn!(
                         path = %event.path.display(),
-                        size = meta.len(),
                         "file too large to analyse (max {MAX_PTH_READ_SIZE} bytes)"
                     );
                     return;
                 }
-                Err(e) => {
-                    tracing::warn!(path = %event.path.display(), %e, "failed to read file metadata");
-                    return;
-                }
-                _ => {}
-            }
-
-            // Read the file content (use read + from_utf8_lossy so non-UTF-8
-            // bytes are replaced with U+FFFD rather than silently skipping the file)
-            let content = match std::fs::read(&event.path) {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(e) => {
                     tracing::warn!(path = %event.path.display(), %e, "failed to read file");
                     return;
@@ -481,8 +489,7 @@ fn trace_creator_lineage(
             let assessment = lineage.assess_pth_creation();
             let creator_exe = lineage
                 .root_ancestor()
-                .exe
-                .clone();
+                .and_then(|p| p.exe.clone());
             tracing::info!(
                 pid,
                 assessment = ?assessment,
@@ -498,5 +505,67 @@ fn trace_creator_lineage(
             );
             (Some(pid), None, LineageAssessment::Undetermined)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Helper: create a temp file with the given content and return (dir, path).
+    /// Returns `None` if file creation fails (test will be skipped).
+    fn create_temp_file(name: &str, data: &[u8]) -> Option<(tempfile::TempDir, std::path::PathBuf)> {
+        let dir = tempfile::tempdir().ok()?;
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).ok()?;
+        f.write_all(data).ok()?;
+        drop(f);
+        Some((dir, path))
+    }
+
+    #[test]
+    fn bounded_read_returns_content_for_small_file() {
+        let Some((_dir, path)) = create_temp_file("small.txt", b"hello world") else {
+            return;
+        };
+        let result = bounded_read_file(&path, 1024);
+        assert!(result.is_ok());
+        let inner = result.ok();
+        assert!(inner.is_some());
+        let content = inner.and_then(|o| o);
+        assert_eq!(content.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn bounded_read_returns_none_for_oversized_file() {
+        let Some((_dir, path)) = create_temp_file("big.txt", &[b'x'; 11]) else {
+            return;
+        };
+        // Limit is 10 bytes, file is 11 bytes — should return Ok(None)
+        let result = bounded_read_file(&path, 10);
+        assert!(result.is_ok());
+        let inner = result.ok();
+        // Ok(None) means file too large
+        assert_eq!(inner, Some(None));
+    }
+
+    #[test]
+    fn bounded_read_returns_content_at_exact_limit() {
+        let Some((_dir, path)) = create_temp_file("exact.txt", &[b'a'; 10]) else {
+            return;
+        };
+        // Limit is 10 bytes, file is exactly 10 bytes — should succeed
+        let result = bounded_read_file(&path, 10);
+        assert!(result.is_ok());
+        let content = result.ok().and_then(|o| o);
+        assert!(content.is_some());
+        assert_eq!(content.as_ref().map(String::len), Some(10));
+    }
+
+    #[test]
+    fn bounded_read_returns_error_for_nonexistent_file() {
+        let result = bounded_read_file(Path::new("/nonexistent/file.txt"), 1024);
+        assert!(result.is_err(), "expected error for nonexistent file");
     }
 }

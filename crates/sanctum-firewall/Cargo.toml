@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "AI firewall with credential redaction and hook handlers for Sanctum"
 
 [dependencies]
-sanctum-types = { path = "../sanctum-types" }
+sanctum-types = { path = "../sanctum-types", version = "0.1.0" }
 regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

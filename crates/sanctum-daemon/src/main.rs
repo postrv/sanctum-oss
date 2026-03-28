@@ -180,6 +180,15 @@ async fn run_daemon(
             return ExitCode::FAILURE;
         }
     };
+    let mut sigint = match tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::interrupt(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(%e, "failed to register SIGINT handler");
+            return ExitCode::FAILURE;
+        }
+    };
     let mut sighup = match tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::hangup(),
     ) {
@@ -207,6 +216,7 @@ async fn run_daemon(
         cred_rx: &mut cred_rx,
         net_rx: &mut net_rx,
         sigterm: &mut sigterm,
+        sigint: &mut sigint,
         sighup: &mut sighup,
         audit_path: &audit_path,
         ipc_semaphore: &ipc_semaphore,
@@ -359,6 +369,12 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
             // Handle SIGTERM (graceful shutdown)
             _ = ctx.sigterm.recv() => {
                 tracing::info!("received SIGTERM, shutting down");
+                break;
+            }
+
+            // Handle SIGINT (graceful shutdown)
+            _ = ctx.sigint.recv() => {
+                tracing::info!("received SIGINT, shutting down");
                 break;
             }
 
@@ -622,58 +638,78 @@ async fn handle_record_usage(
 // ============================================================
 
 /// Read threat events from the audit log, returning at most `max_events` most recent entries.
+///
+/// Uses `BufReader::lines()` to avoid loading the entire file into memory,
+/// preventing OOM on large audit logs.
 fn read_audit_events(paths: &WellKnownPaths, max_events: usize) -> Vec<sanctum_types::threat::ThreatEvent> {
+    use std::io::BufRead;
+
     let audit_path = paths.data_dir.join("audit.log");
-    let Ok(content) = std::fs::read_to_string(&audit_path) else {
+    let Ok(file) = std::fs::File::open(&audit_path) else {
         return Vec::new();
     };
-    let events: Vec<sanctum_types::threat::ThreatEvent> = content
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
+    let reader = std::io::BufReader::new(file);
+    let mut events = Vec::new();
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(%e, "error reading audit log line");
+                continue;
             }
-            match serde_json::from_str::<sanctum_types::threat::ThreatEvent>(line) {
-                Ok(event) => Some(event),
-                Err(e) => {
-                    tracing::warn!(%e, "skipping malformed audit log line");
-                    None
-                }
+        };
+        let trimmed = line.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<sanctum_types::threat::ThreatEvent>(&trimmed) {
+            Ok(event) => events.push(event),
+            Err(e) => {
+                tracing::warn!(%e, "skipping malformed audit log line");
             }
-        })
-        .collect();
+        }
+    }
     if events.len() > max_events {
-        events[events.len() - max_events..].to_vec()
+        events.split_off(events.len() - max_events)
     } else {
         events
     }
 }
 
 /// Read resolved threat IDs from the resolution log, bounded to `max_entries` most recent.
+///
+/// Uses `BufReader::lines()` to avoid loading the entire file into memory,
+/// preventing OOM on large resolution logs.
 fn read_resolved_ids(paths: &WellKnownPaths, max_entries: usize) -> std::collections::HashSet<String> {
+    use std::io::BufRead;
+
     let resolution_path = paths.data_dir.join("resolutions.log");
-    let Ok(content) = std::fs::read_to_string(&resolution_path) else {
+    let Ok(file) = std::fs::File::open(&resolution_path) else {
         return std::collections::HashSet::new();
     };
-    let resolutions: Vec<String> = content
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
+    let reader = std::io::BufReader::new(file);
+    let mut resolutions = Vec::new();
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(%e, "error reading resolution log line");
+                continue;
             }
-            match serde_json::from_str::<sanctum_types::threat::ThreatResolution>(line) {
-                Ok(r) => Some(r.threat_id),
-                Err(e) => {
-                    tracing::warn!(%e, "skipping malformed resolution log line");
-                    None
-                }
+        };
+        let trimmed = line.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<sanctum_types::threat::ThreatResolution>(&trimmed) {
+            Ok(r) => resolutions.push(r.threat_id),
+            Err(e) => {
+                tracing::warn!(%e, "skipping malformed resolution log line");
             }
-        })
-        .collect();
+        }
+    }
     if resolutions.len() > max_entries {
-        resolutions[resolutions.len() - max_entries..].iter().cloned().collect()
+        resolutions.split_off(resolutions.len() - max_entries).into_iter().collect()
     } else {
         resolutions.into_iter().collect()
     }

@@ -41,6 +41,13 @@ macro_rules! static_regex {
     };
 }
 
+// Matches OpenAI API keys: sk-proj-*, sk-svcacct-*, sk-<org>-* etc.
+// Does NOT use lookahead (unsupported by regex crate). Instead, the
+// PATTERNS array ordering ensures Anthropic's sk-ant-* is checked first
+// and wins for overlapping matches. SSH FIDO key types (sk-ecdsa-*,
+// sk-ed25519-*) are excluded by requiring the fourth character after
+// "sk-" to not be a known FIDO prefix via post-match filtering in
+// `redact_credentials`.
 static_regex!(OPENAI_RE, r"\bsk-[a-zA-Z0-9\-_]{20,}");
 static_regex!(ANTHROPIC_RE, r"\bsk-ant-[a-zA-Z0-9\-_]{20,}");
 static_regex!(GOOGLE_AI_RE, r"\bAIza[a-zA-Z0-9_\-]{35}\b");
@@ -86,7 +93,13 @@ static_regex!(NPM_TOKEN_RE, r"\bnpm_[a-zA-Z0-9]{36}\b");
 static_regex!(PYPI_TOKEN_RE, r"\bpypi-[A-Za-z0-9_\-]{16,}");
 static_regex!(DIGITALOCEAN_RE, r"\bdop_v1_[a-f0-9]{64}\b");
 static_regex!(DATADOG_RE, r"\bdd(?:api|app)_[a-z0-9]{32,}\b");
-static_regex!(AZURE_SAS_RE, r"\bsig=[A-Za-z0-9%+/=]{20,}");
+// Require Azure SAS context: sig= preceded by sv= (storage version) or
+// se= (signed expiry) within the same string, to avoid matching generic
+// signed URLs from other services.
+static_regex!(
+    AZURE_SAS_RE,
+    r"(?:sv=|se=|sp=)[^&]*&.*\bsig=[A-Za-z0-9%+/=]{20,}"
+);
 static_regex!(VERCEL_RE, r"\bvercel_[a-zA-Z0-9]{24,}\b");
 static_regex!(DOCKER_PAT_RE, r"\bdckr_pat_[a-zA-Z0-9\-_]{24,}");
 static_regex!(VAULT_TOKEN_RE, r"\bhvs\.[a-zA-Z0-9_\-]{24,}");
@@ -691,13 +704,14 @@ mod tests {
 
     #[test]
     fn azure_sas_matches_valid_token() {
-        let input = "sig=dGVzdHNpZ25hdHVyZXZhbHVl%2BMoreBase64Content";
+        // Now requires Azure SAS context (sv=, se=, or sp= before sig=)
+        let input = "sv=2021-06-08&sig=dGVzdHNpZ25hdHVyZXZhbHVl%2BMoreBase64Content";
         assert!(AZURE_SAS_RE.is_match(input));
     }
 
     #[test]
     fn azure_sas_rejects_short_sig() {
-        let input = "sig=short";
+        let input = "sv=2021-06-08&sig=short";
         assert!(!AZURE_SAS_RE.is_match(input));
     }
 
@@ -707,10 +721,16 @@ mod tests {
     }
 
     #[test]
+    fn azure_sas_rejects_bare_sig_without_context() {
+        // A bare sig= without Azure SAS context should NOT match
+        let input = "sig=dGVzdHNpZ25hdHVyZXZhbHVl%2BMoreBase64Content";
+        assert!(!AZURE_SAS_RE.is_match(input));
+    }
+
+    #[test]
     fn azure_sas_matches_url_encoded_token() {
         // Real SAS tokens in URLs have percent-encoding throughout.
-        // The pattern must not break at % characters.
-        let input = "sig=abc%2Bdef%2Bghi%2Bjkl%2Bmno%2Bpqr%2Bstu";
+        let input = "sv=2021-06-08&se=2024-01-01&sp=r&sig=abc%2Bdef%2Bghi%2Bjkl%2Bmno%2Bpqr%2Bstu";
         assert!(AZURE_SAS_RE.is_match(input));
     }
 

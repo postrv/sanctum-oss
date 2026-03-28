@@ -717,6 +717,7 @@ async fn handle_budget_status(shared_budget: &Arc<Mutex<BudgetTracker>>) -> IpcR
             daily_limit_cents: s.daily_limit_cents,
             alert_triggered: s.alert_triggered,
             session_exceeded: s.session_exceeded,
+            daily_exceeded: s.daily_exceeded,
         })
         .collect();
     IpcResponse::BudgetStatus { providers }

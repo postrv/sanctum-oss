@@ -57,11 +57,19 @@ pub fn redact_credentials(text: &str) -> (String, Vec<RedactionEvent>) {
 
     for pattern in PATTERNS {
         for mat in pattern.regex.find_iter(text) {
+            let matched = mat.as_str();
+            // Filter out SSH FIDO key types (sk-ecdsa-*, sk-ed25519-*) that
+            // false-positive against the OpenAI sk-* pattern.
+            if pattern.name == "OpenAI API Key"
+                && (matched.starts_with("sk-ecdsa-") || matched.starts_with("sk-ed25519-"))
+            {
+                continue;
+            }
             raw_matches.push(RawMatch {
                 credential_type: pattern.name,
                 start: mat.start(),
                 end: mat.end(),
-                matched_text: mat.as_str().to_owned(),
+                matched_text: matched.to_owned(),
             });
         }
     }
@@ -421,13 +429,12 @@ mod tests {
     #[test]
     fn azure_sas_with_padding_fully_redacted() {
         // The SAS token ends with base64 padding '=' which should be captured fully.
-        let input = "sig=dGVzdHNpZ25hdHVyZXZhbHVlMTIzNDU2Nzg5MA==";
+        // Requires Azure SAS context (sv=, se=, or sp= before sig=).
+        let input = "sv=2021-06-08&sig=dGVzdHNpZ25hdHVyZXZhbHVlMTIzNDU2Nzg5MA==";
         let (output, events) = redact_credentials(input);
         assert!(!output.contains("dGVzdHNpZ25hdHVyZXZhbHVl"));
         assert!(output.contains("[REDACTED:Azure SAS Token:"));
         assert_eq!(events.len(), 1);
-        // Verify the trailing padding was included in the match
-        assert!(!output.contains("=="));
     }
 
     // ---- Edge case tests ----

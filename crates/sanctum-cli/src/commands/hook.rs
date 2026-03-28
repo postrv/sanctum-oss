@@ -14,7 +14,7 @@ use sanctum_firewall::hooks::claude;
 use sanctum_firewall::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use sanctum_types::config::AiFirewallConfig;
 use sanctum_types::errors::CliError;
-use sanctum_types::ipc::IpcCommand;
+use sanctum_types::ipc::{IpcCommand, IpcMessage};
 use sanctum_types::threat::{Action, ThreatCategory, ThreatEvent, ThreatLevel};
 
 /// Return an `AiFirewallConfig` with all protections enabled.
@@ -250,8 +250,17 @@ fn send_usage_ipc_best_effort(command: &IpcCommand) {
     let _ = stream.set_write_timeout(timeout);
     let _ = stream.set_read_timeout(timeout);
 
-    // Serialize the command to JSON.
-    let Ok(payload) = serde_json::to_vec(command) else {
+    // Read auth token from data dir (best-effort).
+    let auth_token = sanctum_types::auth::read_token(&paths.data_dir).ok();
+
+    // Wrap command in an IpcMessage envelope with the auth token.
+    let message = IpcMessage {
+        command: command.clone(),
+        auth_token,
+    };
+
+    // Serialize the message to JSON.
+    let Ok(payload) = serde_json::to_vec(&message) else {
         return;
     };
 
@@ -848,5 +857,42 @@ mod tests {
         assert!(json.contains("\"model\":\"claude-sonnet-4-6\""));
         assert!(json.contains("\"input_tokens\":1000"));
         assert!(json.contains("\"output_tokens\":500"));
+    }
+
+    #[test]
+    fn ipc_message_wraps_command_with_auth_token() {
+        // Verify that IpcMessage correctly wraps an IpcCommand with an auth token
+        let cmd = IpcCommand::RecordUsage {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+        };
+        let msg = IpcMessage {
+            command: cmd,
+            auth_token: Some("test_token_abc".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        assert!(json.contains("\"auth_token\":\"test_token_abc\""));
+        assert!(json.contains("\"command\":\"RecordUsage\""));
+        assert!(json.contains("\"provider\":\"anthropic\""));
+    }
+
+    #[test]
+    fn ipc_message_without_token_omits_auth_field() {
+        let cmd = IpcCommand::RecordUsage {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            input_tokens: 10,
+            output_tokens: 5,
+        };
+        let msg = IpcMessage {
+            command: cmd,
+            auth_token: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        // auth_token should be omitted due to skip_serializing_if
+        assert!(!json.contains("auth_token"));
+        assert!(json.contains("\"command\":\"RecordUsage\""));
     }
 }

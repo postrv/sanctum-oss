@@ -469,6 +469,7 @@ mod tests {
                     daily_limit_cents: Some(20000),
                     alert_triggered: false,
                     session_exceeded: false,
+                    daily_exceeded: false,
                 },
                 ProviderBudgetInfo {
                     name: "Anthropic".to_string(),
@@ -478,6 +479,7 @@ mod tests {
                     daily_limit_cents: None,
                     alert_triggered: false,
                     session_exceeded: false,
+                    daily_exceeded: false,
                 },
             ],
         };
@@ -510,6 +512,7 @@ mod tests {
             daily_limit_cents: Some(50000),
             alert_triggered: true,
             session_exceeded: false,
+            daily_exceeded: false,
         };
         let json = serde_json::to_string(&info).expect("serialise");
         let roundtrip: ProviderBudgetInfo = serde_json::from_str(&json).expect("deserialise");
@@ -520,6 +523,7 @@ mod tests {
         assert_eq!(roundtrip.daily_limit_cents, Some(50000));
         assert!(roundtrip.alert_triggered);
         assert!(!roundtrip.session_exceeded);
+        assert!(!roundtrip.daily_exceeded);
     }
 
     // ---- Rate limiter tests ----

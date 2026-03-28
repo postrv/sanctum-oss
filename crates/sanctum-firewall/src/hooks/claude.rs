@@ -92,6 +92,11 @@ const SENSITIVE_READ_PATHS: &[&str] = &[
 ];
 
 /// Sensitive file name patterns that should never be read.
+///
+/// Note: `credentials.json` and `token.json` are NOT included here because
+/// they are too generic — many projects have non-secret files with these names.
+/// They are still blocked when under sensitive parent directories (e.g.,
+/// `~/.config/gcloud/`) via `SENSITIVE_READ_PATHS`.
 const SENSITIVE_READ_FILES: &[&str] = &[
     ".env",
     ".env.local",
@@ -102,8 +107,6 @@ const SENSITIVE_READ_FILES: &[&str] = &[
     ".pgpass",
     ".npmrc",
     ".pypirc",
-    "credentials.json",
-    "token.json",
     ".bash_history",
     ".zsh_history",
     ".node_repl_history",
@@ -206,6 +209,10 @@ const SENSITIVE_ENV_VARS: &[&str] = &[
 ];
 
 /// Credential file patterns that should not be read via cat/less/head.
+///
+/// These are matched via `matches_credential_pattern()` which applies
+/// word-boundary logic for short patterns like `.env` and `.netrc` to
+/// avoid false positives on `.envrc`, `.environment`, etc.
 const CREDENTIAL_FILE_PATTERNS: &[&str] = &[
     ".ssh/",
     "/.ssh ",
@@ -217,13 +224,76 @@ const CREDENTIAL_FILE_PATTERNS: &[&str] = &[
     ".netrc",
     ".pgpass",
     "credentials.json",
-    "service-account",
+    "service-account.json",
+    "service-account-key.json",
     "token.json",
     ".npmrc",
     ".pypirc",
     ".docker/config.json",
     ".kube/config",
 ];
+
+/// Patterns from `CREDENTIAL_FILE_PATTERNS` that need exact-filename matching
+/// rather than substring matching. These short names (`.env`, `.netrc`, etc.)
+/// must not match `.envrc`, `.environment`, `.netrc_backup`, etc.
+const EXACT_FILENAME_PATTERNS: &[&str] = &[".env", ".netrc", ".pgpass", ".npmrc", ".pypirc"];
+
+/// Check whether `command` contains a credential file pattern.
+///
+/// For patterns in `EXACT_FILENAME_PATTERNS` (`.env`, `.netrc`, etc.), this
+/// requires the pattern to appear as a complete filename — i.e., the character
+/// after the pattern (if any) must NOT be alphanumeric, `_`, or `-`, and the
+/// character before must be a path separator, space, tab, or start-of-string.
+///
+/// For all other patterns, plain substring matching is used.
+fn matches_credential_pattern(command: &str, pattern: &str) -> bool {
+    if EXACT_FILENAME_PATTERNS.contains(&pattern) {
+        // Exact filename matching: ".env" should not match ".envrc"
+        let mut start = 0;
+        while let Some(pos) = command[start..].find(pattern) {
+            let abs_pos = start + pos;
+            let after = abs_pos + pattern.len();
+            // Check character after the match
+            let after_ok = if after >= command.len() {
+                true
+            } else {
+                let next = command.as_bytes()[after];
+                // After .env, allow only: space, tab, quote, slash, newline,
+                // semicolon, pipe, etc. — NOT alphanumeric, underscore, or hyphen
+                // (which would indicate a longer filename like .envrc or .env_backup)
+                !next.is_ascii_alphanumeric() && next != b'_' && next != b'-'
+            };
+            // Check character before the match — must be a delimiter
+            let before_ok = if abs_pos == 0 {
+                true
+            } else {
+                let prev = command.as_bytes()[abs_pos - 1];
+                // The pattern starts with '.' so typically preceded by '/' or space.
+                // '@' covers curl data references like `-d @.env`.
+                // ':' covers git refs like `HEAD:.env`.
+                prev == b'/'
+                    || prev == b' '
+                    || prev == b'\t'
+                    || prev == b'"'
+                    || prev == b'\''
+                    || prev == b'='
+                    || prev == b'\n'
+                    || prev == b'<'
+                    || prev == b'('
+                    || prev == b'`'
+                    || prev == b'@'
+                    || prev == b':'
+            };
+            if after_ok && before_ok {
+                return true;
+            }
+            start = abs_pos + 1;
+        }
+        false
+    } else {
+        command.contains(pattern)
+    }
+}
 
 /// Commands that directly read file contents.
 const DIRECT_READ_COMMANDS: &[&str] = &[
@@ -268,6 +338,7 @@ const INDIRECT_READ_COMMANDS: &[&str] = &[
 ];
 
 /// Environment-dumping commands that unconditionally leak secrets.
+/// Matched via `command_invokes()` for word-boundary safety.
 const ENV_DUMP_COMMANDS: &[&str] = &["printenv"];
 
 /// Pipe-based env-grep patterns (the left-hand side of the pipe).
@@ -312,6 +383,9 @@ fn command_invokes(command: &str, word: &str) -> bool {
 /// D7 defence-in-depth credential path patterns. These are checked against
 /// every command regardless of the command name, catching bypasses such as
 /// aliased commands or custom scripts.
+///
+/// Short patterns like `/.env` use `matches_d7_path()` for word-boundary
+/// matching to avoid false positives on `.envrc`, `.environment`, etc.
 const D7_CREDENTIAL_PATHS: &[&str] = &[
     "/.ssh/id_rsa",
     "/.ssh/id_ed25519",
@@ -335,6 +409,34 @@ const D7_CREDENTIAL_PATHS: &[&str] = &[
     "/.aws/config",
 ];
 
+/// D7 patterns that require word-boundary matching to avoid false positives.
+const D7_EXACT_PATTERNS: &[&str] = &["/.env", "/.netrc", "/.pgpass", "/.npmrc", "/.pypirc"];
+
+/// Check whether `command` contains a D7 credential path.
+///
+/// For patterns in `D7_EXACT_PATTERNS`, requires the match to be followed by
+/// a non-word character (whitespace, quote, end-of-string, etc.) to prevent
+/// `/.env` from matching `/.envrc` or `/.environment`.
+fn matches_d7_path(command: &str, pattern: &str) -> bool {
+    if !D7_EXACT_PATTERNS.contains(&pattern) {
+        return command.contains(pattern);
+    }
+    let mut start = 0;
+    while let Some(pos) = command[start..].find(pattern) {
+        let abs_pos = start + pos;
+        let after = abs_pos + pattern.len();
+        if after >= command.len() {
+            return true;
+        }
+        let next = command.as_bytes()[after];
+        if !next.is_ascii_alphanumeric() && next != b'_' && next != b'-' {
+            return true;
+        }
+        start = abs_pos + 1;
+    }
+    false
+}
+
 /// Constructs known to enable indirect file access via eval, subshell, or
 /// source.
 const INDIRECT_ACCESS_CONSTRUCTS: &[&str] = &["eval ", "source ", "$(", "`", "exec "];
@@ -357,6 +459,9 @@ const SENSITIVE_WRITE_PATHS: &[&str] = &[
 
 /// Credential path indicators — substrings whose presence in a command
 /// alongside an indirect construct signals a bypass attempt.
+///
+/// Short patterns (`.env`, `.netrc`, etc.) use `matches_credential_pattern()`
+/// for word-boundary matching to avoid false positives on `.envrc` etc.
 const CREDENTIAL_PATH_INDICATORS: &[&str] = &[
     ".ssh/",
     "id_rsa",
@@ -374,7 +479,8 @@ const CREDENTIAL_PATH_INDICATORS: &[&str] = &[
     ".pgpass",
     ".docker/config.json",
     ".kube/config",
-    "service-account",
+    "service-account.json",
+    "service-account-key.json",
 ];
 
 /// Returns `true` if the command uses an indirect shell construct (`eval`,
@@ -388,7 +494,7 @@ fn has_indirect_credential_access(command: &str) -> bool {
     for construct in INDIRECT_ACCESS_CONSTRUCTS {
         if normalised.contains(construct) {
             for indicator in CREDENTIAL_PATH_INDICATORS {
-                if normalised.contains(indicator) {
+                if matches_credential_pattern(&normalised, indicator) {
                     return true;
                 }
             }
@@ -398,7 +504,7 @@ fn has_indirect_credential_access(command: &str) -> bool {
     // Also detect variable assignments containing credential paths followed
     // by variable expansion (e.g. "f=~/.ssh/id_rsa; cat $f")
     for indicator in CREDENTIAL_PATH_INDICATORS {
-        if normalised.contains(indicator) && normalised.contains('$') {
+        if matches_credential_pattern(&normalised, indicator) && normalised.contains('$') {
             // Look for assignment pattern: word=...indicator... ; ... $var
             if normalised.contains('=') && normalised.contains(';') {
                 return true;
@@ -426,7 +532,7 @@ fn is_credential_file_access(command: &str) -> bool {
         // Check both original (tab) and normalised (space) forms.
         if normalised.contains(&space_variant) || command_invokes(&normalised, cmd) {
             for pattern in CREDENTIAL_FILE_PATTERNS {
-                if normalised.contains(pattern) {
+                if matches_credential_pattern(&normalised, pattern) {
                     return true;
                 }
             }
@@ -438,7 +544,7 @@ fn is_credential_file_access(command: &str) -> bool {
         let space_variant = format!("{cmd} ");
         if normalised.contains(&space_variant) || command_invokes(&normalised, cmd) {
             for pattern in CREDENTIAL_FILE_PATTERNS {
-                if normalised.contains(pattern) {
+                if matches_credential_pattern(&normalised, pattern) {
                     return true;
                 }
             }
@@ -448,10 +554,18 @@ fn is_credential_file_access(command: &str) -> bool {
     // 3. Shell input redirection targeting credential files: "cat<.env",
     //    "cmd < .env", etc.
     for pattern in CREDENTIAL_FILE_PATTERNS {
-        // "<.env" or "< .env"
+        // "<.env" or "< .env" — use matches_credential_pattern for exact
+        // filename patterns, otherwise plain contains for path-based patterns.
         let redir_no_space = format!("<{pattern}");
         let redir_space = format!("< {pattern}");
-        if normalised.contains(&redir_no_space) || normalised.contains(&redir_space) {
+        if EXACT_FILENAME_PATTERNS.contains(pattern) {
+            // For exact patterns, check with word-boundary after redirect
+            if matches_credential_pattern(&normalised, &redir_no_space)
+                || matches_credential_pattern(&normalised, &redir_space)
+            {
+                return true;
+            }
+        } else if normalised.contains(&redir_no_space) || normalised.contains(&redir_space) {
             return true;
         }
     }
@@ -465,17 +579,106 @@ fn is_credential_file_access(command: &str) -> bool {
     false
 }
 
+/// Returns `true` if the command uses an inline scripting language to access
+/// environment variables containing sensitive names.
+///
+/// Catches patterns like:
+/// - `python3 -c "import os; print(os.environ['AWS_SECRET_ACCESS_KEY'])"`
+/// - `node -e "console.log(process.env.API_KEY)"`
+/// - `ruby -e "puts ENV['SECRET_KEY']"`
+fn is_script_env_access(normalised: &str) -> bool {
+    // Python: os.environ, os.getenv
+    let has_python = normalised.contains("python3 -c")
+        || normalised.contains("python -c")
+        || normalised.contains("python3 -c")
+        || normalised.contains("python -c");
+    if has_python && (normalised.contains("os.environ") || normalised.contains("os.getenv")) {
+        for var in SENSITIVE_ENV_VARS {
+            if normalised.contains(var) {
+                return true;
+            }
+        }
+    }
+
+    // Node.js: process.env
+    let has_node = normalised.contains("node -e")
+        || normalised.contains("node --eval")
+        || normalised.contains("deno eval");
+    if has_node && normalised.contains("process.env") {
+        for var in SENSITIVE_ENV_VARS {
+            if normalised.contains(var) {
+                return true;
+            }
+        }
+    }
+
+    // Ruby: ENV[]
+    let has_ruby = normalised.contains("ruby -e") || normalised.contains("ruby --eval");
+    if has_ruby && normalised.contains("ENV[") {
+        for var in SENSITIVE_ENV_VARS {
+            if normalised.contains(var) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Returns `true` if the command contains a bare `set` command (no arguments),
+/// which in bash/zsh dumps all shell variables and functions including secrets.
+///
+/// `set -e`, `set -x`, `set VAR=val` etc. are NOT env dumps and are allowed.
+fn is_bare_set_command(normalised: &str) -> bool {
+    let trimmed = normalised.trim();
+    // Exact match: the entire command is just "set"
+    if trimmed == "set" {
+        return true;
+    }
+    // "set" piped directly: "set | grep" (dumps everything into a pipe)
+    if trimmed == "set|" || trimmed.starts_with("set |") || trimmed.starts_with("set|") {
+        return true;
+    }
+    // After a separator: "; set", "&& set", "|| set", "\nset"
+    let separators: &[&str] = &["; ", ";\t", ";\n", ";", "&& ", "|| ", "\n"];
+    for sep in separators {
+        let needle = format!("{sep}set");
+        if let Some(pos) = normalised.find(&needle) {
+            let after = pos + needle.len();
+            // Must be at end-of-string or followed by pipe/semicolon/newline
+            // (NOT space, because "set -e" after separator is fine)
+            if after >= normalised.len() {
+                return true;
+            }
+            let next = normalised.as_bytes()[after];
+            if next == b'|' || next == b';' || next == b'\n' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Returns `true` if `command` dumps environment variables in a way that could
 /// leak secrets — `printenv`, `env | grep`, `set | grep`, `export | grep`, or
 /// `printf` referencing sensitive env vars.
 fn is_env_dump(command: &str) -> bool {
     let normalised = command.replace('\t', " ");
 
-    // Unconditional env-dump commands (e.g. printenv).
+    // Unconditional env-dump commands (e.g. printenv, bare set).
+    // Use command_invokes() for word-boundary matching so that
+    // "go test -run TestPrintenvHandler" doesn't false-positive.
     for cmd in ENV_DUMP_COMMANDS {
-        if normalised.contains(cmd) {
+        if command_invokes(&normalised, cmd) {
             return true;
         }
+    }
+
+    // Bare `set` (no arguments) dumps all shell variables and functions.
+    // We only block `set` with no args — `set -e`, `set -x`, `set VAR=val`
+    // are legitimate and must be allowed.
+    if is_bare_set_command(&normalised) {
+        return true;
     }
 
     // Check for bare `env` command (dumps all environment variables)
@@ -565,6 +768,7 @@ fn is_env_dump(command: &str) -> bool {
 /// - **WARN**: `pip install`; `curl` with POST method.
 /// - **ALLOW**: Everything else.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn pre_bash(input: &HookInput) -> HookOutput {
     if let Some(ref cfg) = input.config {
         if !cfg.claude_hooks {
@@ -584,7 +788,7 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
         // Find the first matching pattern for the message.
         let normalised = command.replace('\t', " ");
         for pattern in CREDENTIAL_FILE_PATTERNS {
-            if normalised.contains(pattern) {
+            if matches_credential_pattern(&normalised, pattern) {
                 return HookOutput::block(format!(
                     "Blocked: reading credential file matching '{pattern}' is not permitted"
                 ));
@@ -605,6 +809,16 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
                 ));
             }
         }
+    }
+
+    // Check for env var exfiltration via scripting language inline commands.
+    // Catches: python3 -c "import os; print(os.environ['SECRET'])"
+    //          node -e "console.log(process.env.SECRET)"
+    //          ruby -e "puts ENV['SECRET']"
+    if is_script_env_access(&normalised) {
+        return HookOutput::block(
+            "Blocked: inline script accessing environment variables may leak secrets".to_owned(),
+        );
     }
 
     // Check for environment-dumping commands.
@@ -632,7 +846,7 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
             || normalised.contains(" --data-raw @");
         if has_file_upload {
             for pattern in CREDENTIAL_FILE_PATTERNS {
-                if normalised.contains(pattern) {
+                if matches_credential_pattern(&normalised, pattern) {
                     return HookOutput::block(format!(
                         "Blocked: curl file upload targeting credential file matching '{pattern}'"
                     ));
@@ -682,7 +896,7 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
     // credential file paths regardless of the command name. This catches
     // bypasses like `alias c=cat; c ~/.ssh/id_rsa` or custom scripts.
     for path in D7_CREDENTIAL_PATHS {
-        if normalised.contains(path) {
+        if matches_d7_path(&normalised, path) {
             return HookOutput::block(format!(
                 "Blocked: command references sensitive credential path '{path}'"
             ));
@@ -690,6 +904,50 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
     }
 
     HookOutput::allow()
+}
+
+/// Maximum recursion depth for scanning JSON values for credentials.
+const MAX_CREDENTIAL_SCAN_DEPTH: usize = 8;
+
+/// Recursively collect credential types from all string values in a JSON value.
+///
+/// Scans `content`, `new_string`, `old_string`, and any nested structures
+/// including `operations` arrays in `MultiEdit` format. Skips non-content keys
+/// like `file_path`, `path`, `command` to avoid false positives.
+fn collect_credential_types(value: &serde_json::Value, out: &mut Vec<String>, depth: usize) {
+    if depth > MAX_CREDENTIAL_SCAN_DEPTH {
+        return;
+    }
+    match value {
+        serde_json::Value::String(s) => {
+            if !s.is_empty() {
+                let (_, events) = redact_credentials(s);
+                for event in &events {
+                    let ctype = event.credential_type.as_str().to_owned();
+                    if !out.contains(&ctype) {
+                        out.push(ctype);
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                collect_credential_types(item, out, depth + 1);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // Skip keys that aren't content fields to avoid scanning file
+            // paths and command names as credential values.
+            const SKIP_KEYS: &[&str] = &["file_path", "path", "command", "tool_name"];
+            for (key, val) in map {
+                if SKIP_KEYS.contains(&key.as_str()) {
+                    continue;
+                }
+                collect_credential_types(val, out, depth + 1);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Evaluate a pre-write hook.
@@ -734,44 +992,22 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
         );
     }
 
-    // Check file content for credentials
-    let content = input
-        .tool_input
-        .get("content")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-
+    // Recursively scan ALL string values in the tool input for credentials.
+    // This catches content, new_string, old_string, AND nested operations
+    // arrays in MultiEdit format (operations: [{old_string, new_string}, ...]).
+    //
     // Credential scanning is unconditional — defense-in-depth.
     // The `redact_credentials` config field is intentionally NOT consulted here;
     // pre_bash credential blocking is already unconditional, and config hardening
     // forces the flag to true anyway.
-    if !content.is_empty() {
-        let (_, events) = redact_credentials(content);
-        if !events.is_empty() {
-            let types: Vec<&str> = events.iter().map(|e| e.credential_type.as_str()).collect();
+    {
+        let mut credential_types = Vec::new();
+        collect_credential_types(&input.tool_input, &mut credential_types, 0);
+        if !credential_types.is_empty() {
             return HookOutput::block(format!(
                 "Blocked: file content contains detected credentials: {}",
-                types.join(", ")
+                credential_types.join(", ")
             ));
-        }
-    }
-
-    // Also scan Edit/MultiEdit fields (old_string, new_string)
-    for field in &["new_string", "old_string"] {
-        let field_content = input
-            .tool_input
-            .get(*field)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        if !field_content.is_empty() {
-            let (_, events) = redact_credentials(field_content);
-            if !events.is_empty() {
-                let types: Vec<&str> = events.iter().map(|e| e.credential_type.as_str()).collect();
-                return HookOutput::block(format!(
-                    "Blocked: file content contains detected credentials: {}",
-                    types.join(", ")
-                ));
-            }
         }
     }
 
@@ -2378,18 +2614,32 @@ mod tests {
     }
 
     #[test]
-    fn pre_read_blocks_credentials_json() {
+    fn pre_read_allows_generic_credentials_json() {
+        // Generic credentials.json in project dirs is allowed (too many
+        // false positives). Sensitive paths like ~/.config/gcloud/ are
+        // still blocked via SENSITIVE_READ_PATHS.
         let input = make_input(
             "read",
             json!({ "file_path": "/home/user/credentials.json" }),
         );
         let output = pre_read(&input);
-        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(output.decision, HookDecision::Allow);
     }
 
     #[test]
-    fn pre_read_blocks_token_json() {
+    fn pre_read_allows_generic_token_json() {
         let input = make_input("read", json!({ "file_path": "/home/user/token.json" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_read_still_blocks_gcloud_credentials() {
+        // credentials.json under ~/.config/gcloud/ is still blocked
+        let input = make_input(
+            "read",
+            json!({ "file_path": "/home/user/.config/gcloud/credentials.json" }),
+        );
         let output = pre_read(&input);
         assert_eq!(output.decision, HookDecision::Block);
     }
@@ -3473,5 +3723,240 @@ mod tests {
         assert_eq!(infer_provider("unknown"), "unknown");
         assert_eq!(infer_provider("custom-model"), "unknown");
         assert_eq!(infer_provider("llama-3-70b"), "unknown");
+    }
+
+    // ---- False positive prevention: .env vs .envrc ----
+
+    #[test]
+    fn pre_bash_allows_cat_envrc() {
+        let output = pre_bash(&bash_input("cat .envrc"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_allows_grep_envrc() {
+        let output = pre_bash(&bash_input("grep TODO .envrc"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_allows_cp_envrc() {
+        let output = pre_bash(&bash_input("cp .envrc .envrc.bak"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_allows_ls_environment_dir() {
+        let output = pre_bash(&bash_input("ls .environment/"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_still_blocks_cat_dot_env() {
+        let output = pre_bash(&bash_input("cat .env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_still_blocks_cat_env_local() {
+        let output = pre_bash(&bash_input("cat .env.local"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_allows_envrc() {
+        let input = make_input("read", json!({ "file_path": "/project/.envrc" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_read_allows_environment_dir_file() {
+        let input = make_input(
+            "read",
+            json!({ "file_path": "/project/.environment/config.yaml" }),
+        );
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_read_still_blocks_dot_env() {
+        let input = make_input("read", json!({ "file_path": "/project/.env" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn d7_allows_envrc_path() {
+        // D7 defense-in-depth should NOT block .envrc references
+        let output = pre_bash(&bash_input("my-script /.envrc"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn d7_still_blocks_env_path() {
+        let output = pre_bash(&bash_input("my-script /.env"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- False positive prevention: printenv substring ----
+
+    #[test]
+    fn pre_bash_allows_go_test_printenv() {
+        // "printenv" as a substring in a Go test name should NOT trigger
+        let output = pre_bash(&bash_input("go test -run TestPrintenvHandler"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_still_blocks_bare_printenv() {
+        let output = pre_bash(&bash_input("printenv"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_still_blocks_piped_printenv() {
+        let output = pre_bash(&bash_input("printenv | grep SECRET"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- Bare set command detection ----
+
+    #[test]
+    fn pre_bash_blocks_bare_set() {
+        let output = pre_bash(&bash_input("set"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_set_piped() {
+        let output = pre_bash(&bash_input("set | grep SECRET"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_set_after_separator() {
+        let output = pre_bash(&bash_input("echo foo; set"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_allows_set_dash_e() {
+        let output = pre_bash(&bash_input("set -e"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_allows_set_dash_x() {
+        let output = pre_bash(&bash_input("set -x"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_allows_set_o_pipefail() {
+        let output = pre_bash(&bash_input("set -o pipefail"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_allows_set_dash_e_after_separator() {
+        let output = pre_bash(&bash_input("echo foo; set -e"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- Script env access detection ----
+
+    #[test]
+    fn pre_bash_blocks_python_os_environ() {
+        let output = pre_bash(&bash_input(
+            r#"python3 -c "import os; print(os.environ['AWS_SECRET_ACCESS_KEY'])""#,
+        ));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_node_process_env() {
+        let output = pre_bash(&bash_input(r#"node -e "console.log(process.env.API_KEY)""#));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_ruby_env_access() {
+        let output = pre_bash(&bash_input(r#"ruby -e "puts ENV['SECRET_KEY']""#));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_allows_python_without_sensitive_var() {
+        let output = pre_bash(&bash_input(
+            r#"python3 -c "import os; print(os.environ['HOME'])""#,
+        ));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- MultiEdit operations array credential scanning ----
+
+    #[test]
+    fn pre_write_blocks_credentials_in_multiedit_operations() {
+        let input = make_input(
+            "MultiEdit",
+            json!({
+                "file_path": "config.py",
+                "operations": [
+                    {
+                        "old_string": "placeholder",
+                        "new_string": "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    }
+                ]
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_allows_clean_multiedit_operations() {
+        let input = make_input(
+            "MultiEdit",
+            json!({
+                "file_path": "config.py",
+                "operations": [
+                    {
+                        "old_string": "old_value",
+                        "new_string": "new_value"
+                    }
+                ]
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- Service account pattern tightened ----
+
+    #[test]
+    fn pre_bash_allows_grep_service_account_yaml() {
+        // Generic "service-account" in k8s YAML should not trigger
+        let output = pre_bash(&bash_input("grep service-account deployment.yaml"));
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_blocks_cat_service_account_json() {
+        let output = pre_bash(&bash_input("cat service-account.json"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- SSH FIDO key false positive prevention ----
+
+    #[test]
+    fn ssh_fido_key_not_detected_as_openai() {
+        let ssh_key = "sk-ecdsa-sha2-nistp256@openssh.com AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY=";
+        let (_, events) = redact_credentials(ssh_key);
+        assert!(
+            !events.iter().any(|e| e.credential_type == "OpenAI API Key"),
+            "SSH FIDO key should not be detected as OpenAI API key"
+        );
     }
 }

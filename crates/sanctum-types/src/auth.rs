@@ -82,6 +82,7 @@ pub fn write_token(data_dir: &Path, token: &str) -> io::Result<PathBuf> {
             .write(true)
             .create_new(true)
             .mode(0o400)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
             .open(&token_path)?;
 
         file.write_all(token.as_bytes())?;
@@ -137,6 +138,9 @@ pub fn remove_token(data_dir: &Path) {
 /// constant-time comparison to prevent timing attacks.
 #[must_use]
 pub fn validate_token(expected: &str, provided: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
     if expected.len() != provided.len() {
         return false;
     }
@@ -252,10 +256,49 @@ mod tests {
     #[test]
     fn validate_token_rejects_empty_strings() {
         assert!(
-            validate_token("", ""),
-            "two empty strings technically match"
+            !validate_token("", ""),
+            "empty expected token must always be rejected"
         );
         assert!(!validate_token("abc", ""));
         assert!(!validate_token("", "abc"));
+    }
+
+    #[test]
+    fn validate_token_rejects_empty_expected_with_nonempty_provided() {
+        // Even if provided is also empty, empty expected must reject
+        assert!(!validate_token("", "x"));
+        assert!(!validate_token("", "anything"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_token_rejects_symlink_target() {
+        // write_token uses O_NOFOLLOW + create_new, so writing through a
+        // symlink should fail.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_file = dir.path().join("real_file");
+        std::fs::write(&real_file, "old").expect("write real file");
+
+        // Create a subdirectory to act as data_dir, with auth_token as a symlink
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let link_path = data_dir.join(AUTH_TOKEN_FILENAME);
+        std::os::unix::fs::symlink(&real_file, &link_path).expect("symlink");
+
+        let token = generate_token().expect("generate token");
+        // write_token removes the existing file first, then creates with
+        // O_NOFOLLOW + create_new — this should succeed because the symlink
+        // is removed before re-creation. The key protection is that if the
+        // symlink reappears (TOCTOU), O_NOFOLLOW prevents following it.
+        // For this test, we verify the write succeeds and the result is a
+        // regular file, not a symlink.
+        let result = write_token(&data_dir, &token);
+        assert!(result.is_ok());
+
+        let metadata = std::fs::symlink_metadata(&link_path).expect("metadata");
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "token file must not be a symlink"
+        );
     }
 }

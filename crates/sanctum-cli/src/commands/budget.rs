@@ -240,6 +240,7 @@ mod tests {
                 daily_limit_cents: Some(20000),
                 alert_triggered: false,
                 session_exceeded: false,
+                daily_exceeded: false,
             },
             ProviderBudgetInfo {
                 name: "Anthropic".to_string(),
@@ -249,6 +250,7 @@ mod tests {
                 daily_limit_cents: Some(100_000),
                 alert_triggered: false,
                 session_exceeded: false,
+                daily_exceeded: false,
             },
         ];
         // Just verify it doesn't panic
@@ -265,6 +267,7 @@ mod tests {
             daily_limit_cents: Some(20000),
             alert_triggered: false,
             session_exceeded: false,
+            daily_exceeded: false,
         }];
         let summary = format_budget_summary(&providers);
         assert!(summary.contains("$1.00"));
@@ -281,6 +284,7 @@ mod tests {
             daily_limit_cents: Some(20000),
             alert_triggered: true,
             session_exceeded: true,
+            daily_exceeded: false,
         }];
         let summary = format_budget_summary(&providers);
         assert!(summary.contains("EXCEEDED"));
@@ -296,6 +300,7 @@ mod tests {
             daily_limit_cents: Some(20000),
             alert_triggered: true,
             session_exceeded: false,
+            daily_exceeded: false,
         }];
         let summary = format_budget_summary(&providers);
         assert!(summary.contains("WARNING"));

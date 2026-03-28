@@ -70,7 +70,7 @@ impl IpcCommand {
     /// authentication via an IPC auth token.
     ///
     /// Read-only / informational commands (`Status`, `ListQuarantine`,
-    /// `BudgetStatus`, `ListThreats`, `GetThreatDetails`, `RecordUsage`)
+    /// `BudgetStatus`, `ListThreats`, `GetThreatDetails`)
     /// do not require authentication.
     #[must_use]
     pub const fn requires_auth(&self) -> bool {
@@ -84,6 +84,7 @@ impl IpcCommand {
                 | Self::BudgetExtend { .. }
                 | Self::BudgetReset
                 | Self::ResolveThreat { .. }
+                | Self::RecordUsage { .. }
         )
     }
 }
@@ -162,6 +163,7 @@ pub struct ProviderBudgetInfo {
     pub daily_limit_cents: Option<u64>,
     pub alert_triggered: bool,
     pub session_exceeded: bool,
+    pub daily_exceeded: bool,
 }
 
 /// Summary of a threat for listing.
@@ -454,8 +456,8 @@ mod tests {
     }
 
     #[test]
-    fn record_usage_does_not_require_auth() {
-        assert!(!IpcCommand::RecordUsage {
+    fn record_usage_requires_auth() {
+        assert!(IpcCommand::RecordUsage {
             provider: "anthropic".to_string(),
             model: "claude".to_string(),
             input_tokens: 100,
@@ -553,5 +555,45 @@ mod tests {
             }
             other => panic!("expected ThreatDetails, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn provider_budget_info_daily_exceeded_roundtrips() {
+        let info = ProviderBudgetInfo {
+            name: "TestProvider".to_string(),
+            session_spent_cents: 100,
+            session_limit_cents: Some(500),
+            daily_spent_cents: 2000,
+            daily_limit_cents: Some(1000),
+            alert_triggered: true,
+            session_exceeded: false,
+            daily_exceeded: true,
+        };
+        let json = serde_json::to_string(&info).expect("serialise");
+        assert!(json.contains("\"daily_exceeded\":true"));
+        let roundtrip: ProviderBudgetInfo = serde_json::from_str(&json).expect("deserialise");
+        assert!(roundtrip.daily_exceeded);
+        assert!(!roundtrip.session_exceeded);
+    }
+
+    #[test]
+    fn ipc_message_with_record_usage_and_auth_token_roundtrips() {
+        let msg = IpcMessage {
+            command: IpcCommand::RecordUsage {
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 1000,
+                output_tokens: 500,
+            },
+            auth_token: Some("token123".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        assert!(json.contains("auth_token"));
+        assert!(json.contains("token123"));
+        assert!(json.contains("RecordUsage"));
+
+        let roundtrip: IpcMessage = serde_json::from_str(&json).expect("deserialise");
+        assert!(matches!(roundtrip.command, IpcCommand::RecordUsage { .. }));
+        assert_eq!(roundtrip.auth_token.unwrap(), "token123");
     }
 }

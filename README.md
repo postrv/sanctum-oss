@@ -69,8 +69,8 @@ sanctum fix list          # List unresolved threats (--category, --level, --json
 sanctum fix resolve <id>  # Remediate a specific threat (--action restore|delete|dismiss)
 sanctum fix all --yes     # Batch-remediate all unresolved threats
 sanctum hook <action>     # Claude Code hook handler (pre-bash, pre-write, etc.)
-sanctum hooks install     # Install Claude Code hooks
-sanctum hooks remove      # Remove Claude Code hooks
+sanctum hooks install claude  # Install Claude Code hooks
+sanctum hooks remove claude  # Remove Claude Code hooks
 sanctum daemon start      # Start the daemon
 sanctum daemon stop       # Stop the daemon
 sanctum daemon restart    # Restart the daemon
@@ -148,17 +148,17 @@ cargo build --release
 
 ## Architecture
 
-A workspace of 8 crates (~19,000 lines of Rust):
+A workspace of 8 crates (~26,400 lines of Rust):
 
 | Crate | Purpose |
 |-------|---------|
-| `sanctum-cli` | CLI interface (12 commands, clap) |
+| `sanctum-cli` | CLI interface (13 commands, clap) |
 | `sanctum-daemon` | Background daemon, IPC server (14 commands), event loop |
 | `sanctum-sentinel` | `.pth` monitoring, quarantine, credential watching, network anomaly detection |
 | `sanctum-firewall` | Credential redaction (37 patterns), entropy analysis, MCP policy engine |
 | `sanctum-budget` | Spend tracking, 3 provider parsers, budget enforcement |
 | `sanctum-proxy` | HTTP budget proxy foundation (provider identification) |
-| `sanctum-types` | Shared types, config schema (10 structs), threat model (6 categories) |
+| `sanctum-types` | Shared types, config schema (12 structs), threat model (6 categories) |
 | `sanctum-notify` | Cross-platform desktop notifications |
 
 ## Security
@@ -175,7 +175,7 @@ Key guarantees:
 - **Zero `unsafe` code** in the entire codebase (denied by workspace lint)
 - **No panics on any input** (`unwrap` and `expect` are denied by clippy)
 - **All dependencies audited** and version-pinned (193 deps, 0 known CVEs)
-- **974 tests**, 0 clippy warnings (pedantic + nursery)
+- **1,085 tests**, 0 clippy warnings (pedantic + nursery)
 - **8 Kani bounded model checking proofs** with CI enforcement
 - **2 fuzz targets** for security-critical parsers
 - **9 property-based tests** verifying core invariants

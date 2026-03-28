@@ -130,15 +130,18 @@ impl McpPolicy {
     }
 }
 
-/// Built-in sensitive directory segments that are always restricted for MCP tools.
+/// Built-in sensitive directory names that are always restricted for MCP tools.
 ///
-/// If any of these appear as a path component, the path is blocked.
+/// Matched as path segments — both `/.ssh/` (within path) and paths ending
+/// with `/.ssh` (the directory itself) are blocked.
 const BUILTIN_SENSITIVE_DIRS: &[&str] = &[
-    "/.ssh/",
-    "/.aws/",
-    "/.gnupg/",
-    "/.config/gcloud/",
-    "/.config/gh/",
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".config/gcloud",
+    ".config/gh",
+    ".config/op",
+    ".age",
 ];
 
 /// Built-in sensitive filename suffixes / exact names that are always restricted.
@@ -147,6 +150,11 @@ const BUILTIN_SENSITIVE_FILENAMES: &[&str] = &[
     "/.npmrc",
     "/.pypirc",
     "/.docker/config.json",
+    "/.netrc",
+    "/.pgpass",
+    "/.my.cnf",
+    "/.vault-token",
+    "/.terraform.d/credentials.tfrc.json",
 ];
 
 /// Check whether a path matches any built-in sensitive restriction.
@@ -155,35 +163,55 @@ const BUILTIN_SENSITIVE_FILENAMES: &[&str] = &[
 /// reliability. This is strictly more conservative than glob matching —
 /// it blocks more paths, which is the safe direction for security.
 fn matches_builtin_restriction(path: &str) -> bool {
-    // Check directory segments (e.g., "/.ssh/" anywhere in the path)
+    // Normalise to lowercase for case-insensitive matching. On macOS (APFS/HFS+),
+    // the filesystem is case-insensitive, so /.SSH/ and /.ssh/ resolve to the
+    // same directory. We must block both.
+    let path_lower = path.to_lowercase();
+
+    // Check directory segments. Match both "/.ssh/" (within path) and
+    // paths ending with "/.ssh" (the directory itself, no trailing slash).
     for dir in BUILTIN_SENSITIVE_DIRS {
-        if path.contains(dir) {
+        let with_trailing = format!("/{dir}/");
+        let as_suffix = format!("/{dir}");
+        if path_lower.contains(&with_trailing) || path_lower.ends_with(&as_suffix) {
             return true;
         }
     }
 
-    // Check exact filename matches
+    // Check exact filename matches (case-insensitive)
     for name in BUILTIN_SENSITIVE_FILENAMES {
-        if path.ends_with(name) {
+        if path_lower.ends_with(name) {
             return true;
         }
     }
 
     // Check .env files: must match exactly "/.env" or "/.env." followed by variant
-    // but NOT "/.envrc" or other non-dotenv files
-    if let Some(filename) = path.rsplit('/').next() {
-        if filename == ".env" || filename.starts_with(".env.") {
+    // but NOT "/.envrc" or other non-dotenv files.
+    // Also handle bare filenames and .env-backup / .env_old variants.
+    if let Some(filename) = path_lower.rsplit('/').next() {
+        if filename == ".env"
+            || filename.starts_with(".env.")
+            || filename.starts_with(".env-")
+            || filename.starts_with(".env_")
+        {
             return true;
         }
     }
-
-    // Check .pth files and sitecustomize/usercustomize.
-    // Case-sensitive is correct: Python uses exactly ".pth", not ".PTH".
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
-    if path.ends_with(".pth") {
+    // Handle bare ".env" with no path separator
+    if path_lower == ".env"
+        || path_lower.starts_with(".env.")
+        || path_lower.starts_with(".env-")
+        || path_lower.starts_with(".env_")
+    {
         return true;
     }
-    if let Some(filename) = path.rsplit('/').next() {
+
+    // Check .pth files (already lowercased, so this catches .PTH too)
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    if path_lower.ends_with(".pth") {
+        return true;
+    }
+    if let Some(filename) = path_lower.rsplit('/').next() {
         if filename == "sitecustomize.py" || filename == "usercustomize.py" {
             return true;
         }
@@ -682,6 +710,55 @@ mod tests {
     }
 
     #[test]
+    fn builtin_blocks_ssh_directory_no_trailing_slash() {
+        // Path to the directory itself (no trailing slash) should be blocked
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.ssh"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".ssh directory path without trailing slash should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_netrc() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.netrc"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_blocks_pgpass() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.pgpass"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_blocks_vault_token() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.vault-token"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
     fn builtin_does_not_match_env_in_middle_of_filename() {
         // ".env" should only match the exact filename, not substrings like ".envrc"
         let policy = McpPolicy::from_config(vec![]);
@@ -694,6 +771,58 @@ mod tests {
             decision,
             HookDecision::Allow,
             ".envrc should not be blocked by .env pattern"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_case_variations_on_macos() {
+        // macOS APFS/HFS+ is case-insensitive. .SSH must be blocked.
+        let policy = McpPolicy::from_config(vec![]);
+        for path in &[
+            "/home/user/.SSH/id_rsa",
+            "/home/user/.Ssh/config",
+            "/home/user/.AWS/credentials",
+            "/home/user/.GNUPG/secring.gpg",
+        ] {
+            let decision =
+                policy.evaluate("read_file", &json!({"path": path}), McpDefaultPolicy::Allow);
+            assert_eq!(
+                decision,
+                HookDecision::Block,
+                "case variation {path} should be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_blocks_env_backup_variants() {
+        let policy = McpPolicy::from_config(vec![]);
+        for filename in &[".env-backup", ".env_old", ".env-production-bak"] {
+            let decision = policy.evaluate(
+                "read_file",
+                &json!({"path": format!("/app/{filename}")}),
+                McpDefaultPolicy::Allow,
+            );
+            assert_eq!(
+                decision,
+                HookDecision::Block,
+                "{filename} should be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_blocks_uppercase_pth() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/usr/lib/python3/evil.PTH"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".PTH (uppercase) should be blocked on case-insensitive filesystems"
         );
     }
 

@@ -539,7 +539,7 @@ async fn handle_ipc_command(
             input_tokens,
             output_tokens,
         } => {
-            let audit_path = paths.log_dir.join("audit.log");
+            let audit_path = paths.data_dir.join("audit.log");
             handle_record_usage(
                 &shared_budget,
                 &provider,
@@ -736,38 +736,43 @@ async fn handle_record_usage(
 
     let status = shared_budget.lock().await.record_usage(&usage);
 
-    // Emit BudgetOverrun threat event when a limit is exceeded
-    if status.session_exceeded || status.daily_exceeded {
-        let exceeded_type = if status.session_exceeded {
-            "session"
-        } else {
-            "daily"
-        };
-        let limit = if status.session_exceeded {
-            status.session_limit_cents.unwrap_or(0)
-        } else {
-            status.daily_limit_cents.unwrap_or(0)
-        };
-        let spent = if status.session_exceeded {
-            status.session_spent_cents
-        } else {
-            status.daily_spent_cents
-        };
+    // Emit BudgetOverrun threat events for each exceeded limit.
+    // Session and daily are checked independently so both can be recorded.
+    for (exceeded, exceeded_type, limit, spent) in [
+        (
+            status.session_exceeded,
+            "session",
+            status.session_limit_cents.unwrap_or(0),
+            status.session_spent_cents,
+        ),
+        (
+            status.daily_exceeded,
+            "daily",
+            status.daily_limit_cents.unwrap_or(0),
+            status.daily_spent_cents,
+        ),
+    ] {
+        if exceeded {
+            let event = sanctum_types::threat::ThreatEvent {
+                timestamp: chrono::Utc::now(),
+                level: sanctum_types::threat::ThreatLevel::Critical,
+                category: sanctum_types::threat::ThreatCategory::BudgetOverrun,
+                description: format!(
+                    "{provider} {exceeded_type} budget exceeded: {spent}c spent, {limit}c limit (model: {model})"
+                ),
+                source_path: std::path::PathBuf::from(format!("budget:{provider}")),
+                creator_pid: None,
+                creator_exe: None,
+                action_taken: sanctum_types::threat::Action::Blocked,
+            };
 
-        let event = sanctum_types::threat::ThreatEvent {
-            timestamp: chrono::Utc::now(),
-            level: sanctum_types::threat::ThreatLevel::Critical,
-            category: sanctum_types::threat::ThreatCategory::BudgetOverrun,
-            description: format!(
-                "{provider} {exceeded_type} budget exceeded: {spent}c spent, {limit}c limit (model: {model})"
-            ),
-            source_path: std::path::PathBuf::from(format!("budget:{provider}")),
-            creator_pid: None,
-            creator_exe: None,
-            action_taken: sanctum_types::threat::Action::Blocked,
-        };
-
-        audit::append_audit_event(&event, audit_path);
+            // Offload blocking file I/O to a dedicated thread to avoid
+            // stalling the tokio event loop (matches other audit write sites).
+            let audit = audit_path.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                audit::append_audit_event(&event, &audit);
+            });
+        }
     }
 
     IpcResponse::Ok {
@@ -1391,6 +1396,10 @@ mod tests {
             }
             other => panic!("expected Ok, got {other:?}"),
         }
+
+        // Wait for spawn_blocking audit write to complete
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Verify BudgetOverrun event was written to audit log
         assert!(audit_path.exists(), "audit log should be created");

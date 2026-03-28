@@ -128,7 +128,9 @@ fn append_audit_event_inner(event: &ThreatEvent, audit_path: &Path) -> Result<()
     let json = serde_json::to_string(event).map_err(std::io::Error::other)?;
 
     writeln!(file, "{json}")?;
-    file.sync_all()?;
+    // sync_data() flushes file data without metadata (faster than sync_all).
+    // This is called from the hook path where latency matters.
+    file.sync_data()?;
     Ok(())
 }
 

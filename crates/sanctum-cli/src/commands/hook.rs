@@ -27,7 +27,9 @@ const fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
         claude_hooks: true,
         mcp_audit: true,
         mcp_rules: Vec::new(),
-        default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+        // Fail-closed: when config parsing fails, block unmatched MCP tools
+        // rather than silently allowing them.
+        default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
     }
 }
 
@@ -149,7 +151,17 @@ fn extract_source_path(input: &HookInput, action: &str) -> PathBuf {
             .map_or_else(
                 || PathBuf::from("<unknown>"),
                 |c| {
-                    let truncated = if c.len() > 200 { &c[..200] } else { c };
+                    // Use char boundary-safe truncation to avoid panicking
+                    // on multi-byte UTF-8 sequences.
+                    let truncated = if c.len() > 200 {
+                        let mut end = 200;
+                        while end > 0 && !c.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        &c[..end]
+                    } else {
+                        c
+                    };
                     PathBuf::from(format!("bash:{truncated}"))
                 },
             ),
@@ -195,7 +207,9 @@ fn record_hook_threat_event(
     };
 
     let paths = sanctum_types::paths::WellKnownPaths::default();
-    let audit_path = paths.log_dir.join("audit.log");
+    // Must use data_dir (not log_dir) to match where the daemon and CLI
+    // read audit events from. log_dir is data_dir/logs — the wrong path.
+    let audit_path = paths.data_dir.join("audit.log");
 
     // Best-effort: swallow all errors. Audit logging must not affect
     // the hook's allow/block decision.
@@ -233,6 +247,10 @@ fn send_usage_ipc_best_effort(command: &IpcCommand) {
     };
 
     // Write length-prefixed frame: 4 bytes big-endian length + JSON payload.
+    // Guard against payloads exceeding MAX_MESSAGE_SIZE (64KB) or u32::MAX.
+    if payload.len() > sanctum_types::ipc::MAX_MESSAGE_SIZE {
+        return;
+    }
     #[allow(clippy::cast_possible_truncation)]
     let len = payload.len() as u32;
     if stream.write_all(&len.to_be_bytes()).is_err() {
@@ -560,6 +578,20 @@ mod tests {
         let path_str = path.to_string_lossy();
         assert!(path_str.starts_with("bash:"));
         assert!(path_str.len() <= 205 + 5); // 200 chars + "bash:" prefix
+    }
+
+    #[test]
+    fn extract_source_path_pre_bash_utf8_safe() {
+        // Multi-byte UTF-8 characters must not cause a panic when truncating.
+        // Each emoji is 4 bytes — 51 emojis = 204 bytes, which triggers truncation.
+        let emoji_cmd = "\u{1F600}".repeat(51);
+        let input = make_input("bash", json!({ "command": emoji_cmd }));
+        // Should not panic — truncation must respect char boundaries
+        let path = extract_source_path(&input, "pre-bash");
+        let path_str = path.to_string_lossy();
+        assert!(path_str.starts_with("bash:"));
+        // Verify the result is valid UTF-8 (no panic in to_string_lossy)
+        assert!(path_str.len() > 5);
     }
 
     #[test]

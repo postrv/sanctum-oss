@@ -21,7 +21,10 @@ fn create_and_quarantine(
     quarantine: &Quarantine,
     name: &str,
     content: &str,
-) -> (std::path::PathBuf, sanctum_sentinel::pth::quarantine::QuarantineEntry) {
+) -> (
+    std::path::PathBuf,
+    sanctum_sentinel::pth::quarantine::QuarantineEntry,
+) {
     let pth_path = dir.join(name);
     fs::write(&pth_path, content).expect("write");
 
@@ -45,18 +48,16 @@ fn e2e_quarantine_review_approve() {
     let (dir, quarantine) = setup_quarantine();
     let original_content = "import base64;exec(base64.b64decode('evil'))";
 
-    let (pth_path, entry) = create_and_quarantine(
-        dir.path(),
-        &quarantine,
-        "evil.pth",
-        original_content,
-    );
+    let (pth_path, entry) =
+        create_and_quarantine(dir.path(), &quarantine, "evil.pth", original_content);
 
     // Verify file is quarantined (original is empty stub)
     assert_eq!(fs::read_to_string(&pth_path).expect("read"), "");
 
     // Simulate "sanctum review" → approve (restore)
-    quarantine.restore(&entry.id).expect("restore should succeed");
+    quarantine
+        .restore(&entry.id)
+        .expect("restore should succeed");
 
     // Verify file is restored to original location with original content
     let restored = fs::read_to_string(&pth_path).expect("read restored");
@@ -78,12 +79,8 @@ fn e2e_quarantine_review_delete() {
     let (dir, quarantine) = setup_quarantine();
     let malicious_content = "exec(compile(open('/tmp/evil.py').read(), '', 'exec'))";
 
-    let (pth_path, entry) = create_and_quarantine(
-        dir.path(),
-        &quarantine,
-        "evil.pth",
-        malicious_content,
-    );
+    let (pth_path, entry) =
+        create_and_quarantine(dir.path(), &quarantine, "evil.pth", malicious_content);
 
     // Verify file is quarantined
     assert_eq!(fs::read_to_string(&pth_path).expect("read"), "");
@@ -146,21 +143,16 @@ fn e2e_quarantine_preserves_metadata() {
     let (dir, quarantine) = setup_quarantine();
     let content = "import subprocess; subprocess.run(['rm', '-rf', '/'])";
 
-    let (_, entry) = create_and_quarantine(
-        dir.path(),
-        &quarantine,
-        "rm_all.pth",
-        content,
-    );
+    let (_, entry) = create_and_quarantine(dir.path(), &quarantine, "rm_all.pth", content);
 
     // List and verify metadata is preserved
     let entries = quarantine.list().expect("list");
-    let found = entries.iter().find(|e| e.id == entry.id).expect("should find entry");
+    let found = entries
+        .iter()
+        .find(|e| e.id == entry.id)
+        .expect("should find entry");
 
-    assert_eq!(
-        found.metadata.original_path,
-        entry.metadata.original_path
-    );
+    assert_eq!(found.metadata.original_path, entry.metadata.original_path);
     assert_eq!(found.metadata.content_hash, entry.metadata.content_hash);
     assert_eq!(found.metadata.reason, "test quarantine");
 }
@@ -178,12 +170,7 @@ fn e2e_quarantine_roundtrip_preserves_content_exactly() {
     ];
 
     for (name, content) in &test_cases {
-        let (pth_path, entry) = create_and_quarantine(
-            dir.path(),
-            &quarantine,
-            name,
-            content,
-        );
+        let (pth_path, entry) = create_and_quarantine(dir.path(), &quarantine, name, content);
 
         // Verify original is now empty stub
         assert_eq!(

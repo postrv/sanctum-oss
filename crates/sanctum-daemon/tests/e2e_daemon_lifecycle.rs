@@ -59,10 +59,7 @@ fn e2e_daemon_stale_pid_detection() {
     );
 
     // Stale PID file should be cleaned up
-    assert!(
-        !pid_file.exists(),
-        "stale PID file should be removed"
-    );
+    assert!(!pid_file.exists(), "stale PID file should be removed");
 }
 
 #[test]
@@ -83,10 +80,7 @@ fn e2e_daemon_corrupt_pid_file() {
     );
 
     // Corrupt file should be cleaned up
-    assert!(
-        !pid_file.exists(),
-        "corrupt PID file should be removed"
-    );
+    assert!(!pid_file.exists(), "corrupt PID file should be removed");
 }
 
 #[test]
@@ -176,7 +170,11 @@ fn e2e_concurrent_quarantine_operations() {
 
     // Verify remaining entries
     let remaining = quarantine.list().expect("list");
-    assert_eq!(remaining.len(), 2, "should have 2 remaining entries after 2 restores + 1 delete");
+    assert_eq!(
+        remaining.len(),
+        2,
+        "should have 2 remaining entries after 2 restores + 1 delete"
+    );
 }
 
 /// Find a PID that is not currently running.
@@ -185,12 +183,7 @@ fn find_unused_pid() -> u32 {
     for pid in (50000..99999_i32).rev() {
         #[cfg(unix)]
         {
-            if nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
-                None,
-            )
-            .is_err()
-            {
+            if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
                 #[allow(clippy::cast_sign_loss)]
                 return pid as u32;
             }
@@ -220,9 +213,7 @@ mod sanctum_daemon_test_helpers {
             Self { pid_file }
         }
 
-        pub fn check_existing(
-            &self,
-        ) -> Result<Option<u32>, Box<dyn std::error::Error>> {
+        pub fn check_existing(&self) -> Result<Option<u32>, Box<dyn std::error::Error>> {
             if !self.pid_file.exists() {
                 return Ok(None);
             }
@@ -241,9 +232,7 @@ mod sanctum_daemon_test_helpers {
             }
         }
 
-        pub fn write_pid_file(
-            &self,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        pub fn write_pid_file(&self) -> Result<(), Box<dyn std::error::Error>> {
             let pid = std::process::id();
             if let Some(parent) = self.pid_file.parent() {
                 fs::create_dir_all(parent)?;
@@ -262,12 +251,10 @@ mod sanctum_daemon_test_helpers {
     fn is_process_running(pid: u32) -> bool {
         #[cfg(unix)]
         {
-            let Ok(raw_pid) = i32::try_from(pid) else { return false };
-            nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(raw_pid),
-                None,
-            )
-            .is_ok()
+            let Ok(raw_pid) = i32::try_from(pid) else {
+                return false;
+            };
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw_pid), None).is_ok()
         }
         #[cfg(not(unix))]
         {

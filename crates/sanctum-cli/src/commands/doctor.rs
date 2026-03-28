@@ -100,9 +100,7 @@ pub fn run() -> Result<(), CliError> {
             println!("  {} {}: {}", check.label(), check.name, check.detail());
         }
         println!();
-        println!(
-            "Summary: {pass_count} pass, {warn_count} warn, {fail_count} fail"
-        );
+        println!("Summary: {pass_count} pass, {warn_count} warn, {fail_count} fail");
     }
 
     Ok(())
@@ -110,10 +108,7 @@ pub fn run() -> Result<(), CliError> {
 
 /// Check whether the `sanctum` binary is on `PATH`.
 fn check_sanctum_binary() -> CheckResult {
-    match std::process::Command::new("which")
-        .arg("sanctum")
-        .output()
-    {
+    match std::process::Command::new("which").arg("sanctum").output() {
         Ok(output) if output.status.success() => {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             CheckResult::Pass(path)
@@ -208,10 +203,7 @@ fn check_python() -> CheckResult {
 
 /// Check whether `nono` sandbox is available.
 fn check_nono() -> CheckResult {
-    match std::process::Command::new("which")
-        .arg("nono")
-        .output()
-    {
+    match std::process::Command::new("which").arg("nono").output() {
         Ok(output) if output.status.success() => {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             CheckResult::Pass(path)
@@ -279,11 +271,7 @@ mod tests {
     fn check_config_with_valid_tempdir_config() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let config_file = dir.path().join("config.toml");
-        std::fs::write(
-            &config_file,
-            "[sentinel]\nwatch_pth = true\n",
-        )
-        .expect("write config");
+        std::fs::write(&config_file, "[sentinel]\nwatch_pth = true\n").expect("write config");
 
         let paths = WellKnownPaths {
             ssh_dir: dir.path().join(".ssh"),

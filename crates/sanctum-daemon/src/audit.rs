@@ -55,10 +55,7 @@ fn maybe_rotate(audit_path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn append_audit_event_inner(
-    event: &ThreatEvent,
-    audit_path: &Path,
-) -> Result<(), std::io::Error> {
+fn append_audit_event_inner(event: &ThreatEvent, audit_path: &Path) -> Result<(), std::io::Error> {
     // Ensure parent directory exists with secure permissions
     if let Some(parent) = audit_path.parent() {
         // Create parent directories (grandparents etc.) first
@@ -98,8 +95,7 @@ fn append_audit_event_inner(
     }
 
     // Serialize as single JSON line
-    let json = serde_json::to_string(event)
-        .map_err(std::io::Error::other)?;
+    let json = serde_json::to_string(event).map_err(std::io::Error::other)?;
 
     writeln!(file, "{json}")?;
     file.sync_all()?;
@@ -136,8 +132,7 @@ mod tests {
         append_audit_event(&event, &log_path);
 
         let content = std::fs::read_to_string(&log_path).expect("read audit log");
-        let parsed: ThreatEvent =
-            serde_json::from_str(content.trim()).expect("parse NDJSON line");
+        let parsed: ThreatEvent = serde_json::from_str(content.trim()).expect("parse NDJSON line");
 
         assert_eq!(parsed.level, ThreatLevel::Critical);
         assert_eq!(parsed.category, ThreatCategory::PthInjection);
@@ -166,10 +161,8 @@ mod tests {
 
         assert_eq!(lines.len(), 2);
 
-        let parsed1: ThreatEvent =
-            serde_json::from_str(&lines[0]).expect("parse first line");
-        let parsed2: ThreatEvent =
-            serde_json::from_str(&lines[1]).expect("parse second line");
+        let parsed1: ThreatEvent = serde_json::from_str(&lines[0]).expect("parse first line");
+        let parsed2: ThreatEvent = serde_json::from_str(&lines[1]).expect("parse second line");
 
         assert_eq!(parsed1.level, ThreatLevel::Critical);
         assert_eq!(parsed2.level, ThreatLevel::Warning);
@@ -220,16 +213,20 @@ mod tests {
 
         // The old large file should now be at .1
         assert!(rotated_path.exists(), "rotated file should exist");
-        let rotated_size = std::fs::metadata(&rotated_path).expect("rotated metadata").len();
-        assert!(rotated_size >= MAX_AUDIT_LOG_BYTES, "rotated file should contain the old data");
+        let rotated_size = std::fs::metadata(&rotated_path)
+            .expect("rotated metadata")
+            .len();
+        assert!(
+            rotated_size >= MAX_AUDIT_LOG_BYTES,
+            "rotated file should contain the old data"
+        );
 
         // The new audit.log should contain only the freshly appended event
         assert!(log_path.exists(), "new audit log should exist");
         let new_content = std::fs::read_to_string(&log_path).expect("read new audit log");
         let lines: Vec<&str> = new_content.lines().collect();
         assert_eq!(lines.len(), 1, "new audit log should have exactly 1 line");
-        let parsed: ThreatEvent =
-            serde_json::from_str(lines[0]).expect("parse new audit entry");
+        let parsed: ThreatEvent = serde_json::from_str(lines[0]).expect("parse new audit entry");
         assert_eq!(parsed.description, "test threat");
     }
 
@@ -275,7 +272,10 @@ mod tests {
         append_audit_event(&event, &log_path);
 
         // Should NOT trigger rotation
-        assert!(!rotated_path.exists(), "no rotation should occur for small files");
+        assert!(
+            !rotated_path.exists(),
+            "no rotation should occur for small files"
+        );
 
         // Original file should still have the event
         let content = std::fs::read_to_string(&log_path).expect("read audit log");
@@ -292,8 +292,7 @@ mod tests {
 
         assert!(log_path.exists(), "audit log should be created");
         let content = std::fs::read_to_string(&log_path).expect("read audit log");
-        let parsed: ThreatEvent =
-            serde_json::from_str(content.trim()).expect("parse NDJSON line");
+        let parsed: ThreatEvent = serde_json::from_str(content.trim()).expect("parse NDJSON line");
         assert_eq!(parsed.level, ThreatLevel::Critical);
     }
 }

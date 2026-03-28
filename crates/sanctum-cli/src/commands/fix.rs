@@ -6,37 +6,26 @@ use crate::ipc_client::{self, IpcCommand, IpcResponse, ThreatListItem};
 use crate::FixAction;
 
 /// Run the fix command.
-pub fn run(
-    action: Option<&FixAction>,
-    json: bool,
-    yes: bool,
-) -> Result<(), CliError> {
+pub fn run(action: Option<&FixAction>, json: bool, yes: bool) -> Result<(), CliError> {
     match action {
         None | Some(FixAction::List { .. }) => {
             // Extract filters from action if it's List
             let (category, level) = match action {
-                Some(FixAction::List { category, level }) => {
-                    (category.clone(), level.clone())
-                }
+                Some(FixAction::List { category, level }) => (category.clone(), level.clone()),
                 _ => (None, None),
             };
             run_list(category, level, json)
         }
-        Some(FixAction::Resolve { id, action: resolve_action }) => {
-            run_resolve(id, resolve_action.as_deref(), yes)
-        }
-        Some(FixAction::All { category }) => {
-            run_all(category.as_deref(), yes)
-        }
+        Some(FixAction::Resolve {
+            id,
+            action: resolve_action,
+        }) => run_resolve(id, resolve_action.as_deref(), yes),
+        Some(FixAction::All { category }) => run_all(category.as_deref(), yes),
     }
 }
 
 /// List unresolved threats from the daemon.
-fn run_list(
-    category: Option<String>,
-    level: Option<String>,
-    json: bool,
-) -> Result<(), CliError> {
+fn run_list(category: Option<String>, level: Option<String>, json: bool) -> Result<(), CliError> {
     let command = IpcCommand::ListThreats { category, level };
     let response = ipc_client::send_command(&command)?;
 
@@ -52,8 +41,8 @@ fn run_list(
 
             if json {
                 for threat in &threats {
-                    let json_str = serde_json::to_string(threat)
-                        .unwrap_or_else(|_| "{}".to_string());
+                    let json_str =
+                        serde_json::to_string(threat).unwrap_or_else(|_| "{}".to_string());
                     #[allow(clippy::print_stdout)]
                     {
                         println!("{json_str}");

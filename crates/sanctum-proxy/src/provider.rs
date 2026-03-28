@@ -81,10 +81,7 @@ mod tests {
 
     #[test]
     fn identify_known_providers() {
-        assert_eq!(
-            identify_provider("api.openai.com"),
-            Some(Provider::OpenAi)
-        );
+        assert_eq!(identify_provider("api.openai.com"), Some(Provider::OpenAi));
         assert_eq!(
             identify_provider("api.anthropic.com"),
             Some(Provider::Anthropic)

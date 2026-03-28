@@ -494,8 +494,9 @@ mod tests {
         tracker.record_usage(&usage);
 
         // Simulate a day boundary by pushing daily_start to yesterday
-        if let Some(yesterday) =
-            tracker.daily_start.checked_sub_signed(chrono::Duration::days(1))
+        if let Some(yesterday) = tracker
+            .daily_start
+            .checked_sub_signed(chrono::Duration::days(1))
         {
             tracker.daily_start = yesterday;
         }
@@ -522,8 +523,7 @@ mod tests {
         let mut tracker = BudgetTracker::new(&test_config());
 
         let openai_usage = make_usage(Provider::OpenAI, "gpt-4o", 1_000_000, 0);
-        let anthropic_usage =
-            make_usage(Provider::Anthropic, "claude-sonnet-4-6", 1_000_000, 0);
+        let anthropic_usage = make_usage(Provider::Anthropic, "claude-sonnet-4-6", 1_000_000, 0);
 
         tracker.record_usage(&openai_usage);
         tracker.record_usage(&anthropic_usage);
@@ -606,7 +606,9 @@ mod tests {
 
         let metadata = std::fs::metadata(&path);
         assert!(metadata.is_ok());
-        let mode = metadata.map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+        let mode = metadata
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0);
         assert_eq!(mode, 0o600, "budget file should have 0o600 permissions");
     }
 
@@ -724,7 +726,8 @@ mod tests {
 
         // The final file must exist and be valid JSON
         let data = std::fs::read_to_string(&path).expect("read saved file");
-        let _: serde_json::Value = serde_json::from_str(&data).expect("saved file must be valid JSON");
+        let _: serde_json::Value =
+            serde_json::from_str(&data).expect("saved file must be valid JSON");
 
         // No .tmp residue should remain
         let tmp_path = path.with_extension("tmp");

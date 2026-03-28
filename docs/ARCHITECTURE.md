@@ -144,7 +144,7 @@
 
 **Rationale**:
 - `panic!()` is denied by workspace lints; `abort()` respects the lint constraint
-- All 22 patterns are compile-time string literals — the error branch is unreachable
+- All 37 patterns are compile-time string literals — the error branch is unreachable
 - `abort()` is semantically correct for a "this should never happen" invariant violation
 - The `#[allow]` annotation is scoped to the single `eprintln!` call, not the entire function
 

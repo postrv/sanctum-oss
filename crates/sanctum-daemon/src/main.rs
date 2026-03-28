@@ -28,7 +28,9 @@ mod event_handler;
 mod ipc;
 
 use context::EventLoopContext;
-use ipc::{IpcCommand, IpcResponse, IpcServer, ProviderBudgetInfo, QuarantineListItem, ThreatListItem};
+use ipc::{
+    IpcCommand, IpcResponse, IpcServer, ProviderBudgetInfo, QuarantineListItem, ThreatListItem,
+};
 
 fn main() -> ExitCode {
     // Initialise tracing subscriber
@@ -100,9 +102,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let exit = runtime.block_on(async move {
-        run_daemon(shared_config, paths, manager).await
-    });
+    let exit = runtime.block_on(async move { run_daemon(shared_config, paths, manager).await });
 
     tracing::info!("sanctum-daemon exiting");
     exit
@@ -168,27 +168,23 @@ async fn run_daemon(
     };
 
     // Register signal handlers
-    let mut sigterm = match tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    ) {
+    let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(%e, "failed to register SIGTERM handler");
             return ExitCode::FAILURE;
         }
     };
-    let mut sigint = match tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::interrupt(),
-    ) {
+    let mut sigint = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(%e, "failed to register SIGINT handler");
             return ExitCode::FAILURE;
         }
     };
-    let mut sighup = match tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::hangup(),
-    ) {
+    let mut sighup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(%e, "failed to register SIGHUP handler");
@@ -244,7 +240,10 @@ async fn start_pth_watcher(
         if discovered.is_empty() {
             tracing::warn!("no Python site-packages directories found");
         } else {
-            tracing::info!(count = discovered.len(), "discovered site-packages directories");
+            tracing::info!(
+                count = discovered.len(),
+                "discovered site-packages directories"
+            );
         }
         discovered
     } else {
@@ -274,12 +273,20 @@ async fn start_pth_watcher(
 /// Start the credential file watcher if configured.
 async fn start_credential_watcher(
     shared_config: &Arc<RwLock<SanctumConfig>>,
-) -> (Option<CredentialWatcher>, tokio::sync::mpsc::Receiver<CredentialEvent>) {
+) -> (
+    Option<CredentialWatcher>,
+    tokio::sync::mpsc::Receiver<CredentialEvent>,
+) {
     let (cred_tx, cred_rx) = tokio::sync::mpsc::channel::<CredentialEvent>(256);
 
     let cred_watcher = if shared_config.read().await.sentinel.watch_credentials {
         let cred_paths = sanctum_types::paths::credential_paths();
-        let custom_cred_allowlist = shared_config.read().await.sentinel.credential_allowlist.clone();
+        let custom_cred_allowlist = shared_config
+            .read()
+            .await
+            .sentinel
+            .credential_allowlist
+            .clone();
         if cred_paths.is_empty() {
             tracing::warn!("no credential paths found to watch");
             None
@@ -411,13 +418,18 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
 
             // Periodic budget state persistence (every 5 minutes)
             _ = ctx.budget_save_interval.tick() => {
-                save_budget_state(ctx.shared_budget, ctx.data_dir, ctx.budget_state_path).await;
+                let budget = Arc::clone(ctx.shared_budget);
+                let data_dir = ctx.data_dir.to_path_buf();
+                let state_path = ctx.budget_state_path.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    save_budget_state_blocking(&budget, &data_dir, &state_path);
+                });
             }
         }
     }
 }
 
-/// Save budget tracker state to disk on shutdown.
+/// Save budget tracker state to disk on shutdown (async context, called once at exit).
 async fn save_budget_state(
     shared_budget: &Arc<Mutex<BudgetTracker>>,
     data_dir: &Path,
@@ -429,6 +441,29 @@ async fn save_budget_state(
         let save_result = shared_budget.lock().await.save_to_file(budget_state_path);
         if let Err(e) = save_result {
             tracing::error!(%e, "failed to save budget state on shutdown");
+        } else {
+            tracing::info!("budget state saved");
+        }
+    }
+}
+
+/// Save budget tracker state to disk from a blocking (non-async) context.
+///
+/// Uses `blocking_lock()` instead of `.lock().await` so it can run inside
+/// `spawn_blocking` without an async runtime on the current thread.
+fn save_budget_state_blocking(
+    shared_budget: &Arc<Mutex<BudgetTracker>>,
+    data_dir: &Path,
+    budget_state_path: &Path,
+) {
+    if let Err(e) = std::fs::create_dir_all(data_dir) {
+        tracing::error!(%e, "failed to create data directory for budget state");
+    } else {
+        let save_result = shared_budget
+            .blocking_lock()
+            .save_to_file(budget_state_path);
+        if let Err(e) = save_result {
+            tracing::error!(%e, "failed to save budget state");
         } else {
             tracing::info!("budget state saved");
         }
@@ -485,9 +520,10 @@ async fn handle_ipc_command(
             }
         }
         IpcCommand::BudgetStatus => handle_budget_status(&shared_budget).await,
-        IpcCommand::BudgetSet { session_cents, daily_cents } => {
-            handle_budget_set(&shared_budget, session_cents, daily_cents).await
-        }
+        IpcCommand::BudgetSet {
+            session_cents,
+            daily_cents,
+        } => handle_budget_set(&shared_budget, session_cents, daily_cents).await,
         IpcCommand::BudgetExtend { additional_cents } => {
             handle_budget_extend(&shared_budget, additional_cents).await
         }
@@ -503,8 +539,14 @@ async fn handle_ipc_command(
             input_tokens,
             output_tokens,
         } => {
-            handle_record_usage(&shared_budget, &provider, &model, input_tokens, output_tokens)
-                .await
+            handle_record_usage(
+                &shared_budget,
+                &provider,
+                &model,
+                input_tokens,
+                output_tokens,
+            )
+            .await
         }
         IpcCommand::ListThreats { category, level } => {
             let paths_clone = paths.clone();
@@ -512,7 +554,9 @@ async fn handle_ipc_command(
             let lvl = level.clone();
             match tokio::task::spawn_blocking(move || {
                 handle_list_threats(&paths_clone, cat.as_deref(), lvl.as_deref())
-            }).await {
+            })
+            .await
+            {
                 Ok(resp) => resp,
                 Err(e) => IpcResponse::Error {
                     message: format!("task failed: {e}"),
@@ -525,7 +569,9 @@ async fn handle_ipc_command(
             match tokio::task::spawn_blocking(move || {
                 let quarantine = quarantine_arc.blocking_lock();
                 handle_get_threat_details(&paths_clone, &quarantine, &id)
-            }).await {
+            })
+            .await
+            {
                 Ok(resp) => resp,
                 Err(e) => IpcResponse::Error {
                     message: format!("task failed: {e}"),
@@ -538,7 +584,9 @@ async fn handle_ipc_command(
             match tokio::task::spawn_blocking(move || {
                 let quarantine = quarantine_arc.blocking_lock();
                 handle_resolve_threat(&paths_clone, &quarantine, &id, &action, &note)
-            }).await {
+            })
+            .await
+            {
                 Ok(resp) => resp,
                 Err(e) => IpcResponse::Error {
                     message: format!("task failed: {e}"),
@@ -705,7 +753,10 @@ async fn handle_record_usage(
 ///
 /// Uses `BufReader::lines()` to avoid loading the entire file into memory,
 /// preventing OOM on large audit logs.
-fn read_audit_events(paths: &WellKnownPaths, max_events: usize) -> Vec<sanctum_types::threat::ThreatEvent> {
+fn read_audit_events(
+    paths: &WellKnownPaths,
+    max_events: usize,
+) -> Vec<sanctum_types::threat::ThreatEvent> {
     use std::io::BufRead;
 
     let audit_path = paths.data_dir.join("audit.log");
@@ -744,7 +795,10 @@ fn read_audit_events(paths: &WellKnownPaths, max_events: usize) -> Vec<sanctum_t
 ///
 /// Uses `BufReader::lines()` to avoid loading the entire file into memory,
 /// preventing OOM on large resolution logs.
-fn read_resolved_ids(paths: &WellKnownPaths, max_entries: usize) -> std::collections::HashSet<String> {
+fn read_resolved_ids(
+    paths: &WellKnownPaths,
+    max_entries: usize,
+) -> std::collections::HashSet<String> {
     use std::io::BufRead;
 
     let resolution_path = paths.data_dir.join("resolutions.log");
@@ -773,7 +827,10 @@ fn read_resolved_ids(paths: &WellKnownPaths, max_entries: usize) -> std::collect
         }
     }
     if resolutions.len() > max_entries {
-        resolutions.split_off(resolutions.len() - max_entries).into_iter().collect()
+        resolutions
+            .split_off(resolutions.len() - max_entries)
+            .into_iter()
+            .collect()
     } else {
         resolutions.into_iter().collect()
     }
@@ -791,6 +848,26 @@ fn append_resolution(
         .map_err(|e| format!("failed to write resolution log entry: {e}"))
 }
 
+/// Maximum resolution log file size before rotation (10 MB).
+const MAX_RESOLUTION_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Rotate the resolution log if it exceeds the size threshold.
+///
+/// Renames the current log to `resolutions.log.1` (replacing any existing `.1`
+/// file), so that subsequent writes go to a fresh `resolutions.log`.
+fn maybe_rotate_resolution_log(path: &std::path::Path) {
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if metadata.len() >= MAX_RESOLUTION_LOG_BYTES {
+            let rotated = path.with_extension("log.1");
+            let _ = std::fs::rename(path, rotated);
+            tracing::info!(
+                "rotated resolution log (exceeded {} bytes)",
+                MAX_RESOLUTION_LOG_BYTES
+            );
+        }
+    }
+}
+
 fn append_resolution_inner(
     paths: &WellKnownPaths,
     resolution: &sanctum_types::threat::ThreatResolution,
@@ -798,6 +875,9 @@ fn append_resolution_inner(
     use std::io::Write;
 
     let resolution_path = paths.data_dir.join("resolutions.log");
+
+    // Rotate if the log exceeds the size threshold
+    maybe_rotate_resolution_log(&resolution_path);
 
     // Ensure parent directory exists
     if let Some(parent) = resolution_path.parent() {
@@ -1220,7 +1300,10 @@ mod tests {
         match response {
             IpcResponse::ThreatList { threats, truncated } => {
                 assert_eq!(threats.len(), MAX_THREAT_LIST_ITEMS);
-                assert!(truncated, "truncated should be true when items exceed the limit");
+                assert!(
+                    truncated,
+                    "truncated should be true when items exceed the limit"
+                );
             }
             other => panic!("expected ThreatList, got {other:?}"),
         }
@@ -1234,7 +1317,10 @@ mod tests {
         match response {
             IpcResponse::ThreatList { threats, truncated } => {
                 assert_eq!(threats.len(), 10);
-                assert!(!truncated, "truncated should be false when items are under the limit");
+                assert!(
+                    !truncated,
+                    "truncated should be false when items are under the limit"
+                );
             }
             other => panic!("expected ThreatList, got {other:?}"),
         }

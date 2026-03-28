@@ -77,13 +77,9 @@ pub enum IpcResponse {
         quarantine_count: u32,
     },
     /// List of quarantined items.
-    QuarantineList {
-        items: Vec<QuarantineListItem>,
-    },
+    QuarantineList { items: Vec<QuarantineListItem> },
     /// Budget status for all tracked providers.
-    BudgetStatus {
-        providers: Vec<ProviderBudgetInfo>,
-    },
+    BudgetStatus { providers: Vec<ProviderBudgetInfo> },
     /// Operation succeeded.
     Ok { message: String },
     /// Operation failed.

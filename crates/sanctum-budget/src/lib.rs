@@ -15,7 +15,9 @@ pub mod pricing;
 pub mod provider;
 pub mod tracker;
 
-pub use enforcement::{budget_exceeded_response, check_budget, is_model_allowed, EnforcementResult};
+pub use enforcement::{
+    budget_exceeded_response, check_budget, is_model_allowed, EnforcementResult,
+};
 pub use error::BudgetError;
 pub use parser::{parse_usage, UsageData};
 pub use pricing::calculate_cost;

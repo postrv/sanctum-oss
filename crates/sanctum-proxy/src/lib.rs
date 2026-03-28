@@ -23,4 +23,4 @@ pub mod error;
 pub mod provider;
 
 pub use error::ProxyError;
-pub use provider::{Provider, identify_provider};
+pub use provider::{identify_provider, Provider};

@@ -84,9 +84,9 @@ impl ProcessLineage {
             }
             visited.insert(current_pid);
 
-            let info = source.get_process_info(current_pid).ok_or(
-                SentinelError::ProcessNotFound { pid: current_pid },
-            )?;
+            let info = source
+                .get_process_info(current_pid)
+                .ok_or(SentinelError::ProcessNotFound { pid: current_pid })?;
 
             let parent_pid = info.ppid;
             chain.push(info);
@@ -286,8 +286,12 @@ fn platform_get_process_info(pid: u32) -> Option<ProcessInfo> {
         return None;
     }
 
-    let comm_full = String::from_utf8_lossy(&comm_output.stdout).trim().to_string();
-    let ppid_str = String::from_utf8_lossy(&ppid_output.stdout).trim().to_string();
+    let comm_full = String::from_utf8_lossy(&comm_output.stdout)
+        .trim()
+        .to_string();
+    let ppid_str = String::from_utf8_lossy(&ppid_output.stdout)
+        .trim()
+        .to_string();
 
     if comm_full.is_empty() {
         return None;
@@ -330,12 +334,12 @@ mod tests {
 
     #[test]
     fn lineage_identifies_pip_as_root_ancestor() {
-        let mock = MockProcFs::new()
-            .process(100, "pip", None)
-            .process(101, "python3.12", Some(100));
+        let mock =
+            MockProcFs::new()
+                .process(100, "pip", None)
+                .process(101, "python3.12", Some(100));
 
-        let lineage = ProcessLineage::trace(101, &mock)
-            .expect("lineage should succeed");
+        let lineage = ProcessLineage::trace(101, &mock).expect("lineage should succeed");
         assert!(lineage.has_ancestor_named("pip"));
         let root = lineage.root_ancestor().expect("root should exist");
         assert_eq!(root.name, "pip");
@@ -348,8 +352,7 @@ mod tests {
             .process(51, "python3", Some(50))
             .process(52, "pip", Some(51));
 
-        let lineage = ProcessLineage::trace(52, &mock)
-            .expect("lineage should succeed");
+        let lineage = ProcessLineage::trace(52, &mock).expect("lineage should succeed");
         assert!(lineage.has_ancestor_named("poetry"));
     }
 
@@ -359,8 +362,7 @@ mod tests {
             .process(1, "zsh", None)
             .process(100, "python3.12", Some(1));
 
-        let lineage = ProcessLineage::trace(100, &mock)
-            .expect("lineage should succeed");
+        let lineage = ProcessLineage::trace(100, &mock).expect("lineage should succeed");
         let assessment = lineage.assess_pth_creation();
         assert_eq!(assessment, LineageAssessment::SuspiciousPythonStartup);
     }
@@ -378,8 +380,7 @@ mod tests {
             .process(100, "python3", Some(101))
             .process(101, "python3", Some(100));
 
-        let lineage = ProcessLineage::trace(100, &mock)
-            .expect("should not infinite loop");
+        let lineage = ProcessLineage::trace(100, &mock).expect("should not infinite loop");
         assert!(lineage.depth() <= 64);
     }
 
@@ -417,11 +418,13 @@ mod tests {
             .process(50, "bash", Some(1))
             .process(100, "python3", Some(50));
 
-        let lineage = ProcessLineage::trace(100, &mock)
-            .expect("lineage should succeed");
+        let lineage = ProcessLineage::trace(100, &mock).expect("lineage should succeed");
 
         let root = lineage.root_ancestor();
-        assert!(root.is_some(), "root_ancestor should return Some for non-empty chain");
+        assert!(
+            root.is_some(),
+            "root_ancestor should return Some for non-empty chain"
+        );
         let root = root.expect("just checked");
         assert_eq!(root.name, "init");
         assert_eq!(root.pid, 1);
@@ -429,11 +432,9 @@ mod tests {
 
     #[test]
     fn root_ancestor_single_process() {
-        let mock = MockProcFs::new()
-            .process(42, "solo", None);
+        let mock = MockProcFs::new().process(42, "solo", None);
 
-        let lineage = ProcessLineage::trace(42, &mock)
-            .expect("lineage should succeed");
+        let lineage = ProcessLineage::trace(42, &mock).expect("lineage should succeed");
 
         let root = lineage.root_ancestor();
         assert!(root.is_some());

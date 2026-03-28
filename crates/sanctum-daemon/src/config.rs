@@ -22,13 +22,11 @@ pub fn load_config(path: &Path) -> Result<SanctumConfig, DaemonError> {
         return Ok(SanctumConfig::default());
     }
 
-    let content = fs::read_to_string(path).map_err(|e| {
-        DaemonError::Config(format!("failed to read {}: {e}", path.display()))
-    })?;
+    let content = fs::read_to_string(path)
+        .map_err(|e| DaemonError::Config(format!("failed to read {}: {e}", path.display())))?;
 
-    toml::from_str(&content).map_err(|e| {
-        DaemonError::Config(format!("failed to parse {}: {e}", path.display()))
-    })
+    toml::from_str(&content)
+        .map_err(|e| DaemonError::Config(format!("failed to parse {}: {e}", path.display())))
 }
 
 /// Enforce a security floor on project-local configurations.
@@ -37,6 +35,7 @@ pub fn load_config(path: &Path) -> Result<SanctumConfig, DaemonError> {
 /// must not be weakened by the project config:
 /// - `ai_firewall.claude_hooks` forced to `true`
 /// - `ai_firewall.redact_credentials` forced to `true`
+/// - `ai_firewall.mcp_audit` forced to `true`
 /// - `sentinel.watch_pth` forced to `true`
 /// - `sentinel.pth_response` cannot be downgraded from `Quarantine`
 pub fn enforce_security_floor(config: &mut SanctumConfig, is_project_local: bool) {
@@ -68,6 +67,12 @@ pub fn enforce_security_floor(config: &mut SanctumConfig, is_project_local: bool
             "Project-local config cannot downgrade pth_response from quarantine \u{2014} using global default"
         );
         config.sentinel.pth_response = PthResponse::Quarantine;
+    }
+    if !config.ai_firewall.mcp_audit {
+        tracing::warn!(
+            "Project-local config cannot disable mcp_audit \u{2014} using global default"
+        );
+        config.ai_firewall.mcp_audit = true;
     }
 }
 
@@ -130,8 +135,8 @@ mod tests {
 
     #[test]
     fn load_config_returns_defaults_for_missing_file() {
-        let config = load_config(Path::new("/nonexistent/config.toml"))
-            .expect("should return defaults");
+        let config =
+            load_config(Path::new("/nonexistent/config.toml")).expect("should return defaults");
         assert!(config.sentinel.watch_pth);
     }
 
@@ -188,6 +193,14 @@ mod tests {
     }
 
     #[test]
+    fn enforce_security_floor_forces_mcp_audit() {
+        let mut config = SanctumConfig::default();
+        config.ai_firewall.mcp_audit = false;
+        enforce_security_floor(&mut config, true);
+        assert!(config.ai_firewall.mcp_audit);
+    }
+
+    #[test]
     fn enforce_security_floor_prevents_pth_response_downgrade() {
         let mut config = SanctumConfig::default();
         config.sentinel.pth_response = PthResponse::Log;
@@ -204,12 +217,14 @@ mod tests {
         let mut config = SanctumConfig::default();
         config.ai_firewall.claude_hooks = false;
         config.ai_firewall.redact_credentials = false;
+        config.ai_firewall.mcp_audit = false;
         config.sentinel.watch_pth = false;
         config.sentinel.pth_response = PthResponse::Log;
         enforce_security_floor(&mut config, false);
         // Global config is not subject to the floor.
         assert!(!config.ai_firewall.claude_hooks);
         assert!(!config.ai_firewall.redact_credentials);
+        assert!(!config.ai_firewall.mcp_audit);
         assert!(!config.sentinel.watch_pth);
         assert_eq!(config.sentinel.pth_response, PthResponse::Log);
     }
@@ -220,8 +235,15 @@ mod tests {
         // All defaults are already secure; floor should be a no-op.
         let original = config.clone();
         enforce_security_floor(&mut config, true);
-        assert_eq!(config.ai_firewall.claude_hooks, original.ai_firewall.claude_hooks);
-        assert_eq!(config.ai_firewall.redact_credentials, original.ai_firewall.redact_credentials);
+        assert_eq!(
+            config.ai_firewall.claude_hooks,
+            original.ai_firewall.claude_hooks
+        );
+        assert_eq!(
+            config.ai_firewall.redact_credentials,
+            original.ai_firewall.redact_credentials
+        );
+        assert_eq!(config.ai_firewall.mcp_audit, original.ai_firewall.mcp_audit);
         assert_eq!(config.sentinel.watch_pth, original.sentinel.watch_pth);
         assert_eq!(config.sentinel.pth_response, original.sentinel.pth_response);
     }

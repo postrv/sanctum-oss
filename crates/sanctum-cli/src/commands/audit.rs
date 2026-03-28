@@ -120,15 +120,12 @@ fn parse_duration(s: &str) -> Result<chrono::TimeDelta, CliError> {
     }
 
     match suffix {
-        "m" => chrono::TimeDelta::try_minutes(value).ok_or_else(|| {
-            CliError::InvalidArgs(format!("duration too large: {s}"))
-        }),
-        "h" => chrono::TimeDelta::try_hours(value).ok_or_else(|| {
-            CliError::InvalidArgs(format!("duration too large: {s}"))
-        }),
-        "d" => chrono::TimeDelta::try_days(value).ok_or_else(|| {
-            CliError::InvalidArgs(format!("duration too large: {s}"))
-        }),
+        "m" => chrono::TimeDelta::try_minutes(value)
+            .ok_or_else(|| CliError::InvalidArgs(format!("duration too large: {s}"))),
+        "h" => chrono::TimeDelta::try_hours(value)
+            .ok_or_else(|| CliError::InvalidArgs(format!("duration too large: {s}"))),
+        "d" => chrono::TimeDelta::try_days(value)
+            .ok_or_else(|| CliError::InvalidArgs(format!("duration too large: {s}"))),
         _ => Err(CliError::InvalidArgs(format!(
             "unknown duration suffix '{suffix}' in '{s}' (expected m, h, or d)"
         ))),
@@ -177,7 +174,12 @@ fn print_event(event: &ThreatEvent) {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, clippy::similar_names)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::similar_names
+)]
 mod tests {
     use super::*;
     use chrono::Utc;
@@ -242,8 +244,7 @@ mod tests {
         let recent = sample_event(ThreatLevel::Warning, 10);
         let old = sample_event(ThreatLevel::Warning, 120);
 
-        let cutoff =
-            chrono::TimeDelta::try_hours(1).expect("valid hours for test");
+        let cutoff = chrono::TimeDelta::try_hours(1).expect("valid hours for test");
         let now = Utc::now();
         let earliest = now - cutoff;
 
@@ -255,9 +256,18 @@ mod tests {
 
     #[test]
     fn parse_level_case_insensitive() {
-        assert_eq!(parse_level("critical").expect("parse"), ThreatLevel::Critical);
-        assert_eq!(parse_level("Critical").expect("parse"), ThreatLevel::Critical);
-        assert_eq!(parse_level("CRITICAL").expect("parse"), ThreatLevel::Critical);
+        assert_eq!(
+            parse_level("critical").expect("parse"),
+            ThreatLevel::Critical
+        );
+        assert_eq!(
+            parse_level("Critical").expect("parse"),
+            ThreatLevel::Critical
+        );
+        assert_eq!(
+            parse_level("CRITICAL").expect("parse"),
+            ThreatLevel::Critical
+        );
         assert_eq!(parse_level("warning").expect("parse"), ThreatLevel::Warning);
         assert_eq!(parse_level("info").expect("parse"), ThreatLevel::Info);
     }
@@ -285,8 +295,7 @@ mod tests {
     #[test]
     fn json_output_format() {
         let event = sample_event(ThreatLevel::Critical, 1);
-        let json_str =
-            serde_json::to_string(&event).expect("serialisation should succeed in test");
+        let json_str = serde_json::to_string(&event).expect("serialisation should succeed in test");
         let parsed: serde_json::Value =
             serde_json::from_str(&json_str).expect("should be valid JSON");
 
@@ -325,8 +334,7 @@ mod tests {
         {
             let mut f = std::fs::File::create(&log_path).expect("create test file");
             for event in [&event1, &event2, &event3] {
-                let line =
-                    serde_json::to_string(event).expect("serialise event for test");
+                let line = serde_json::to_string(event).expect("serialise event for test");
                 writeln!(f, "{line}").expect("write to test file");
             }
         }

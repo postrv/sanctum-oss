@@ -15,9 +15,7 @@ mod tests {
             default_session: Some(BudgetAmount {
                 cents: session_cents,
             }),
-            default_daily: Some(BudgetAmount {
-                cents: daily_cents,
-            }),
+            default_daily: Some(BudgetAmount { cents: daily_cents }),
             alert_at_percent: 75,
             ..BudgetConfig::default()
         }

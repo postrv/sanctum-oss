@@ -40,7 +40,9 @@ impl DaemonManager {
             }
         };
 
-        let pid: u32 = if let Ok(p) = pid_str.trim().parse() { p } else {
+        let pid: u32 = if let Ok(p) = pid_str.trim().parse() {
+            p
+        } else {
             // Corrupt PID file — remove it
             tracing::warn!("corrupt PID file, removing");
             let _ = fs::remove_file(&self.pid_file);
@@ -139,10 +141,11 @@ impl DaemonManager {
             source: e,
         })?;
 
-        self.try_exclusive_create(pid).map_err(|e| DaemonError::PidFile {
-            path: self.pid_file.clone(),
-            source: e,
-        })
+        self.try_exclusive_create(pid)
+            .map_err(|e| DaemonError::PidFile {
+                path: self.pid_file.clone(),
+                source: e,
+            })
     }
 
     /// Attempt to exclusively create the PID file and write the given PID.
@@ -160,10 +163,7 @@ impl DaemonManager {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(e) = fs::set_permissions(
-                &self.pid_file,
-                fs::Permissions::from_mode(0o600),
-            ) {
+            if let Err(e) = fs::set_permissions(&self.pid_file, fs::Permissions::from_mode(0o600)) {
                 tracing::warn!(
                     path = %self.pid_file.display(),
                     %e,
@@ -218,11 +218,7 @@ fn is_process_running(pid: u32) -> bool {
             return false;
         };
         // Signal 0 checks process existence without actually sending a signal
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(raw_pid),
-            None,
-        )
-        .is_ok()
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw_pid), None).is_ok()
     }
 
     #[cfg(not(unix))]
@@ -244,7 +240,10 @@ mod tests {
         let manager = DaemonManager::new(pid_file);
 
         let result = manager.check_existing().expect("should not error");
-        assert!(result.is_none(), "should return None when PID file does not exist");
+        assert!(
+            result.is_none(),
+            "should return None when PID file does not exist"
+        );
 
         // Prevent Drop from trying to remove the non-existent file (no-op anyway)
         std::mem::forget(manager);

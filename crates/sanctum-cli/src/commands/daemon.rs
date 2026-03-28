@@ -3,8 +3,8 @@
 use sanctum_types::errors::CliError;
 use sanctum_types::paths::WellKnownPaths;
 
-use crate::DaemonAction;
 use crate::ipc_client::{self, IpcCommand, IpcResponse};
+use crate::DaemonAction;
 
 /// Run the daemon command.
 pub fn run(action: &DaemonAction) -> Result<(), CliError> {

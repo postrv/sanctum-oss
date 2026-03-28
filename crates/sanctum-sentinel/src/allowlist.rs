@@ -62,9 +62,7 @@ pub fn is_allowlisted(
     allowlist: &[PthAllowlistEntry],
 ) -> bool {
     allowlist.iter().any(|entry| {
-        !entry.hash.is_empty()
-            && entry.package == package_name
-            && entry.hash == content_hash
+        !entry.hash.is_empty() && entry.package == package_name && entry.hash == content_hash
     })
 }
 

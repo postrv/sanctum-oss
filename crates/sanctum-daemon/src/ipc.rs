@@ -77,7 +77,10 @@ impl RateLimiter {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let new_tokens = (elapsed_secs * f64::from(self.refill_rate)) as u32;
             if new_tokens > 0 {
-                self.available = self.available.saturating_add(new_tokens).min(self.max_tokens);
+                self.available = self
+                    .available
+                    .saturating_add(new_tokens)
+                    .min(self.max_tokens);
                 self.last_refill = now;
             }
         }
@@ -126,7 +129,9 @@ impl IpcServer {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)) {
+                if let Err(e) =
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                {
                     tracing::error!(%e, "failed to set IPC socket directory permissions to 0o700 — socket may be accessible to other users");
                 }
             }
@@ -143,10 +148,9 @@ impl IpcServer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(e) = std::fs::set_permissions(
-                socket_path,
-                std::fs::Permissions::from_mode(0o600),
-            ) {
+            if let Err(e) =
+                std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+            {
                 tracing::warn!(
                     path = %socket_path.display(),
                     %e,
@@ -169,15 +173,16 @@ impl IpcServer {
     ///
     /// Returns an error if accept fails.
     pub async fn accept(&self) -> Result<IpcConnection, DaemonError> {
-        let (stream, _) = self.listener.accept().await.map_err(|e| {
-            DaemonError::Ipc(format!("failed to accept connection: {e}"))
-        })?;
+        let (stream, _) = self
+            .listener
+            .accept()
+            .await
+            .map_err(|e| DaemonError::Ipc(format!("failed to accept connection: {e}")))?;
         Ok(IpcConnection {
             stream,
             rate_limiter: RateLimiter::default_limit(),
         })
     }
-
 }
 
 impl Drop for IpcServer {
@@ -208,9 +213,8 @@ impl IpcConnection {
             ));
         }
         let payload = sanctum_types::ipc::read_frame(&mut self.stream).await?;
-        serde_json::from_slice(&payload).map_err(|e| {
-            DaemonError::Ipc(format!("invalid command JSON: {e}"))
-        })
+        serde_json::from_slice(&payload)
+            .map_err(|e| DaemonError::Ipc(format!("invalid command JSON: {e}")))
     }
 
     /// Send a response to the client.
@@ -219,9 +223,8 @@ impl IpcConnection {
     ///
     /// Returns an error if the response cannot be written.
     pub async fn send_response(&mut self, response: &IpcResponse) -> Result<(), DaemonError> {
-        let payload = serde_json::to_vec(response).map_err(|e| {
-            DaemonError::Ipc(format!("failed to serialise response: {e}"))
-        })?;
+        let payload = serde_json::to_vec(response)
+            .map_err(|e| DaemonError::Ipc(format!("failed to serialise response: {e}")))?;
         sanctum_types::ipc::write_frame(&mut self.stream, &payload).await?;
         Ok(())
     }
@@ -258,14 +261,25 @@ mod tests {
         });
 
         // Client side — use raw stream with shared frame helpers
-        let mut stream = UnixStream::connect(&socket_path_clone).await.expect("connect");
+        let mut stream = UnixStream::connect(&socket_path_clone)
+            .await
+            .expect("connect");
         let cmd_payload = serde_json::to_vec(&IpcCommand::Status).expect("serialise");
-        sanctum_types::ipc::write_frame(&mut stream, &cmd_payload).await.expect("write");
-        let resp_payload = sanctum_types::ipc::read_frame(&mut stream).await.expect("read");
+        sanctum_types::ipc::write_frame(&mut stream, &cmd_payload)
+            .await
+            .expect("write");
+        let resp_payload = sanctum_types::ipc::read_frame(&mut stream)
+            .await
+            .expect("read");
         let response: IpcResponse = serde_json::from_slice(&resp_payload).expect("deserialise");
 
         match response {
-            IpcResponse::Status { version, uptime_secs, watchers_active, quarantine_count } => {
+            IpcResponse::Status {
+                version,
+                uptime_secs,
+                watchers_active,
+                quarantine_count,
+            } => {
                 assert_eq!(version, "0.1.0");
                 assert_eq!(uptime_secs, 42);
                 assert_eq!(watchers_active, 2);
@@ -302,8 +316,12 @@ mod tests {
 
         let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
         let cmd_payload = serde_json::to_vec(&IpcCommand::ListQuarantine).expect("serialise");
-        sanctum_types::ipc::write_frame(&mut stream, &cmd_payload).await.expect("write");
-        let resp_payload = sanctum_types::ipc::read_frame(&mut stream).await.expect("read");
+        sanctum_types::ipc::write_frame(&mut stream, &cmd_payload)
+            .await
+            .expect("write");
+        let resp_payload = sanctum_types::ipc::read_frame(&mut stream)
+            .await
+            .expect("read");
         let response: IpcResponse = serde_json::from_slice(&resp_payload).expect("deserialise");
 
         match response {
@@ -335,7 +353,10 @@ mod tests {
         let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
         #[allow(clippy::cast_possible_truncation)]
         let oversized_len = (MAX_MESSAGE_SIZE + 1) as u32;
-        stream.write_all(&oversized_len.to_be_bytes()).await.expect("write len");
+        stream
+            .write_all(&oversized_len.to_be_bytes())
+            .await
+            .expect("write len");
         // Don't need to write the actual payload — the length check should reject it
 
         server_handle.await.expect("server task");
@@ -356,7 +377,9 @@ mod tests {
 
     #[test]
     fn ipc_command_serialises_correctly() {
-        let cmd = IpcCommand::RestoreQuarantine { id: "abc-123".to_string() };
+        let cmd = IpcCommand::RestoreQuarantine {
+            id: "abc-123".to_string(),
+        };
         let json = serde_json::to_string(&cmd).expect("serialise");
         assert!(json.contains("RestoreQuarantine"));
         assert!(json.contains("abc-123"));
@@ -364,7 +387,9 @@ mod tests {
 
     #[test]
     fn ipc_response_serialises_correctly() {
-        let resp = IpcResponse::Ok { message: "done".to_string() };
+        let resp = IpcResponse::Ok {
+            message: "done".to_string(),
+        };
         let json = serde_json::to_string(&resp).expect("serialise");
         assert!(json.contains("done"));
     }
@@ -392,7 +417,10 @@ mod tests {
 
         let roundtrip: IpcCommand = serde_json::from_str(&json).expect("deserialise");
         match roundtrip {
-            IpcCommand::BudgetSet { session_cents, daily_cents } => {
+            IpcCommand::BudgetSet {
+                session_cents,
+                daily_cents,
+            } => {
                 assert_eq!(session_cents, Some(5000));
                 assert_eq!(daily_cents, Some(20000));
             }
@@ -402,7 +430,9 @@ mod tests {
 
     #[test]
     fn budget_extend_command_serialises_correctly() {
-        let cmd = IpcCommand::BudgetExtend { additional_cents: 1000 };
+        let cmd = IpcCommand::BudgetExtend {
+            additional_cents: 1000,
+        };
         let json = serde_json::to_string(&cmd).expect("serialise");
         assert!(json.contains("BudgetExtend"));
         assert!(json.contains("1000"));

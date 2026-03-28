@@ -12,30 +12,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Install script verification**: `scripts/install.sh` verifies Sigstore signatures when cosign is available
 - **Kani proof integration**: 4 bounded model checking proofs integrated as `#[cfg(kani)]` modules (analyser panic-freedom, path classification, exec detection, quarantine state machine), CI with fast/nightly split
 - **`sanctum fix` command**: Guided threat remediation with content-addressed threat IDs, separate resolution log, `list`/`resolve`/`all` subcommands, 5 new IPC commands
-- **Network anomaly detection**: New `network/` module in sanctum-sentinel with platform-specific connection collection (macOS lsof, Linux /proc/net/tcp), anomaly detection heuristics (unusual port, blocklisted destination, unexpected process), baseline learning, configurable allowlists and blocklists
+- **Network anomaly detection**: New `network/` module in sanctum-sentinel with platform-specific connection collection (macOS lsof, Linux /proc/net/tcp), rule-based anomaly detection (unusual port, blocklisted destination, unexpected process), configurable allowlists and blocklists
 - **HTTP budget proxy foundation**: New `sanctum-proxy` crate with provider identification, config schema, error types (actual TLS MITM proxy deferred to next sub-phase)
 - **New threat categories**: `McpViolation` and `BudgetOverrun` added to `ThreatCategory`
 - **Credential allowlist**: Configurable `credential_allowlist` in `SentinelConfig`
 - **IPC rate limiting**: Per-connection token-bucket rate limiter (100 messages/second) closes IPC DoS residual risk
-- **Credential patterns**: 28 credential patterns total (Vercel, Docker Hub, Hashicorp Vault, Hugging Face, Shopify, Linear added), plus Twilio/Datadog/Azure env var detection in hooks
+- **Credential patterns**: 37 credential patterns total (Vercel, Docker Hub, Hashicorp Vault, Hugging Face, Shopify, Linear, Supabase, PlanetScale, Fly.io, Railway, Render, Terraform Cloud, Mailgun, Grafana, Neon DB added), plus Twilio/Datadog/Azure env var detection in hooks
 - **Glob matcher safety**: Multi-star patterns now return false with a warning instead of silently falling through to exact match
 - **4 new Kani proofs**: `ceiling_cost_no_overflow`, `validate_id_rejects_traversal`, `shannon_entropy_never_panics`, `glob_matches_exact_match_works` (8 proofs total)
 - **Reproducible build verification**: CI job builds twice and compares SHA-256 hashes
 - **Nightly extended fuzz testing**: 5-hour fuzz runs via cron schedule (2.5 hours per target)
 - **Release workflow gates**: `verify-ci` job checks CI status before building release artifacts
 - **Config version field**: `config_version` added to `SanctumConfig` for future migration support
-- **828 tests** across 8 crates (up from 511)
+- **899 tests** across 8 crates (up from 511)
 
 ### Fixed
 - **Claude Code hooks JSON format**: Migrated from deprecated flat format to current three-level nested format (`hooks: [{ type: "command", command }]`) — without this fix, hooks were silently ignored by Claude Code
-- **Write-hook matcher**: Added `MultiEdit` tool to pre-write matcher (`Write|Edit|MultiEdit`) — prevents credential-content bypass via MultiEdit tool
+- **Write-hook matcher**: Added `NotebookEdit` tool to pre-write matcher (`Write|Edit|MultiEdit|NotebookEdit`) — prevents credential-content bypass via NotebookEdit/MultiEdit tools
 - **MCP hook matcher**: Changed from `"mcp"` (literal, never matched) to `"mcp__.*"` (regex, matches all MCP tool invocations)
+- **Hook handler fail-closed**: All hook errors now exit with code 2 (block) instead of code 1 (allow) — prevents fail-open on stdin/JSON parse errors
+- **Edit tool credential scanning**: Pre-write hook now scans `old_string`/`new_string` fields (used by Edit/MultiEdit), not just `content` — closes credential bypass via Edit tool
+- **Command blocklist expansion**: Added 11 indirect read commands (`xargs`, `node -e`, `ruby -e`, `perl -e`, `php -r`, `git show`, `git diff`, `git log`, `docker exec`, `kubectl exec`, `deno eval`) and `exec` to indirect access constructs
+- **curl data exfiltration**: Added `-d @file`, `--data @file`, `--data-binary @file` detection to curl upload blocking
+- **Sensitive write path warnings**: Pre-write hook now warns on writes to `.bashrc`, `.zshrc`, `authorized_keys`, cron paths, systemd autostart
+- **Sensitive read path expansion**: Added `.gnupg/`, `.config/gcloud/`, `.config/gh/`, `.env.local`, `.env.production`, `.bash_history`, `.zsh_history` to pre-read blocking
+- **Property test fix**: `file_severity_is_max_of_lines` now correctly handles continuation-line semantics (severity >= max, not ==)
+- **Resolution log rotation**: Resolution log now rotates at 10MB (was unbounded)
 
 ### Security
-- **Project-local config hardening**: Security-critical settings (`claude_hooks`, `redact_credentials`, `watch_pth`, `pth_response`) are pinned to global config values and cannot be weakened by project-local `.sanctum/config.toml` — prevents malicious repos from disabling protections
+- **Project-local config hardening**: Security-critical settings (`claude_hooks`, `redact_credentials`, `watch_pth`, `pth_response`, `mcp_audit`) are pinned to global config values and cannot be weakened by project-local `.sanctum/config.toml` — prevents malicious repos from disabling protections
 - **Fail-closed config loading**: Hook config parse errors now apply restrictive defaults (all protections enabled) instead of silently running with no firewall rules
 - **Async event loop safety**: Blocking file I/O, process spawning, and quarantine operations offloaded to `spawn_blocking` to prevent stalling the daemon event loop
-- **Quarantine integrity**: Atomic metadata writes (write-temp-then-rename), symlink detection before stub/restore writes, constant-time hash comparison, corrupted metadata warnings instead of silent skipping
+- **Quarantine integrity**: Atomic metadata writes (write-temp-then-rename), O_NOFOLLOW on stub/restore writes (eliminates TOCTOU symlink race), restore temp files in quarantine directory (not attacker-controlled path), constant-time hash comparison, corrupted metadata warnings instead of silent skipping
 - **Audit event correctness**: Quarantine failure now records `Action::Logged` instead of false `Action::Quarantined`
 - **IPC response truncation**: `ListThreats` capped at 500 items to prevent exceeding 64KB frame limit
 - **Resolution log durability**: Write failures now propagate as IPC errors instead of silently succeeding

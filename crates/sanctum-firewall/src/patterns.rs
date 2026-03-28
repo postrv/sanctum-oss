@@ -53,8 +53,14 @@ static_regex!(GITHUB_PAT_RE, r"\bghp_[a-zA-Z0-9]{36}\b");
 static_regex!(GITHUB_FINE_GRAINED_RE, r"\bgithub_pat_[a-zA-Z0-9_]{82}\b");
 static_regex!(GITLAB_RE, r"\bglpat-[a-zA-Z0-9_\-]{20}\b");
 static_regex!(SLACK_BOT_RE, r"\bxoxb-[0-9]{10,13}-[a-zA-Z0-9\-]+");
-static_regex!(STRIPE_SECRET_RE, r"\b(?:sk_live_|sk_test_|rk_live_|rk_test_)[a-zA-Z0-9]{24,}\b");
-static_regex!(SENDGRID_RE, r"\bSG\.[a-zA-Z0-9_\-]{22}\.[a-zA-Z0-9_\-]{43}\b");
+static_regex!(
+    STRIPE_SECRET_RE,
+    r"\b(?:sk_live_|sk_test_|rk_live_|rk_test_)[a-zA-Z0-9]{24,}\b"
+);
+static_regex!(
+    SENDGRID_RE,
+    r"\bSG\.[a-zA-Z0-9_\-]{22}\.[a-zA-Z0-9_\-]{43}\b"
+);
 static_regex!(
     JWT_RE,
     r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
@@ -64,9 +70,18 @@ static_regex!(
     r"\b(?i:authorization)[=: ]+Bearer [A-Za-z0-9_\-]{20,}"
 );
 static_regex!(PRIVATE_KEY_RE, r"-----BEGIN[A-Z ]*PRIVATE KEY-----");
-static_regex!(CONNECTION_STRING_RE, r"\b(postgresql|postgres|mongodb|redis|mysql|mariadb|mssql|sqlserver|amqp|amqps)://[^\s@]+@[^\s]+\b");
-static_regex!(SLACK_USER_RE, r"\bxoxp-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,34}\b");
-static_regex!(SLACK_APP_RE, r"\bxapp-[0-9]-[A-Z0-9]{10,13}-[0-9]{13}-[a-zA-Z0-9]{64}\b");
+static_regex!(
+    CONNECTION_STRING_RE,
+    r"\b(postgresql|postgres|mongodb|redis|mysql|mariadb|mssql|sqlserver|amqp|amqps)://[^\s@]+@[^\s]+\b"
+);
+static_regex!(
+    SLACK_USER_RE,
+    r"\bxoxp-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,34}\b"
+);
+static_regex!(
+    SLACK_APP_RE,
+    r"\bxapp-[0-9]-[A-Z0-9]{10,13}-[0-9]{13}-[a-zA-Z0-9]{64}\b"
+);
 static_regex!(NPM_TOKEN_RE, r"\bnpm_[a-zA-Z0-9]{36}\b");
 static_regex!(PYPI_TOKEN_RE, r"\bpypi-[A-Za-z0-9_\-]{16,}");
 static_regex!(DIGITALOCEAN_RE, r"\bdop_v1_[a-f0-9]{64}\b");
@@ -78,6 +93,18 @@ static_regex!(VAULT_TOKEN_RE, r"\bhvs\.[a-zA-Z0-9_\-]{24,}");
 static_regex!(HF_TOKEN_RE, r"\bhf_[a-zA-Z0-9]{34,}\b");
 static_regex!(SHOPIFY_RE, r"\bshp(?:at|ss|pa|ca)_[a-fA-F0-9]{32,}\b");
 static_regex!(LINEAR_RE, r"\blin_api_[a-zA-Z0-9]{40,}\b");
+static_regex!(SUPABASE_RE, r"\bsbp_[0-9a-fA-F]{40,}\b");
+static_regex!(PLANETSCALE_RE, r"\bpscale_tkn_[A-Za-z0-9_-]{20,}\b");
+static_regex!(FLYIO_RE, r"\bfo1_[A-Za-z0-9_-]{20,}\b");
+static_regex!(RAILWAY_RE, r"\b(?:railway|rlwy)_[A-Za-z0-9_-]{20,}\b");
+static_regex!(RENDER_RE, r"\brnd_[A-Za-z0-9]{20,}\b");
+static_regex!(TERRAFORM_RE, r"\batlasv1-[A-Za-z0-9]{40,}\b");
+static_regex!(MAILGUN_RE, r"\bkey-[a-f0-9]{32}\b");
+static_regex!(GRAFANA_SA_RE, r"\bglsa_[A-Za-z0-9_]{20,}\b");
+static_regex!(
+    NEON_RE,
+    r"(?:postgres|postgresql)://[^:]+:[^@]+@[^/]*neon\.tech"
+);
 
 /// All registered credential patterns.
 ///
@@ -195,6 +222,42 @@ pub static PATTERNS: &[CredentialPattern] = &[
     CredentialPattern {
         name: "Linear API Key",
         regex: &LINEAR_RE,
+    },
+    CredentialPattern {
+        name: "Supabase Service Key",
+        regex: &SUPABASE_RE,
+    },
+    CredentialPattern {
+        name: "PlanetScale Token",
+        regex: &PLANETSCALE_RE,
+    },
+    CredentialPattern {
+        name: "Fly.io Token",
+        regex: &FLYIO_RE,
+    },
+    CredentialPattern {
+        name: "Railway Token",
+        regex: &RAILWAY_RE,
+    },
+    CredentialPattern {
+        name: "Render Token",
+        regex: &RENDER_RE,
+    },
+    CredentialPattern {
+        name: "Terraform Cloud Token",
+        regex: &TERRAFORM_RE,
+    },
+    CredentialPattern {
+        name: "Mailgun API Key",
+        regex: &MAILGUN_RE,
+    },
+    CredentialPattern {
+        name: "Grafana Service Account Token",
+        regex: &GRAFANA_SA_RE,
+    },
+    CredentialPattern {
+        name: "Neon DB Connection String",
+        regex: &NEON_RE,
     },
 ];
 
@@ -432,13 +495,12 @@ mod tests {
     #[test]
     fn patterns_are_ordered_specific_first() {
         // Anthropic (sk-ant-) should come before OpenAI (sk-) in PATTERNS
-        let anthropic_idx = PATTERNS
-            .iter()
-            .position(|p| p.name == "Anthropic API Key");
-        let openai_idx = PATTERNS
-            .iter()
-            .position(|p| p.name == "OpenAI API Key");
-        assert!(anthropic_idx < openai_idx, "Anthropic must precede OpenAI for specificity");
+        let anthropic_idx = PATTERNS.iter().position(|p| p.name == "Anthropic API Key");
+        let openai_idx = PATTERNS.iter().position(|p| p.name == "OpenAI API Key");
+        assert!(
+            anthropic_idx < openai_idx,
+            "Anthropic must precede OpenAI for specificity"
+        );
     }
 
     // ---- New patterns: Slack User Token ----
@@ -464,10 +526,7 @@ mod tests {
 
     #[test]
     fn slack_app_token_matches_valid_token() {
-        let key = format!(
-            "xapp-1-A1234567890-1234567890123-{}",
-            "a".repeat(64)
-        );
+        let key = format!("xapp-1-A1234567890-1234567890123-{}", "a".repeat(64));
         assert!(SLACK_APP_RE.is_match(&key));
     }
 
@@ -545,9 +604,7 @@ mod tests {
         let secret_idx = PATTERNS
             .iter()
             .position(|p| p.name == "AWS Secret Access Key");
-        let access_idx = PATTERNS
-            .iter()
-            .position(|p| p.name == "AWS Access Key");
+        let access_idx = PATTERNS.iter().position(|p| p.name == "AWS Access Key");
         assert!(
             secret_idx < access_idx,
             "AWS Secret Access Key must precede AWS Access Key for specificity"
@@ -667,7 +724,7 @@ mod tests {
 
     #[test]
     fn pattern_count_is_correct() {
-        assert_eq!(PATTERNS.len(), 28, "Expected 28 credential patterns");
+        assert_eq!(PATTERNS.len(), 37, "Expected 37 credential patterns");
     }
 
     // ---- Word-boundary tests: prevent substring false positives ----
@@ -957,5 +1014,203 @@ mod tests {
     #[test]
     fn linear_api_key_rejects_normal_text() {
         assert!(!LINEAR_RE.is_match("linear issue tracking"));
+    }
+
+    // ---- New patterns: Supabase Service Key ----
+
+    #[test]
+    fn supabase_key_matches_valid_token() {
+        let key = format!("sbp_{}", "a".repeat(40));
+        assert!(SUPABASE_RE.is_match(&key));
+    }
+
+    #[test]
+    fn supabase_key_matches_long_token() {
+        let key = format!("sbp_{}", "0123456789abcdef".repeat(4));
+        assert!(SUPABASE_RE.is_match(&key));
+    }
+
+    #[test]
+    fn supabase_key_rejects_short_token() {
+        let key = format!("sbp_{}", "a".repeat(10));
+        assert!(!SUPABASE_RE.is_match(&key));
+    }
+
+    #[test]
+    fn supabase_key_rejects_normal_text() {
+        assert!(!SUPABASE_RE.is_match("supabase project setup"));
+    }
+
+    // ---- New patterns: PlanetScale Token ----
+
+    #[test]
+    fn planetscale_token_matches_valid_token() {
+        let key = format!("pscale_tkn_{}", "a".repeat(30));
+        assert!(PLANETSCALE_RE.is_match(&key));
+    }
+
+    #[test]
+    fn planetscale_token_rejects_short_token() {
+        let key = format!("pscale_tkn_{}", "a".repeat(5));
+        assert!(!PLANETSCALE_RE.is_match(&key));
+    }
+
+    #[test]
+    fn planetscale_token_rejects_normal_text() {
+        assert!(!PLANETSCALE_RE.is_match("planetscale database branching"));
+    }
+
+    // ---- New patterns: Fly.io Token ----
+
+    #[test]
+    fn flyio_token_matches_valid_token() {
+        let key = format!("fo1_{}", "a".repeat(30));
+        assert!(FLYIO_RE.is_match(&key));
+    }
+
+    #[test]
+    fn flyio_token_rejects_short_token() {
+        let key = format!("fo1_{}", "a".repeat(5));
+        assert!(!FLYIO_RE.is_match(&key));
+    }
+
+    #[test]
+    fn flyio_token_rejects_normal_text() {
+        assert!(!FLYIO_RE.is_match("fly.io deploy region"));
+    }
+
+    // ---- New patterns: Railway Token ----
+
+    #[test]
+    fn railway_token_matches_railway_prefix() {
+        let key = format!("railway_{}", "a".repeat(30));
+        assert!(RAILWAY_RE.is_match(&key));
+    }
+
+    #[test]
+    fn railway_token_matches_rlwy_prefix() {
+        let key = format!("rlwy_{}", "b".repeat(30));
+        assert!(RAILWAY_RE.is_match(&key));
+    }
+
+    #[test]
+    fn railway_token_rejects_short_token() {
+        let key = format!("railway_{}", "a".repeat(5));
+        assert!(!RAILWAY_RE.is_match(&key));
+    }
+
+    #[test]
+    fn railway_token_rejects_normal_text() {
+        assert!(!RAILWAY_RE.is_match("railway deployment logs"));
+    }
+
+    // ---- New patterns: Render Token ----
+
+    #[test]
+    fn render_token_matches_valid_token() {
+        let key = format!("rnd_{}", "a".repeat(30));
+        assert!(RENDER_RE.is_match(&key));
+    }
+
+    #[test]
+    fn render_token_rejects_short_token() {
+        let key = format!("rnd_{}", "a".repeat(5));
+        assert!(!RENDER_RE.is_match(&key));
+    }
+
+    #[test]
+    fn render_token_rejects_normal_text() {
+        assert!(!RENDER_RE.is_match("render web service"));
+    }
+
+    // ---- New patterns: Terraform Cloud Token ----
+
+    #[test]
+    fn terraform_token_matches_valid_token() {
+        let key = format!("atlasv1-{}", "a".repeat(40));
+        assert!(TERRAFORM_RE.is_match(&key));
+    }
+
+    #[test]
+    fn terraform_token_rejects_short_token() {
+        let key = format!("atlasv1-{}", "a".repeat(10));
+        assert!(!TERRAFORM_RE.is_match(&key));
+    }
+
+    #[test]
+    fn terraform_token_rejects_normal_text() {
+        assert!(!TERRAFORM_RE.is_match("terraform apply -auto-approve"));
+    }
+
+    // ---- New patterns: Mailgun API Key ----
+
+    #[test]
+    fn mailgun_key_matches_valid_key() {
+        let key = format!("key-{}", "a".repeat(32));
+        assert!(MAILGUN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn mailgun_key_rejects_short_key() {
+        let key = format!("key-{}", "a".repeat(10));
+        assert!(!MAILGUN_RE.is_match(&key));
+    }
+
+    #[test]
+    fn mailgun_key_rejects_normal_text() {
+        assert!(!MAILGUN_RE.is_match("mailgun email sending"));
+    }
+
+    #[test]
+    fn mailgun_key_rejects_uppercase_hex() {
+        // Pattern only matches lowercase hex
+        let key = format!("key-{}", "A".repeat(32));
+        assert!(!MAILGUN_RE.is_match(&key));
+    }
+
+    // ---- New patterns: Grafana Service Account Token ----
+
+    #[test]
+    fn grafana_sa_token_matches_valid_token() {
+        let key = format!("glsa_{}", "a".repeat(30));
+        assert!(GRAFANA_SA_RE.is_match(&key));
+    }
+
+    #[test]
+    fn grafana_sa_token_rejects_short_token() {
+        let key = format!("glsa_{}", "a".repeat(5));
+        assert!(!GRAFANA_SA_RE.is_match(&key));
+    }
+
+    #[test]
+    fn grafana_sa_token_rejects_normal_text() {
+        assert!(!GRAFANA_SA_RE.is_match("grafana dashboard setup"));
+    }
+
+    // ---- New patterns: Neon DB Connection String ----
+
+    #[test]
+    fn neon_connection_string_matches_postgresql() {
+        let conn =
+            "postgresql://user:password@ep-cool-darkness-123456.us-east-2.aws.neon.tech/neondb";
+        assert!(NEON_RE.is_match(conn));
+    }
+
+    #[test]
+    fn neon_connection_string_matches_postgres() {
+        let conn =
+            "postgres://user:password@ep-cool-darkness-123456.us-east-2.aws.neon.tech/neondb";
+        assert!(NEON_RE.is_match(conn));
+    }
+
+    #[test]
+    fn neon_connection_string_rejects_non_neon_host() {
+        let conn = "postgresql://user:password@localhost:5432/mydb";
+        assert!(!NEON_RE.is_match(conn));
+    }
+
+    #[test]
+    fn neon_connection_string_rejects_normal_text() {
+        assert!(!NEON_RE.is_match("neon database serverless"));
     }
 }

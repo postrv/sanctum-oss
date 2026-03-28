@@ -204,8 +204,7 @@ mod tests {
             note: "File verified safe by developer".to_string(),
         };
         let json = serde_json::to_string(&resolution).expect("serialise");
-        let roundtripped: ThreatResolution =
-            serde_json::from_str(&json).expect("deserialise");
+        let roundtripped: ThreatResolution = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(roundtripped.threat_id, "abcdef012345");
         assert_eq!(roundtripped.resolution, ResolutionAction::Restored);
         assert_eq!(roundtripped.note, "File verified safe by developer");
@@ -214,16 +213,16 @@ mod tests {
     #[test]
     fn new_threat_categories_serialise() {
         // McpViolation
-        let json = serde_json::to_string(&ThreatCategory::McpViolation)
-            .expect("serialise McpViolation");
+        let json =
+            serde_json::to_string(&ThreatCategory::McpViolation).expect("serialise McpViolation");
         assert_eq!(json, "\"McpViolation\"");
         let roundtripped: ThreatCategory =
             serde_json::from_str(&json).expect("deserialise McpViolation");
         assert_eq!(roundtripped, ThreatCategory::McpViolation);
 
         // BudgetOverrun
-        let json = serde_json::to_string(&ThreatCategory::BudgetOverrun)
-            .expect("serialise BudgetOverrun");
+        let json =
+            serde_json::to_string(&ThreatCategory::BudgetOverrun).expect("serialise BudgetOverrun");
         assert_eq!(json, "\"BudgetOverrun\"");
         let roundtripped: ThreatCategory =
             serde_json::from_str(&json).expect("deserialise BudgetOverrun");

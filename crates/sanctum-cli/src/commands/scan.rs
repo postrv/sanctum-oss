@@ -114,7 +114,11 @@ pub fn run() -> Result<(), CliError> {
             for (i, finding) in findings.iter().enumerate() {
                 println!();
                 println!("  [{}/{}] {}", i + 1, findings.len(), finding.kind);
-                println!("    File: {}:{}", finding.file.display(), finding.line_number);
+                println!(
+                    "    File: {}:{}",
+                    finding.file.display(),
+                    finding.line_number
+                );
                 println!("    Detail: {}", finding.detail);
                 println!("    Fix: {}", finding.remediation);
             }
@@ -153,7 +157,13 @@ fn scan_credential_files(dir: &Path, findings: &mut Vec<Finding>) {
 }
 
 fn scan_env_files(dir: &Path, findings: &mut Vec<Finding>) {
-    let env_patterns = [".env", ".env.local", ".env.production", ".env.staging", ".env.development"];
+    let env_patterns = [
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.staging",
+        ".env.development",
+    ];
 
     for pattern in &env_patterns {
         let path = dir.join(pattern);
@@ -190,7 +200,9 @@ fn scan_env_files(dir: &Path, findings: &mut Vec<Finding>) {
                             line_number: line_num + 1,
                             kind: "Plaintext secret in .env file".to_string(),
                             detail: format!("{var_name} contains a value ({} chars)", value.len()),
-                            remediation: "Use a secrets manager or environment variables at runtime".to_string(),
+                            remediation:
+                                "Use a secrets manager or environment variables at runtime"
+                                    .to_string(),
                         });
                     }
                     break;
@@ -207,7 +219,9 @@ fn scan_env_files(dir: &Path, findings: &mut Vec<Finding>) {
                             line_number: line_num + 1,
                             kind: format!("{service} key detected"),
                             detail: format!("Value starts with '{prefix}' (likely a {service})"),
-                            remediation: "Use a secrets manager or environment variables at runtime".to_string(),
+                            remediation:
+                                "Use a secrets manager or environment variables at runtime"
+                                    .to_string(),
                         });
                         break;
                     }
@@ -219,45 +233,53 @@ fn scan_env_files(dir: &Path, findings: &mut Vec<Finding>) {
 
 fn scan_source_files(dir: &Path, findings: &mut Vec<Finding>) {
     let extensions: HashSet<&str> = [
-        "py", "js", "ts", "jsx", "tsx", "rs", "go", "java", "rb",
-        "php", "yaml", "yml", "toml", "json", "xml", "tf", "hcl",
-    ].iter().copied().collect();
+        "py", "js", "ts", "jsx", "tsx", "rs", "go", "java", "rb", "php", "yaml", "yml", "toml",
+        "json", "xml", "tf", "hcl",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
-    walk_dir(dir, &mut |path: &Path| {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !extensions.contains(ext) {
-            return;
-        }
+    walk_dir(
+        dir,
+        &mut |path: &Path| {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !extensions.contains(ext) {
+                return;
+            }
 
-        let Ok(content) = fs::read_to_string(path) else {
-            return;
-        };
+            let Ok(content) = fs::read_to_string(path) else {
+                return;
+            };
 
-        for (line_num, line) in content.lines().enumerate() {
-            for &(prefix, service) in API_KEY_PATTERNS {
-                if line.contains(prefix) {
-                    // Avoid flagging comments that discuss patterns
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("//")
-                        || trimmed.starts_with('#')
-                        || trimmed.starts_with("/*")
-                        || trimmed.starts_with('*')
-                    {
-                        continue;
+            for (line_num, line) in content.lines().enumerate() {
+                for &(prefix, service) in API_KEY_PATTERNS {
+                    if line.contains(prefix) {
+                        // Avoid flagging comments that discuss patterns
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("//")
+                            || trimmed.starts_with('#')
+                            || trimmed.starts_with("/*")
+                            || trimmed.starts_with('*')
+                        {
+                            continue;
+                        }
+
+                        findings.push(Finding {
+                            file: path.to_path_buf(),
+                            line_number: line_num + 1,
+                            kind: format!("Possible {service} in source code"),
+                            detail: format!("Line contains '{prefix}...' pattern"),
+                            remediation: "Move to environment variable or secrets manager"
+                                .to_string(),
+                        });
+                        break;
                     }
-
-                    findings.push(Finding {
-                        file: path.to_path_buf(),
-                        line_number: line_num + 1,
-                        kind: format!("Possible {service} in source code"),
-                        detail: format!("Line contains '{prefix}...' pattern"),
-                        remediation: "Move to environment variable or secrets manager".to_string(),
-                    });
-                    break;
                 }
             }
-        }
-    }, 0);
+        },
+        0,
+    );
 }
 
 fn scan_gitignore(dir: &Path, findings: &mut Vec<Finding>) {
@@ -291,10 +313,12 @@ fn scan_gitignore(dir: &Path, findings: &mut Vec<Finding>) {
             dir.join(pattern).exists()
         };
 
-        if has_files && !content.lines().any(|l| {
-            let trimmed = l.trim();
-            trimmed == *pattern || trimmed.starts_with(pattern)
-        }) {
+        if has_files
+            && !content.lines().any(|l| {
+                let trimmed = l.trim();
+                trimmed == *pattern || trimmed.starts_with(pattern)
+            })
+        {
             findings.push(Finding {
                 file: gitignore_path.clone(),
                 line_number: 0,
@@ -370,12 +394,20 @@ mod tests {
         fs::write(current.join("deep.txt"), "deep").expect("write deep file");
 
         let count = AtomicUsize::new(0);
-        walk_dir(dir.path(), &mut |_path: &Path| {
-            count.fetch_add(1, Ordering::Relaxed);
-        }, 0);
+        walk_dir(
+            dir.path(),
+            &mut |_path: &Path| {
+                count.fetch_add(1, Ordering::Relaxed);
+            },
+            0,
+        );
 
         // The file at depth 60 should NOT be found (MAX_DEPTH is 50)
-        assert_eq!(count.load(Ordering::Relaxed), 0, "file beyond MAX_DEPTH should not be visited");
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            0,
+            "file beyond MAX_DEPTH should not be visited"
+        );
     }
 
     #[allow(clippy::expect_used)]
@@ -398,11 +430,19 @@ mod tests {
         fs::write(dir_a.join("real.txt"), "real").expect("write file");
 
         let count = AtomicUsize::new(0);
-        walk_dir(dir.path(), &mut |_path: &Path| {
-            count.fetch_add(1, Ordering::Relaxed);
-        }, 0);
+        walk_dir(
+            dir.path(),
+            &mut |_path: &Path| {
+                count.fetch_add(1, Ordering::Relaxed);
+            },
+            0,
+        );
 
         // Should find the real file but not hang following symlinks
-        assert_eq!(count.load(Ordering::Relaxed), 1, "should find exactly the real file");
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            1,
+            "should find exactly the real file"
+        );
     }
 }

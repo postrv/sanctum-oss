@@ -59,9 +59,7 @@ pub fn check_budget(tracker: &BudgetTracker, provider: Provider) -> EnforcementR
     if status.alert_triggered {
         let percent = compute_max_percent(&status);
         return EnforcementResult::Warning {
-            message: format!(
-                "Budget alert for {provider}: approaching limit ({percent}% used)"
-            ),
+            message: format!("Budget alert for {provider}: approaching limit ({percent}% used)"),
             percent,
         };
     }
@@ -129,12 +127,16 @@ fn compute_max_percent(status: &BudgetStatus) -> u8 {
     let session_pct = status
         .session_limit_cents
         .filter(|&l| l > 0)
-        .map_or(0, |limit| status.session_spent_cents.saturating_mul(100) / limit);
+        .map_or(0, |limit| {
+            status.session_spent_cents.saturating_mul(100) / limit
+        });
 
     let daily_pct = status
         .daily_limit_cents
         .filter(|&l| l > 0)
-        .map_or(0, |limit| status.daily_spent_cents.saturating_mul(100) / limit);
+        .map_or(0, |limit| {
+            status.daily_spent_cents.saturating_mul(100) / limit
+        });
 
     let max_pct = session_pct.max(daily_pct);
 
@@ -156,9 +158,7 @@ mod tests {
 
     fn make_tracker_with_session_limit(limit_cents: u64) -> BudgetTracker {
         let config = BudgetConfig {
-            default_session: Some(BudgetAmount {
-                cents: limit_cents,
-            }),
+            default_session: Some(BudgetAmount { cents: limit_cents }),
             default_daily: None,
             alert_at_percent: 75,
             ..BudgetConfig::default()
@@ -265,7 +265,9 @@ mod tests {
 
         let Ok(value) = parsed else { return };
 
-        let Some(error) = value.get("error") else { return };
+        let Some(error) = value.get("error") else {
+            return;
+        };
 
         assert_eq!(
             error.get("type").and_then(|v| v.as_str()),
@@ -276,11 +278,15 @@ mod tests {
             Some("OpenAI")
         );
         assert_eq!(
-            error.get("session_spent_cents").and_then(serde_json::Value::as_u64),
+            error
+                .get("session_spent_cents")
+                .and_then(serde_json::Value::as_u64),
             Some(500)
         );
         assert_eq!(
-            error.get("session_limit_cents").and_then(serde_json::Value::as_u64),
+            error
+                .get("session_limit_cents")
+                .and_then(serde_json::Value::as_u64),
             Some(100)
         );
     }
@@ -313,7 +319,11 @@ mod tests {
     fn model_allowed_when_list_is_none() {
         let config = BudgetConfig::default();
         assert!(is_model_allowed(&Provider::OpenAI, "gpt-4o", &config));
-        assert!(is_model_allowed(&Provider::Anthropic, "claude-sonnet-4-6", &config));
+        assert!(is_model_allowed(
+            &Provider::Anthropic,
+            "claude-sonnet-4-6",
+            &config
+        ));
     }
 
     #[test]
@@ -365,8 +375,16 @@ mod tests {
             providers,
             ..BudgetConfig::default()
         };
-        assert!(!is_model_allowed(&Provider::Anthropic, "claude-sonnet-4-6", &config));
-        assert!(!is_model_allowed(&Provider::Anthropic, "claude-opus-4-6", &config));
+        assert!(!is_model_allowed(
+            &Provider::Anthropic,
+            "claude-sonnet-4-6",
+            &config
+        ));
+        assert!(!is_model_allowed(
+            &Provider::Anthropic,
+            "claude-opus-4-6",
+            &config
+        ));
     }
 
     #[test]

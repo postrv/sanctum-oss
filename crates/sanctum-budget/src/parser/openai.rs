@@ -23,9 +23,9 @@ pub(super) fn parse_openai(value: &serde_json::Value) -> Result<UsageData, Budge
         .ok_or_else(|| BudgetError::ParseError("missing 'model' field in OpenAI response".into()))?
         .to_string();
 
-    let usage = value
-        .get("usage")
-        .ok_or_else(|| BudgetError::ParseError("missing 'usage' field in OpenAI response".into()))?;
+    let usage = value.get("usage").ok_or_else(|| {
+        BudgetError::ParseError("missing 'usage' field in OpenAI response".into())
+    })?;
 
     let input_tokens = usage
         .get("prompt_tokens")
@@ -38,9 +38,7 @@ pub(super) fn parse_openai(value: &serde_json::Value) -> Result<UsageData, Budge
         .get("completion_tokens")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| {
-            BudgetError::ParseError(
-                "missing 'usage.completion_tokens' in OpenAI response".into(),
-            )
+            BudgetError::ParseError("missing 'usage.completion_tokens' in OpenAI response".into())
         })?;
 
     Ok(UsageData {

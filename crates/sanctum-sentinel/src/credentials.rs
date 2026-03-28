@@ -14,12 +14,19 @@ use tokio::sync::mpsc;
 
 /// Processes that are expected to access credential files.
 const ALLOWED_ACCESSORS: &[&str] = &[
-    "ssh", "ssh-agent", "ssh-add", "scp", "sftp",
-    "git", "git-remote-https",
-    "aws", "aws-cli",
+    "ssh",
+    "ssh-agent",
+    "ssh-add",
+    "scp",
+    "sftp",
+    "git",
+    "git-remote-https",
+    "aws",
+    "aws-cli",
     "gcloud",
     "kubectl",
-    "docker", "docker-credential-helper",
+    "docker",
+    "docker-credential-helper",
     "op",      // 1Password CLI
     "doppler", // Doppler CLI
 ];
@@ -107,49 +114,47 @@ impl CredentialWatcher {
 
         let custom_al = std::sync::Arc::new(custom_allowlist);
 
-        let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            let event = match res {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(%e, "credential watcher error");
-                    return;
-                }
-            };
-
-            let is_modify = matches!(
-                event.kind,
-                EventKind::Create(_) | EventKind::Modify(_)
-            );
-            let is_access = matches!(event.kind, EventKind::Access(_));
-
-            if !is_modify && !is_access {
-                return;
-            }
-
-            for path in &event.paths {
-                if !is_credential_path(path, &credential_paths) {
-                    continue;
-                }
-
-                let (accessor_pid, accessor_name) = try_find_accessor_info(path);
-                let allowed = accessor_name
-                    .as_deref()
-                    .is_some_and(|name| is_allowed_accessor_with_custom(name, &custom_al));
-
-                let credential_event = CredentialEvent::AccessDetected {
-                    path: path.clone(),
-                    accessor_pid,
-                    accessor_name,
-                    allowed,
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                let event = match res {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(%e, "credential watcher error");
+                        return;
+                    }
                 };
 
-                if tx.blocking_send(credential_event).is_err() {
-                    alive_clone.store(false, std::sync::atomic::Ordering::Release);
+                let is_modify = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
+                let is_access = matches!(event.kind, EventKind::Access(_));
+
+                if !is_modify && !is_access {
                     return;
                 }
-            }
-        })
-        .map_err(|e| sanctum_types::errors::SentinelError::WatcherInit(e.to_string()))?;
+
+                for path in &event.paths {
+                    if !is_credential_path(path, &credential_paths) {
+                        continue;
+                    }
+
+                    let (accessor_pid, accessor_name) = try_find_accessor_info(path);
+                    let allowed = accessor_name
+                        .as_deref()
+                        .is_some_and(|name| is_allowed_accessor_with_custom(name, &custom_al));
+
+                    let credential_event = CredentialEvent::AccessDetected {
+                        path: path.clone(),
+                        accessor_pid,
+                        accessor_name,
+                        allowed,
+                    };
+
+                    if tx.blocking_send(credential_event).is_err() {
+                        alive_clone.store(false, std::sync::atomic::Ordering::Release);
+                        return;
+                    }
+                }
+            })
+            .map_err(|e| sanctum_types::errors::SentinelError::WatcherInit(e.to_string()))?;
 
         // Watch each credential path
         for path in watch_paths {
@@ -272,7 +277,11 @@ fn linux_find_accessor(path: &Path) -> (Option<u32>, Option<String>) {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::match_same_arms, clippy::cloned_ref_to_slice_refs)]
+#[allow(
+    clippy::expect_used,
+    clippy::match_same_arms,
+    clippy::cloned_ref_to_slice_refs
+)]
 mod tests {
     use super::*;
 
@@ -310,14 +319,8 @@ mod tests {
             Path::new("/home/user/.aws/credentials"),
             &paths,
         ));
-        assert!(is_credential_path(
-            Path::new("/home/user/.npmrc"),
-            &paths,
-        ));
-        assert!(!is_credential_path(
-            Path::new("/home/user/.bashrc"),
-            &paths,
-        ));
+        assert!(is_credential_path(Path::new("/home/user/.npmrc"), &paths,));
+        assert!(!is_credential_path(Path::new("/home/user/.bashrc"), &paths,));
     }
 
     #[tokio::test]
@@ -338,11 +341,7 @@ mod tests {
         std::fs::write(&cred_file, "secret=xyz789").expect("write");
 
         // Wait for the event (with timeout)
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
 
         match event {
             Ok(Some(CredentialEvent::AccessDetected { path, .. })) => {
@@ -353,7 +352,9 @@ mod tests {
             }
             _ => {
                 // On some CI environments, filesystem events may not fire reliably.
-                tracing::warn!("credential watcher event not received within timeout -- platform-dependent");
+                tracing::warn!(
+                    "credential watcher event not received within timeout -- platform-dependent"
+                );
             }
         }
     }
@@ -377,11 +378,7 @@ mod tests {
         std::fs::write(&other_file, "not a credential").expect("write");
 
         // Should NOT receive an event for the non-credential file
-        let event = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            rx.recv(),
-        )
-        .await;
+        let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
 
         // The timeout should expire without receiving an event
         assert!(
@@ -418,11 +415,7 @@ mod tests {
         // Modify the file
         std::fs::write(&cred_file, "modified").expect("write");
 
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
 
         match event {
             Ok(Some(CredentialEvent::AccessDetected { path, .. })) => {
@@ -438,7 +431,9 @@ mod tests {
                 );
             }
             _ => {
-                tracing::warn!("credential event not received within timeout -- platform-dependent");
+                tracing::warn!(
+                    "credential event not received within timeout -- platform-dependent"
+                );
             }
         }
     }

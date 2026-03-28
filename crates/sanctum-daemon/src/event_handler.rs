@@ -6,7 +6,9 @@
 use std::io::Read;
 use std::path::Path;
 
-use sanctum_sentinel::pth::analyser::{analyse_pth_file_with_custom_allowlist, content_hash, FileAnalysis, FileVerdict};
+use sanctum_sentinel::pth::analyser::{
+    analyse_pth_file_with_custom_allowlist, content_hash, FileAnalysis, FileVerdict,
+};
 use sanctum_sentinel::pth::lineage::{LineageAssessment, ProcessLineage, SystemProcSource};
 use sanctum_sentinel::pth::quarantine::{Quarantine, QuarantineMetadata};
 use sanctum_sentinel::watcher::{WatchEvent, WatchEventKind};
@@ -90,8 +92,8 @@ pub fn handle_watch_event(
             );
 
             // Attempt to determine the creator process (best-effort)
-            let (creator_pid, creator_exe, lineage_assessment) =
-                try_find_creator_pid(&event.path).map_or(
+            let (creator_pid, creator_exe, lineage_assessment) = try_find_creator_pid(&event.path)
+                .map_or(
                     (None, None, LineageAssessment::Undetermined),
                     trace_creator_lineage,
                 );
@@ -190,10 +192,7 @@ pub fn handle_credential_event(
 // ── Network event handling ─────────────────────────────────────────────────
 
 /// Handle a network anomaly event by creating a threat event and sending notification.
-pub fn handle_network_event(
-    event: &sanctum_sentinel::network::NetworkEvent,
-    audit_path: &Path,
-) {
+pub fn handle_network_event(event: &sanctum_sentinel::network::NetworkEvent, audit_path: &Path) {
     match event {
         sanctum_sentinel::network::NetworkEvent::AnomalousConnection {
             pid,
@@ -329,10 +328,7 @@ fn handle_warning_verdict(
         timestamp: chrono::Utc::now(),
         level,
         category: sanctum_types::threat::ThreatCategory::PthInjection,
-        description: format!(
-            "Suspicious import found in {}",
-            ctx.event.path.display()
-        ),
+        description: format!("Suspicious import found in {}", ctx.event.path.display()),
         source_path: ctx.event.path.clone(),
         creator_pid: ctx.creator_pid,
         creator_exe: ctx.creator_exe.clone(),
@@ -384,7 +380,10 @@ fn handle_critical_verdict(
                         );
                         (
                             sanctum_types::threat::Action::Quarantined,
-                            format!("Malicious .pth file quarantined: {}", ctx.event.path.display()),
+                            format!(
+                                "Malicious .pth file quarantined: {}",
+                                ctx.event.path.display()
+                            ),
                         )
                     }
                     Err(e) => {
@@ -421,10 +420,7 @@ fn handle_critical_verdict(
                 timestamp: chrono::Utc::now(),
                 level: sanctum_types::threat::ThreatLevel::Critical,
                 category: sanctum_types::threat::ThreatCategory::PthInjection,
-                description: format!(
-                    "Malicious .pth file detected: {}",
-                    ctx.event.path.display()
-                ),
+                description: format!("Malicious .pth file detected: {}", ctx.event.path.display()),
                 source_path: ctx.event.path.clone(),
                 creator_pid: ctx.creator_pid,
                 creator_exe: ctx.creator_exe.clone(),
@@ -517,15 +513,11 @@ fn linux_find_creator_pid(path: &Path) -> Option<u32> {
 /// Returns `(creator_pid, creator_exe, assessment)`. If lineage tracing
 /// fails (process already exited, etc.), returns the PID with `None` exe
 /// and `Undetermined` assessment.
-fn trace_creator_lineage(
-    pid: u32,
-) -> (Option<u32>, Option<std::path::PathBuf>, LineageAssessment) {
+fn trace_creator_lineage(pid: u32) -> (Option<u32>, Option<std::path::PathBuf>, LineageAssessment) {
     match ProcessLineage::trace(pid, &SystemProcSource) {
         Ok(lineage) => {
             let assessment = lineage.assess_pth_creation();
-            let creator_exe = lineage
-                .root_ancestor()
-                .and_then(|p| p.exe.clone());
+            let creator_exe = lineage.root_ancestor().and_then(|p| p.exe.clone());
             tracing::info!(
                 pid,
                 assessment = ?assessment,
@@ -552,7 +544,10 @@ mod tests {
 
     /// Helper: create a temp file with the given content and return (dir, path).
     /// Returns `None` if file creation fails (test will be skipped).
-    fn create_temp_file(name: &str, data: &[u8]) -> Option<(tempfile::TempDir, std::path::PathBuf)> {
+    fn create_temp_file(
+        name: &str,
+        data: &[u8],
+    ) -> Option<(tempfile::TempDir, std::path::PathBuf)> {
         let dir = tempfile::tempdir().ok()?;
         let path = dir.path().join(name);
         let mut f = std::fs::File::create(&path).ok()?;
@@ -614,10 +609,9 @@ mod tests {
     fn pth_response_log_generates_audit_event() {
         use sanctum_types::config::PthResponse;
 
-        let Some((dir, pth_path)) = create_temp_file(
-            "evil.pth",
-            b"import base64;exec(base64.b64decode('...'))",
-        ) else {
+        let Some((dir, pth_path)) =
+            create_temp_file("evil.pth", b"import base64;exec(base64.b64decode('...'))")
+        else {
             return;
         };
         let audit_path = dir.path().join("audit.log");
@@ -625,9 +619,8 @@ mod tests {
         let mut config = SanctumConfig::default();
         config.sentinel.pth_response = PthResponse::Log;
 
-        let quarantine = sanctum_sentinel::pth::quarantine::Quarantine::new(
-            dir.path().join("quarantine"),
-        );
+        let quarantine =
+            sanctum_sentinel::pth::quarantine::Quarantine::new(dir.path().join("quarantine"));
 
         let event = WatchEvent {
             path: pth_path,
@@ -656,10 +649,9 @@ mod tests {
     fn quarantine_failure_records_logged_action() {
         use sanctum_types::config::PthResponse;
 
-        let Some((dir, pth_path)) = create_temp_file(
-            "evil.pth",
-            b"import base64;exec(base64.b64decode('...'))",
-        ) else {
+        let Some((dir, pth_path)) =
+            create_temp_file("evil.pth", b"import base64;exec(base64.b64decode('...'))")
+        else {
             return;
         };
         let audit_path = dir.path().join("audit.log");
@@ -708,10 +700,9 @@ mod tests {
     fn quarantine_success_records_quarantined_action() {
         use sanctum_types::config::PthResponse;
 
-        let Some((dir, pth_path)) = create_temp_file(
-            "evil.pth",
-            b"import base64;exec(base64.b64decode('...'))",
-        ) else {
+        let Some((dir, pth_path)) =
+            create_temp_file("evil.pth", b"import base64;exec(base64.b64decode('...'))")
+        else {
             return;
         };
         let audit_path = dir.path().join("audit.log");
@@ -720,9 +711,8 @@ mod tests {
         config.sentinel.pth_response = PthResponse::Quarantine;
 
         // Use a valid, writable quarantine directory
-        let quarantine = sanctum_sentinel::pth::quarantine::Quarantine::new(
-            dir.path().join("quarantine"),
-        );
+        let quarantine =
+            sanctum_sentinel::pth::quarantine::Quarantine::new(dir.path().join("quarantine"));
 
         let event = WatchEvent {
             path: pth_path,

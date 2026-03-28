@@ -229,7 +229,10 @@ mod tests {
         let (first_pass, _) = redact_credentials(input);
         let (second_pass, events) = redact_credentials(&first_pass);
         assert_eq!(first_pass, second_pass);
-        assert!(events.is_empty(), "Second pass should produce no new events");
+        assert!(
+            events.is_empty(),
+            "Second pass should produce no new events"
+        );
     }
 
     #[test]
@@ -331,10 +334,7 @@ mod tests {
 
     #[test]
     fn redacts_slack_app_token() {
-        let token = format!(
-            "xapp-1-A1234567890-1234567890123-{}",
-            "a".repeat(64)
-        );
+        let token = format!("xapp-1-A1234567890-1234567890123-{}", "a".repeat(64));
         let input = format!("auth: {token}");
         let (output, events) = redact_credentials(&input);
         assert!(!output.contains("xapp-"));
@@ -455,7 +455,9 @@ mod tests {
             "Output should contain entropy-based redaction placeholder"
         );
         assert!(
-            events.iter().any(|e| e.credential_type == "High-Entropy Secret"),
+            events
+                .iter()
+                .any(|e| e.credential_type == "High-Entropy Secret"),
             "Events should include a High-Entropy Secret entry"
         );
     }

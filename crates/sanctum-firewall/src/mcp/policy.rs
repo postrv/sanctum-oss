@@ -61,7 +61,9 @@ impl McpPolicy {
                 }
             })
             .collect();
-        Self { rules: validated_rules }
+        Self {
+            rules: validated_rules,
+        }
     }
 
     /// Create an MCP policy from configuration rules.
@@ -236,10 +238,7 @@ mod tests {
             tool: "read_file".to_owned(),
             restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
         }]);
-        let decision = policy.evaluate(
-            "read_file",
-            &json!({"path": "/home/user/.ssh/id_rsa"}),
-        );
+        let decision = policy.evaluate("read_file", &json!({"path": "/home/user/.ssh/id_rsa"}));
         assert_eq!(decision, HookDecision::Block);
     }
 
@@ -263,10 +262,7 @@ mod tests {
             restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
         }]);
         // Rule is for read_file, not write_file
-        let decision = policy.evaluate(
-            "write_file",
-            &json!({"path": "/home/user/.ssh/id_rsa"}),
-        );
+        let decision = policy.evaluate("write_file", &json!({"path": "/home/user/.ssh/id_rsa"}));
         assert_eq!(decision, HookDecision::Allow);
     }
 
@@ -289,10 +285,7 @@ mod tests {
             tool: "read_file".to_owned(),
             restricted_paths: vec!["/etc/shadow".to_owned()],
         }]);
-        let decision = policy.evaluate(
-            "read_file",
-            &json!({"path": "/etc/shadow"}),
-        );
+        let decision = policy.evaluate("read_file", &json!({"path": "/etc/shadow"}));
         assert_eq!(decision, HookDecision::Block);
     }
 
@@ -308,14 +301,9 @@ mod tests {
                 restricted_paths: vec!["/home/user/.aws/**".to_owned()],
             },
         ]);
-        let decision1 = policy.evaluate(
-            "read_file",
-            &json!({"path": "/home/user/.ssh/id_rsa"}),
-        );
-        let decision2 = policy.evaluate(
-            "read_file",
-            &json!({"path": "/home/user/.aws/credentials"}),
-        );
+        let decision1 = policy.evaluate("read_file", &json!({"path": "/home/user/.ssh/id_rsa"}));
+        let decision2 =
+            policy.evaluate("read_file", &json!({"path": "/home/user/.aws/credentials"}));
         assert_eq!(decision1, HookDecision::Block);
         assert_eq!(decision2, HookDecision::Block);
     }
@@ -336,8 +324,14 @@ mod tests {
     #[test]
     fn glob_prefix_match_works() {
         assert!(glob_matches("/home/user/.ssh/**", "/home/user/.ssh/id_rsa"));
-        assert!(glob_matches("/home/user/.ssh/**", "/home/user/.ssh/known_hosts"));
-        assert!(!glob_matches("/home/user/.ssh/**", "/home/user/project/file.txt"));
+        assert!(glob_matches(
+            "/home/user/.ssh/**",
+            "/home/user/.ssh/known_hosts"
+        ));
+        assert!(!glob_matches(
+            "/home/user/.ssh/**",
+            "/home/user/project/file.txt"
+        ));
     }
 
     #[test]
@@ -365,24 +359,15 @@ mod tests {
         let policy = McpPolicy::from_config_rules(&config_rules);
 
         // read_file accessing .ssh should be blocked
-        let decision = policy.evaluate(
-            "read_file",
-            &json!({"path": "/home/user/.ssh/id_rsa"}),
-        );
+        let decision = policy.evaluate("read_file", &json!({"path": "/home/user/.ssh/id_rsa"}));
         assert_eq!(decision, HookDecision::Block);
 
         // write_file writing a .pth should be blocked
-        let decision = policy.evaluate(
-            "write_file",
-            &json!({"path": "/usr/lib/python3/evil.pth"}),
-        );
+        let decision = policy.evaluate("write_file", &json!({"path": "/usr/lib/python3/evil.pth"}));
         assert_eq!(decision, HookDecision::Block);
 
         // read_file accessing a normal file should be allowed
-        let decision = policy.evaluate(
-            "read_file",
-            &json!({"path": "/home/user/project/main.rs"}),
-        );
+        let decision = policy.evaluate("read_file", &json!({"path": "/home/user/project/main.rs"}));
         assert_eq!(decision, HookDecision::Allow);
     }
 
@@ -413,7 +398,10 @@ mod tests {
         // and ends with ".json", but NOT arbitrary .json files.
         assert!(glob_matches("**/config*.json", "/home/config-dev.json"));
         assert!(glob_matches("**/config*.json", "/home/user/config.json"));
-        assert!(glob_matches("**/config*.json", "/home/user/config_prod.json"));
+        assert!(glob_matches(
+            "**/config*.json",
+            "/home/user/config_prod.json"
+        ));
         assert!(!glob_matches("**/config*.json", "/home/random.json"));
         assert!(!glob_matches("**/config*.json", "/home/user/settings.json"));
     }
@@ -432,9 +420,9 @@ mod tests {
         let policy = McpPolicy::from_config(vec![PolicyRule {
             tool: "read_file".to_owned(),
             restricted_paths: vec![
-                "/home/user/.ssh/**".to_owned(),        // valid — kept
-                "/foo/*/bar/*.txt".to_owned(),           // invalid — stripped
-                "**/*.pth".to_owned(),                   // valid — kept
+                "/home/user/.ssh/**".to_owned(), // valid — kept
+                "/foo/*/bar/*.txt".to_owned(),   // invalid — stripped
+                "**/*.pth".to_owned(),           // valid — kept
             ],
         }]);
         // The invalid pattern should have been removed

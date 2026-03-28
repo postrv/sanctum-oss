@@ -85,15 +85,13 @@ fn offline_status() -> Result<(), CliError> {
     };
 
     // Count quarantine items best-effort
-    let quarantine_display = std::fs::read_dir(&paths.quarantine_dir)
-        .ok()
-        .map_or_else(
-            || "directory not created".to_string(),
-            |entries| {
-                let count = entries.filter_map(std::result::Result::ok).count();
-                format!("{count} items")
-            },
-        );
+    let quarantine_display = std::fs::read_dir(&paths.quarantine_dir).ok().map_or_else(
+        || "directory not created".to_string(),
+        |entries| {
+            let count = entries.filter_map(std::result::Result::ok).count();
+            format!("{count} items")
+        },
+    );
 
     #[allow(clippy::print_stdout)]
     {

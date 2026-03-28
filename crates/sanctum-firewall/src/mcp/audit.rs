@@ -119,7 +119,12 @@ mod tests {
     #[test]
     fn record_adds_entry() {
         let mut log = McpAuditLog::new();
-        log.record("test_tool", json!({"key": "value"}), HookDecision::Allow, None);
+        log.record(
+            "test_tool",
+            json!({"key": "value"}),
+            HookDecision::Allow,
+            None,
+        );
         assert_eq!(log.entries().len(), 1);
         assert_eq!(log.entries()[0].tool_name, "test_tool");
         assert_eq!(log.entries()[0].decision, HookDecision::Allow);
@@ -129,8 +134,18 @@ mod tests {
     fn record_multiple_entries() {
         let mut log = McpAuditLog::new();
         log.record("tool_a", json!({}), HookDecision::Allow, None);
-        log.record("tool_b", json!({}), HookDecision::Block, Some("blocked".to_owned()));
-        log.record("tool_c", json!({}), HookDecision::Warn, Some("warned".to_owned()));
+        log.record(
+            "tool_b",
+            json!({}),
+            HookDecision::Block,
+            Some("blocked".to_owned()),
+        );
+        log.record(
+            "tool_c",
+            json!({}),
+            HookDecision::Warn,
+            Some("warned".to_owned()),
+        );
         assert_eq!(log.entries().len(), 3);
     }
 
@@ -138,7 +153,12 @@ mod tests {
     fn write_to_file_creates_ndjson() -> Result<(), Box<dyn std::error::Error>> {
         let mut log = McpAuditLog::new();
         log.record("tool_x", json!({"arg": 1}), HookDecision::Allow, None);
-        log.record("tool_y", json!({"arg": 2}), HookDecision::Block, Some("reason".to_owned()));
+        log.record(
+            "tool_y",
+            json!({"arg": 2}),
+            HookDecision::Block,
+            Some("reason".to_owned()),
+        );
 
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("audit.ndjson");
@@ -173,7 +193,11 @@ mod tests {
         // Second write: should append, resulting in 2 entries total
         log.write_to_file(&path)?;
         let contents = std::fs::read_to_string(&path)?;
-        assert_eq!(contents.lines().count(), 2, "write_to_file should append, not truncate");
+        assert_eq!(
+            contents.lines().count(),
+            2,
+            "write_to_file should append, not truncate"
+        );
 
         // Verify all lines are valid JSON
         for line in contents.lines() {
@@ -193,10 +217,7 @@ mod tests {
             Some("path restriction violated".to_owned()),
         );
         let entry = &log.entries()[0];
-        assert_eq!(
-            entry.reason.as_deref(),
-            Some("path restriction violated")
-        );
+        assert_eq!(entry.reason.as_deref(), Some("path restriction violated"));
     }
 
     #[cfg(unix)]
@@ -228,7 +249,10 @@ mod tests {
         for i in 0..10_050 {
             log.record(format!("tool_{i}"), json!({}), HookDecision::Allow, None);
         }
-        assert!(log.entries().len() <= 10_000, "entries should be capped at 10,000");
+        assert!(
+            log.entries().len() <= 10_000,
+            "entries should be capped at 10,000"
+        );
         // Oldest entries should have been drained
         assert!(log.entries()[0].tool_name.ends_with("_50") || log.entries().len() == 10_000);
     }

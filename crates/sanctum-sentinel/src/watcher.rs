@@ -57,37 +57,38 @@ impl PthWatcher {
         let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let alive_clone = alive.clone();
 
-        let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            let event = match res {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(%e, "filesystem watcher error");
-                    return;
-                }
-            };
-
-            let kind = match event.kind {
-                EventKind::Create(_) => WatchEventKind::Created,
-                EventKind::Modify(_) => WatchEventKind::Modified,
-                EventKind::Remove(_) => WatchEventKind::Deleted,
-                _ => return,
-            };
-
-            for path in event.paths {
-                if is_watched_file(&path) {
-                    let watch_event = WatchEvent {
-                        path: path.clone(),
-                        kind,
-                    };
-                    if tx.blocking_send(watch_event).is_err() {
-                        // Receiver dropped — mark watcher as dead
-                        alive_clone.store(false, std::sync::atomic::Ordering::Release);
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                let event = match res {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(%e, "filesystem watcher error");
                         return;
                     }
+                };
+
+                let kind = match event.kind {
+                    EventKind::Create(_) => WatchEventKind::Created,
+                    EventKind::Modify(_) => WatchEventKind::Modified,
+                    EventKind::Remove(_) => WatchEventKind::Deleted,
+                    _ => return,
+                };
+
+                for path in event.paths {
+                    if is_watched_file(&path) {
+                        let watch_event = WatchEvent {
+                            path: path.clone(),
+                            kind,
+                        };
+                        if tx.blocking_send(watch_event).is_err() {
+                            // Receiver dropped — mark watcher as dead
+                            alive_clone.store(false, std::sync::atomic::Ordering::Release);
+                            return;
+                        }
+                    }
                 }
-            }
-        })
-        .map_err(|e| sanctum_types::errors::SentinelError::WatcherInit(e.to_string()))?;
+            })
+            .map_err(|e| sanctum_types::errors::SentinelError::WatcherInit(e.to_string()))?;
 
         for path in watch_paths {
             if path.exists() {
@@ -122,10 +123,7 @@ impl PthWatcher {
 /// Check if a path is a file we should watch.
 #[must_use]
 pub fn is_watched_file(path: &Path) -> bool {
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     std::path::Path::new(file_name)
         .extension()
@@ -145,7 +143,10 @@ pub async fn discover_site_packages() -> Vec<PathBuf> {
     let Ok(Ok(output)) = tokio::time::timeout(
         Duration::from_secs(10),
         tokio::process::Command::new("python3")
-            .args(["-c", "import site; print('\\n'.join(site.getsitepackages()))"])
+            .args([
+                "-c",
+                "import site; print('\\n'.join(site.getsitepackages()))",
+            ])
             .output(),
     )
     .await
@@ -177,7 +178,9 @@ mod tests {
 
     #[test]
     fn is_watched_file_matches_sitecustomize() {
-        assert!(is_watched_file(Path::new("/site-packages/sitecustomize.py")));
+        assert!(is_watched_file(Path::new(
+            "/site-packages/sitecustomize.py"
+        )));
         assert!(is_watched_file(Path::new("usercustomize.py")));
     }
 
@@ -193,8 +196,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (tx, mut rx) = mpsc::channel(16);
 
-        let _watcher = PthWatcher::start(&[dir.path().to_path_buf()], tx)
-            .expect("watcher should start");
+        let _watcher =
+            PthWatcher::start(&[dir.path().to_path_buf()], tx).expect("watcher should start");
 
         // Give the watcher a moment to register
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -203,16 +206,15 @@ mod tests {
         std::fs::write(dir.path().join("test.pth"), "import os").expect("write");
 
         // Wait for the event (with timeout)
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
 
         match event {
             Ok(Some(e)) => {
                 assert!(e.path.to_string_lossy().contains("test.pth"));
-                assert!(matches!(e.kind, WatchEventKind::Created | WatchEventKind::Modified));
+                assert!(matches!(
+                    e.kind,
+                    WatchEventKind::Created | WatchEventKind::Modified
+                ));
             }
             _ => {
                 // On some CI environments, filesystem events may not fire reliably.
@@ -227,8 +229,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (tx, mut rx) = mpsc::channel(16);
 
-        let _watcher = PthWatcher::start(&[dir.path().to_path_buf()], tx)
-            .expect("watcher should start");
+        let _watcher =
+            PthWatcher::start(&[dir.path().to_path_buf()], tx).expect("watcher should start");
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -236,11 +238,7 @@ mod tests {
         std::fs::write(dir.path().join("module.py"), "print('hello')").expect("write");
 
         // Should NOT receive an event
-        let event = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            rx.recv(),
-        )
-        .await;
+        let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
 
         assert!(event.is_err(), "should not receive event for non-.pth file");
     }

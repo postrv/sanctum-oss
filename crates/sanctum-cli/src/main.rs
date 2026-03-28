@@ -201,21 +201,19 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Commands::Init { dir, shell } => commands::init::run(&dir, shell.as_deref()),
         Commands::Status => commands::status::run(),
-        Commands::Review { json, approve, delete } => {
-            commands::review::run(json, approve.as_deref(), delete.as_deref())
-        }
+        Commands::Review {
+            json,
+            approve,
+            delete,
+        } => commands::review::run(json, approve.as_deref(), delete.as_deref()),
         Commands::Scan => commands::scan::run(),
-        Commands::Run { sandbox, command } => {
-            commands::run::run(sandbox, &command)
-        }
+        Commands::Run { sandbox, command } => commands::run::run(sandbox, &command),
         Commands::Config { edit, recommended } => commands::config::run(edit, recommended),
         Commands::Budget { action } => commands::budget::run(action.as_ref()),
         Commands::Audit { last, level, json } => {
             commands::audit::run(last.as_deref(), level.as_deref(), json)
         }
-        Commands::Fix { action, json, yes } => {
-            commands::fix::run(action.as_ref(), json, yes)
-        }
+        Commands::Fix { action, json, yes } => commands::fix::run(action.as_ref(), json, yes),
         Commands::Hook { action, verbose } => commands::hook::run(&action, verbose),
         Commands::Hooks { action } => commands::hooks::run(&action),
         Commands::Daemon { action } => commands::daemon::run(&action),

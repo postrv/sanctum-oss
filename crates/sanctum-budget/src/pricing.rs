@@ -16,30 +16,94 @@ struct ModelPrice {
 /// NOTE: More-specific prefixes MUST appear before less-specific ones
 /// (e.g. "gpt-4o-mini" before "gpt-4o") so prefix matching works correctly.
 const OPENAI_PRICING: &[ModelPrice] = &[
-    ModelPrice { model_prefix: "gpt-4o-mini",  input_price: 15,   output_price: 60 },
-    ModelPrice { model_prefix: "gpt-4o",       input_price: 250,  output_price: 1000 },
-    ModelPrice { model_prefix: "gpt-4-turbo",  input_price: 1000, output_price: 3000 },
-    ModelPrice { model_prefix: "gpt-4.1-nano", input_price: 10,   output_price: 40 },
-    ModelPrice { model_prefix: "gpt-4.1-mini", input_price: 40,   output_price: 160 },
-    ModelPrice { model_prefix: "gpt-4.1",      input_price: 200,  output_price: 800 },
-    ModelPrice { model_prefix: "o3-mini",      input_price: 110,  output_price: 440 },
-    ModelPrice { model_prefix: "o4-mini",      input_price: 110,  output_price: 440 },
-    ModelPrice { model_prefix: "o1-mini",      input_price: 110,  output_price: 440 },
-    ModelPrice { model_prefix: "o1-preview",   input_price: 1500, output_price: 6000 },
-    ModelPrice { model_prefix: "o1",           input_price: 1500, output_price: 6000 },
+    ModelPrice {
+        model_prefix: "gpt-4o-mini",
+        input_price: 15,
+        output_price: 60,
+    },
+    ModelPrice {
+        model_prefix: "gpt-4o",
+        input_price: 250,
+        output_price: 1000,
+    },
+    ModelPrice {
+        model_prefix: "gpt-4-turbo",
+        input_price: 1000,
+        output_price: 3000,
+    },
+    ModelPrice {
+        model_prefix: "gpt-4.1-nano",
+        input_price: 10,
+        output_price: 40,
+    },
+    ModelPrice {
+        model_prefix: "gpt-4.1-mini",
+        input_price: 40,
+        output_price: 160,
+    },
+    ModelPrice {
+        model_prefix: "gpt-4.1",
+        input_price: 200,
+        output_price: 800,
+    },
+    ModelPrice {
+        model_prefix: "o3-mini",
+        input_price: 110,
+        output_price: 440,
+    },
+    ModelPrice {
+        model_prefix: "o4-mini",
+        input_price: 110,
+        output_price: 440,
+    },
+    ModelPrice {
+        model_prefix: "o1-mini",
+        input_price: 110,
+        output_price: 440,
+    },
+    ModelPrice {
+        model_prefix: "o1-preview",
+        input_price: 1500,
+        output_price: 6000,
+    },
+    ModelPrice {
+        model_prefix: "o1",
+        input_price: 1500,
+        output_price: 6000,
+    },
 ];
 
 /// Anthropic model pricing (cents per million tokens).
 const ANTHROPIC_PRICING: &[ModelPrice] = &[
-    ModelPrice { model_prefix: "claude-opus-4-6",   input_price: 1500, output_price: 7500 },
-    ModelPrice { model_prefix: "claude-sonnet-4-6", input_price: 300,  output_price: 1500 },
-    ModelPrice { model_prefix: "claude-haiku-4-5",  input_price: 80,   output_price: 400 },
+    ModelPrice {
+        model_prefix: "claude-opus-4-6",
+        input_price: 1500,
+        output_price: 7500,
+    },
+    ModelPrice {
+        model_prefix: "claude-sonnet-4-6",
+        input_price: 300,
+        output_price: 1500,
+    },
+    ModelPrice {
+        model_prefix: "claude-haiku-4-5",
+        input_price: 80,
+        output_price: 400,
+    },
 ];
 
 /// Google model pricing (cents per million tokens).
 const GOOGLE_PRICING: &[ModelPrice] = &[
-    ModelPrice { model_prefix: "gemini-2.5-pro",   input_price: 125, output_price: 1000 },
-    ModelPrice { model_prefix: "gemini-2.5-flash", input_price: 15,  output_price: 60 },
+    ModelPrice {
+        model_prefix: "gemini-2.5-pro",
+        input_price: 125,
+        output_price: 1000,
+    },
+    ModelPrice {
+        model_prefix: "gemini-2.5-flash",
+        input_price: 15,
+        output_price: 60,
+    },
 ];
 
 /// Default fallback prices per provider (cents per million tokens).
@@ -90,15 +154,9 @@ pub fn calculate_cost(
     output_tokens: u64,
 ) -> u64 {
     let (input_price, output_price) = match provider {
-        Provider::OpenAI => {
-            lookup_price(OPENAI_PRICING, model).unwrap_or(DEFAULT_OPENAI)
-        }
-        Provider::Anthropic => {
-            lookup_price(ANTHROPIC_PRICING, model).unwrap_or(DEFAULT_ANTHROPIC)
-        }
-        Provider::Google => {
-            lookup_price(GOOGLE_PRICING, model).unwrap_or(DEFAULT_GOOGLE)
-        }
+        Provider::OpenAI => lookup_price(OPENAI_PRICING, model).unwrap_or(DEFAULT_OPENAI),
+        Provider::Anthropic => lookup_price(ANTHROPIC_PRICING, model).unwrap_or(DEFAULT_ANTHROPIC),
+        Provider::Google => lookup_price(GOOGLE_PRICING, model).unwrap_or(DEFAULT_GOOGLE),
     };
 
     let input_cost = ceiling_cost(input_tokens, input_price);
@@ -230,12 +288,7 @@ mod tests {
 
     #[test]
     fn unknown_model_uses_default() {
-        let cost = calculate_cost(
-            Provider::OpenAI,
-            "gpt-5-ultra-turbo",
-            1_000_000,
-            1_000_000,
-        );
+        let cost = calculate_cost(Provider::OpenAI, "gpt-5-ultra-turbo", 1_000_000, 1_000_000);
         assert_eq!(cost, 1250); // default OpenAI: 250 + 1000
     }
 
@@ -252,12 +305,7 @@ mod tests {
 
     #[test]
     fn unknown_google_model_uses_default() {
-        let cost = calculate_cost(
-            Provider::Google,
-            "gemini-4.0-ultra",
-            1_000_000,
-            1_000_000,
-        );
+        let cost = calculate_cost(Provider::Google, "gemini-4.0-ultra", 1_000_000, 1_000_000);
         assert_eq!(cost, 1125); // default Google: 125 + 1000
     }
 
@@ -334,10 +382,7 @@ mod tests {
             calculate_cost(Provider::Anthropic, "claude-sonnet-4-6", 0, 0),
             0
         );
-        assert_eq!(
-            calculate_cost(Provider::Google, "gemini-2.5-pro", 0, 0),
-            0
-        );
+        assert_eq!(calculate_cost(Provider::Google, "gemini-2.5-pro", 0, 0), 0);
     }
 }
 

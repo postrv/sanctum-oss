@@ -23,7 +23,9 @@ pub fn run(edit: bool, recommended: bool) -> Result<(), CliError> {
             .or_else(|_| std::env::var("VISUAL"))
             .unwrap_or_else(|_| "vi".to_string());
 
-        let path = if let Some(p) = config_path { p } else {
+        let path = if let Some(p) = config_path {
+            p
+        } else {
             // Create default config in standard location
             let paths = sanctum_types::paths::WellKnownPaths::default();
             let config_file = paths.config_dir.join("config.toml");
@@ -53,7 +55,9 @@ pub fn run(edit: bool, recommended: bool) -> Result<(), CliError> {
             .map_err(|e| CliError::InvalidArgs(format!("failed to open editor '{editor}': {e}")))?;
 
         if !status.success() {
-            return Err(CliError::InvalidArgs("editor exited with error".to_string()));
+            return Err(CliError::InvalidArgs(
+                "editor exited with error".to_string(),
+            ));
         }
     } else {
         match config_path {
@@ -179,6 +183,10 @@ mod tests {
     #[test]
     fn recommended_config_parses_as_valid_toml() {
         let result = toml::from_str::<sanctum_types::config::SanctumConfig>(recommended_config());
-        assert!(result.is_ok(), "recommended config should parse as valid TOML: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "recommended config should parse as valid TOML: {:?}",
+            result.err()
+        );
     }
 }

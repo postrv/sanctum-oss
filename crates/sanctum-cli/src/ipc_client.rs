@@ -26,12 +26,13 @@ pub fn send_command(command: &IpcCommand) -> Result<IpcResponse, CliError> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| CliError::ConnectionFailed(format!("failed to create runtime: {e}")))?;
 
-    runtime.block_on(async {
-        send_command_async(socket_path, command).await
-    })
+    runtime.block_on(async { send_command_async(socket_path, command).await })
 }
 
-async fn send_command_async(socket_path: &Path, command: &IpcCommand) -> Result<IpcResponse, CliError> {
+async fn send_command_async(
+    socket_path: &Path,
+    command: &IpcCommand,
+) -> Result<IpcResponse, CliError> {
     let mut stream = UnixStream::connect(socket_path)
         .await
         .map_err(|e| CliError::ConnectionFailed(format!("failed to connect to daemon: {e}")))?;

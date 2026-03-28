@@ -111,7 +111,9 @@ fn parse_lsof_output(output: &str) -> HashSet<ConnectionInfo> {
 
                 // Parse connection string like "127.0.0.1:8080->93.184.216.34:443"
                 // or "[::1]:8080->[::1]:443" for IPv6
-                if let Some(conn) = parse_connection_name(value, current_pid, current_command.as_deref()) {
+                if let Some(conn) =
+                    parse_connection_name(value, current_pid, current_command.as_deref())
+                {
                     connections.insert(conn);
                 }
             }

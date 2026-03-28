@@ -23,7 +23,6 @@ pub struct SanctumConfig {
     pub proxy: ProxyConfig,
 }
 
-
 /// How to respond when a suspicious `.pth` file is detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -283,9 +282,9 @@ impl<'de> Deserialize<'de> for BudgetAmount {
         }
 
         // Parse as float, then convert to cents
-        let amount: f64 = s.parse().map_err(|_| {
-            serde::de::Error::custom(format!("invalid budget format: {s}"))
-        })?;
+        let amount: f64 = s
+            .parse()
+            .map_err(|_| serde::de::Error::custom(format!("invalid budget format: {s}")))?;
 
         if !amount.is_finite() {
             return Err(serde::de::Error::custom("budget must be a finite number"));
@@ -335,8 +334,7 @@ mod tests {
             [sentinel]
             watch_pth = true
         ";
-        let config: SanctumConfig =
-            toml::from_str(toml_str).expect("minimal config should parse");
+        let config: SanctumConfig = toml::from_str(toml_str).expect("minimal config should parse");
         assert!(config.sentinel.watch_pth);
         assert_eq!(config.sentinel.pth_response, PthResponse::Quarantine);
     }
@@ -367,8 +365,7 @@ mod tests {
             [budgets]
             default_session = "$50"
         "#;
-        let config: SanctumConfig =
-            toml::from_str(toml_str).expect("dollar string should parse");
+        let config: SanctumConfig = toml::from_str(toml_str).expect("dollar string should parse");
         let budget = config.budgets.default_session.expect("should have budget");
         assert_eq!(budget.cents, 5000);
         assert_eq!(budget.to_string(), "$50.00");
@@ -406,8 +403,7 @@ mod tests {
     #[test]
     fn config_version_parses_from_toml() {
         let toml_str = "config_version = 1\n";
-        let config: SanctumConfig =
-            toml::from_str(toml_str).expect("config_version should parse");
+        let config: SanctumConfig = toml::from_str(toml_str).expect("config_version should parse");
         assert_eq!(config.config_version, Some(1));
     }
 
@@ -459,13 +455,15 @@ mod tests {
             destination_blocklist = ["10.0.0.1"]
             safe_ports = [80, 443]
         "#;
-        let config: SanctumConfig =
-            toml::from_str(toml_str).expect("network config should parse");
+        let config: SanctumConfig = toml::from_str(toml_str).expect("network config should parse");
         assert_eq!(config.sentinel.network.poll_interval_secs, 10);
         assert_eq!(config.sentinel.network.learning_period_days, 14);
         assert_eq!(config.sentinel.network.transfer_threshold_bytes, 50_000_000);
         assert_eq!(config.sentinel.network.process_allowlist, vec!["myapp"]);
-        assert_eq!(config.sentinel.network.destination_blocklist, vec!["10.0.0.1"]);
+        assert_eq!(
+            config.sentinel.network.destination_blocklist,
+            vec!["10.0.0.1"]
+        );
         assert_eq!(config.sentinel.network.safe_ports, vec![80, 443]);
     }
 
@@ -535,8 +533,7 @@ mod tests {
             ca_validity_days = 30
             max_response_body_bytes = 5242880
         ";
-        let config: SanctumConfig =
-            toml::from_str(toml_str).expect("proxy config should parse");
+        let config: SanctumConfig = toml::from_str(toml_str).expect("proxy config should parse");
         assert!(config.proxy.enabled);
         assert_eq!(config.proxy.listen_port, 8080);
         assert!(!config.proxy.enforce_budget);
@@ -582,7 +579,10 @@ mod tests {
             default_session = "$184467440737095517.00"
         "#;
         let result: Result<SanctumConfig, _> = toml::from_str(toml_str);
-        assert!(result.is_err(), "amount that overflows u64 cents should be rejected");
+        assert!(
+            result.is_err(),
+            "amount that overflows u64 cents should be rejected"
+        );
     }
 
     #[test]
@@ -609,8 +609,7 @@ mod tests {
             [budgets]
             alert_at_percent = 200
         ";
-        let config: SanctumConfig =
-            toml::from_str(toml_str).expect("config should parse");
+        let config: SanctumConfig = toml::from_str(toml_str).expect("config should parse");
         assert_eq!(
             config.budgets.alert_at_percent, 100,
             "alert_at_percent > 100 should be clamped to 100"
@@ -626,8 +625,7 @@ mod tests {
             [sentinel.network]
             poll_interval_secs = 0
         ";
-        let config: SanctumConfig =
-            toml::from_str(toml_str).expect("config should parse");
+        let config: SanctumConfig = toml::from_str(toml_str).expect("config should parse");
         // Zero interval would panic tokio — must be clamped to at least 1
         assert!(
             config.sentinel.network.poll_interval_secs >= 1,
@@ -641,8 +639,7 @@ mod tests {
             [sentinel.network]
             poll_interval_secs = 86400
         ";
-        let config: SanctumConfig =
-            toml::from_str(toml_str).expect("config should parse");
+        let config: SanctumConfig = toml::from_str(toml_str).expect("config should parse");
         assert_eq!(
             config.sentinel.network.poll_interval_secs, 3600,
             "poll_interval_secs above 3600 should be clamped to 3600"

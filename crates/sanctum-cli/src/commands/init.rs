@@ -186,9 +186,7 @@ fn detect_python() {
 
 /// Detect nono (sandbox tool) and display version if found.
 fn detect_nono() {
-    let result = std::process::Command::new("which")
-        .arg("nono")
-        .output();
+    let result = std::process::Command::new("which").arg("nono").output();
 
     #[allow(clippy::print_stdout)]
     {
@@ -349,11 +347,7 @@ fn offer_shell_hook() {
             "sanctum init --shell fish | source",
         )
     } else if shell_name.contains("bash") {
-        (
-            "bash",
-            "~/.bashrc",
-            "eval \"$(sanctum init --shell bash)\"",
-        )
+        ("bash", "~/.bashrc", "eval \"$(sanctum init --shell bash)\"")
     } else {
         return;
     };

@@ -57,7 +57,7 @@ fn build_hooks_json() -> serde_json::Value {
                 ]
             },
             {
-                "matcher": "Write|Edit|MultiEdit",
+                "matcher": "Write|Edit|MultiEdit|NotebookEdit",
                 "hooks": [
                     {
                         "type": "command",
@@ -99,9 +99,8 @@ fn build_hooks_json() -> serde_json::Value {
 }
 
 fn install_claude_hooks() -> Result<(), CliError> {
-    let hooks_dir = claude_hooks_dir().ok_or_else(|| {
-        CliError::InvalidArgs("could not determine HOME directory".to_string())
-    })?;
+    let hooks_dir = claude_hooks_dir()
+        .ok_or_else(|| CliError::InvalidArgs("could not determine HOME directory".to_string()))?;
 
     fs::create_dir_all(&hooks_dir)?;
 
@@ -123,9 +122,8 @@ fn install_claude_hooks() -> Result<(), CliError> {
     // Add Sanctum hook configuration
     settings["hooks"] = build_hooks_json();
 
-    let json_str = serde_json::to_string_pretty(&settings).map_err(|e| {
-        CliError::InvalidArgs(format!("Failed to serialize settings: {e}"))
-    })?;
+    let json_str = serde_json::to_string_pretty(&settings)
+        .map_err(|e| CliError::InvalidArgs(format!("Failed to serialize settings: {e}")))?;
     // Atomic write: write to temp file, sync, then rename into place
     let tmp_path = settings_path.with_extension("tmp");
     {
@@ -148,9 +146,8 @@ fn install_claude_hooks() -> Result<(), CliError> {
 }
 
 fn remove_claude_hooks() -> Result<(), CliError> {
-    let hooks_dir = claude_hooks_dir().ok_or_else(|| {
-        CliError::InvalidArgs("could not determine HOME directory".to_string())
-    })?;
+    let hooks_dir = claude_hooks_dir()
+        .ok_or_else(|| CliError::InvalidArgs("could not determine HOME directory".to_string()))?;
 
     let settings_path = hooks_dir.join("settings.json");
 
@@ -163,22 +160,20 @@ fn remove_claude_hooks() -> Result<(), CliError> {
     }
 
     let content = fs::read_to_string(&settings_path)?;
-    let mut settings: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| {
-            CliError::InvalidArgs(format!(
-                "Failed to parse Claude Code settings.json: {e}. \
+    let mut settings: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        CliError::InvalidArgs(format!(
+            "Failed to parse Claude Code settings.json: {e}. \
                  Please fix the file manually or back it up before retrying."
-            ))
-        })?;
+        ))
+    })?;
 
     // Remove hooks key
     if let Some(obj) = settings.as_object_mut() {
         obj.remove("hooks");
     }
 
-    let json_str = serde_json::to_string_pretty(&settings).map_err(|e| {
-        CliError::InvalidArgs(format!("Failed to serialize settings: {e}"))
-    })?;
+    let json_str = serde_json::to_string_pretty(&settings)
+        .map_err(|e| CliError::InvalidArgs(format!("Failed to serialize settings: {e}")))?;
     // Atomic write: write to temp file, sync, then rename into place
     let tmp_path = settings_path.with_extension("tmp");
     {
@@ -220,7 +215,7 @@ mod tests {
         assert_eq!(bash_hooks[0]["command"], "sanctum hook pre-bash");
 
         // Write|Edit|MultiEdit hook
-        assert_eq!(pre_arr[1]["matcher"], "Write|Edit|MultiEdit");
+        assert_eq!(pre_arr[1]["matcher"], "Write|Edit|MultiEdit|NotebookEdit");
         let write_hooks = pre_arr[1]["hooks"].as_array().expect("hooks array");
         assert_eq!(write_hooks.len(), 1);
         assert_eq!(write_hooks[0]["type"], "command");
@@ -292,14 +287,12 @@ mod tests {
         let mut settings = serde_json::json!({});
         settings["hooks"] = build_hooks_json();
 
-        let json_str =
-            serde_json::to_string_pretty(&settings).expect("should serialize");
+        let json_str = serde_json::to_string_pretty(&settings).expect("should serialize");
         fs::write(&settings_path, &json_str).expect("should write");
 
         // Read back and verify nested format
         let content = fs::read_to_string(&settings_path).expect("should read");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&content).expect("should parse JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("should parse JSON");
 
         let hooks = parsed.get("hooks").expect("should have hooks key");
         let pre = hooks
@@ -313,7 +306,7 @@ mod tests {
         assert_eq!(pre[0]["hooks"][0]["command"], "sanctum hook pre-bash");
         assert_eq!(pre[0]["hooks"][0]["type"], "command");
         assert_eq!(pre[1]["hooks"][0]["command"], "sanctum hook pre-write");
-        assert_eq!(pre[1]["matcher"], "Write|Edit|MultiEdit");
+        assert_eq!(pre[1]["matcher"], "Write|Edit|MultiEdit|NotebookEdit");
         assert_eq!(pre[2]["hooks"][0]["command"], "sanctum hook pre-read");
         assert_eq!(pre[3]["hooks"][0]["command"], "sanctum hook pre-mcp");
         assert_eq!(pre[3]["matcher"], "mcp__.*");
@@ -339,24 +332,20 @@ mod tests {
             "apiKey": "test-key",
             "model": "claude-4"
         });
-        let json_str =
-            serde_json::to_string_pretty(&existing).expect("should serialize");
+        let json_str = serde_json::to_string_pretty(&existing).expect("should serialize");
         fs::write(&settings_path, &json_str).expect("should write");
 
         // Simulate install on existing file
         let content = fs::read_to_string(&settings_path).expect("should read");
-        let mut settings: serde_json::Value =
-            serde_json::from_str(&content).expect("should parse");
+        let mut settings: serde_json::Value = serde_json::from_str(&content).expect("should parse");
         settings["hooks"] = build_hooks_json();
 
-        let json_str =
-            serde_json::to_string_pretty(&settings).expect("should serialize");
+        let json_str = serde_json::to_string_pretty(&settings).expect("should serialize");
         fs::write(&settings_path, &json_str).expect("should write");
 
         // Read back and verify existing settings are preserved
         let content = fs::read_to_string(&settings_path).expect("should read");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&content).expect("should parse");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("should parse");
 
         assert_eq!(parsed["apiKey"], "test-key");
         assert_eq!(parsed["model"], "claude-4");

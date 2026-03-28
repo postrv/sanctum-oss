@@ -141,8 +141,7 @@ fn validate_id(id: &str, quarantine_dir: &Path) -> Result<(), SentinelError> {
         if !canon_resolved.starts_with(&canon_dir) {
             return Err(SentinelError::InvalidQuarantineId {
                 id: id.to_string(),
-                reason: "resolved path escapes quarantine directory"
-                    .to_string(),
+                reason: "resolved path escapes quarantine directory".to_string(),
             });
         }
     }
@@ -152,8 +151,14 @@ fn validate_id(id: &str, quarantine_dir: &Path) -> Result<(), SentinelError> {
 
 /// Directories that are never valid restore targets.
 const SENSITIVE_PREFIXES: &[&str] = &[
-    "/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin",
-    "/usr/lib", "/System", "/Library",
+    "/etc",
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/System",
+    "/Library",
 ];
 
 /// Home-directory patterns that are never valid restore targets.
@@ -204,7 +209,10 @@ fn validate_restore_path(path: &Path) -> Result<(), SentinelError> {
                 path: path.to_path_buf(),
                 source: std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("restore path targets sensitive directory: {}", path.display()),
+                    format!(
+                        "restore path targets sensitive directory: {}",
+                        path.display()
+                    ),
                 ),
             });
         }
@@ -217,7 +225,10 @@ fn validate_restore_path(path: &Path) -> Result<(), SentinelError> {
                 path: path.to_path_buf(),
                 source: std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("restore path targets sensitive home directory location: {}", path.display()),
+                    format!(
+                        "restore path targets sensitive home directory location: {}",
+                        path.display()
+                    ),
                 ),
             });
         }
@@ -237,6 +248,58 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         .zip(b.bytes())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+/// Write `content` to `tmp_path` (with `O_NOFOLLOW` + `O_EXCL` on Unix),
+/// sync, then atomically rename to `final_path`.  Cleans up the temp file on
+/// any failure.
+fn write_temp_and_rename(
+    tmp_path: &Path,
+    content: &[u8],
+    final_path: &Path,
+) -> Result<(), SentinelError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+            .open(tmp_path)
+            .map_err(|e| SentinelError::Quarantine {
+                path: final_path.to_path_buf(),
+                source: e,
+            })?;
+        if let Err(e) = file.write_all(content).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(tmp_path);
+            return Err(SentinelError::Quarantine {
+                path: final_path.to_path_buf(),
+                source: e,
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let mut file = fs::File::create(tmp_path).map_err(|e| SentinelError::Quarantine {
+            path: final_path.to_path_buf(),
+            source: e,
+        })?;
+        if let Err(e) = file.write_all(content).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(tmp_path);
+            return Err(SentinelError::Quarantine {
+                path: final_path.to_path_buf(),
+                source: e,
+            });
+        }
+    }
+    if let Err(e) = fs::rename(tmp_path, final_path) {
+        let _ = fs::remove_file(tmp_path);
+        return Err(SentinelError::Quarantine {
+            path: final_path.to_path_buf(),
+            source: e,
+        });
+    }
+    Ok(())
 }
 
 /// Process-wide counter to ensure quarantine ID uniqueness.
@@ -276,11 +339,9 @@ impl Quarantine {
         // Ensure quarantine dir exists with secure permissions
         // Create parent directories first
         if let Some(parent) = self.quarantine_dir.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                SentinelError::Quarantine {
-                    path: self.quarantine_dir.clone(),
-                    source: e,
-                }
+            fs::create_dir_all(parent).map_err(|e| SentinelError::Quarantine {
+                path: self.quarantine_dir.clone(),
+                source: e,
             })?;
         }
         // Create the final quarantine directory with restricted permissions atomically
@@ -302,25 +363,29 @@ impl Quarantine {
         }
         #[cfg(not(unix))]
         {
-            fs::create_dir_all(&self.quarantine_dir).map_err(|e| {
-                SentinelError::Quarantine {
-                    path: self.quarantine_dir.clone(),
-                    source: e,
-                }
+            fs::create_dir_all(&self.quarantine_dir).map_err(|e| SentinelError::Quarantine {
+                path: self.quarantine_dir.clone(),
+                source: e,
             })?;
         }
 
         // Generate unique ID — use file stem (without extension) to avoid
         // conflicts with the .json metadata extension naming scheme.
-        let raw_stem = path
-            .file_stem().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string());
+        let raw_stem = path.file_stem().map_or_else(
+            || "unknown".to_string(),
+            |n| n.to_string_lossy().to_string(),
+        );
         // Sanitize: only allow alphanumeric, dot, hyphen, underscore; cap at 64 chars
         let file_stem: String = raw_stem
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
             .take(64)
             .collect();
-        let file_stem = if file_stem.is_empty() { "unknown".to_string() } else { file_stem };
+        let file_stem = if file_stem.is_empty() {
+            "unknown".to_string()
+        } else {
+            file_stem
+        };
         let now = Utc::now();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -359,9 +424,11 @@ impl Quarantine {
         // Bounded read via the same fd — no TOCTOU between size check and read
         let mut reader = std::io::Read::take(file, MAX_PTH_FILE_SIZE + 1);
         let mut content = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut content).map_err(|e| SentinelError::Quarantine {
-            path: path.to_path_buf(),
-            source: e,
+        std::io::Read::read_to_end(&mut reader, &mut content).map_err(|e| {
+            SentinelError::Quarantine {
+                path: path.to_path_buf(),
+                source: e,
+            }
         })?;
 
         // Read original permissions from the same metadata
@@ -370,23 +437,20 @@ impl Quarantine {
 
         // Write content to quarantine and fsync to ensure durability
         {
-            let mut qfile = fs::File::create(&quarantine_path).map_err(|e| {
-                SentinelError::Quarantine {
+            let mut qfile =
+                fs::File::create(&quarantine_path).map_err(|e| SentinelError::Quarantine {
                     path: quarantine_path.clone(),
                     source: e,
-                }
-            })?;
-            qfile.write_all(&content).map_err(|e| {
-                SentinelError::Quarantine {
+                })?;
+            qfile
+                .write_all(&content)
+                .map_err(|e| SentinelError::Quarantine {
                     path: quarantine_path.clone(),
                     source: e,
-                }
-            })?;
-            qfile.sync_all().map_err(|e| {
-                SentinelError::Quarantine {
-                    path: quarantine_path.clone(),
-                    source: e,
-                }
+                })?;
+            qfile.sync_all().map_err(|e| SentinelError::Quarantine {
+                path: quarantine_path.clone(),
+                source: e,
             })?;
         }
 
@@ -397,26 +461,22 @@ impl Quarantine {
         // Write metadata atomically: write to temp file, sync, then rename
         let meta_path = quarantine_path.with_extension("json");
         let meta_tmp = meta_path.with_extension("tmp");
-        let meta_json = serde_json::to_string_pretty(&metadata_with_time)
-            .unwrap_or_else(|_| "{}".to_string());
+        let meta_json =
+            serde_json::to_string_pretty(&metadata_with_time).unwrap_or_else(|_| "{}".to_string());
         {
-            let mut mfile = fs::File::create(&meta_tmp).map_err(|e| {
-                SentinelError::Quarantine {
-                    path: meta_path.clone(),
-                    source: e,
-                }
+            let mut mfile = fs::File::create(&meta_tmp).map_err(|e| SentinelError::Quarantine {
+                path: meta_path.clone(),
+                source: e,
             })?;
-            mfile.write_all(meta_json.as_bytes()).map_err(|e| {
-                SentinelError::Quarantine {
+            mfile
+                .write_all(meta_json.as_bytes())
+                .map_err(|e| SentinelError::Quarantine {
                     path: meta_path.clone(),
                     source: e,
-                }
-            })?;
-            mfile.sync_all().map_err(|e| {
-                SentinelError::Quarantine {
-                    path: meta_path.clone(),
-                    source: e,
-                }
+                })?;
+            mfile.sync_all().map_err(|e| SentinelError::Quarantine {
+                path: meta_path.clone(),
+                source: e,
             })?;
         }
         if let Err(e) = fs::rename(&meta_tmp, &meta_path) {
@@ -427,21 +487,58 @@ impl Quarantine {
             });
         }
 
-        // Replace original with empty stub — but skip if the path is now a
-        // symlink, which could be a symlink-swap attack.
-        let is_symlink = path
-            .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-
-        if is_symlink {
-            tracing::warn!(
-                path = %path.display(),
-                "original path is a symlink — skipping stub write to prevent symlink attack"
-            );
-        } else {
-            // Write empty stub and fsync for crash durability
+        // Replace original with empty stub.
+        // Use O_NOFOLLOW to atomically prevent symlink-swap attacks (no TOCTOU
+        // race between a symlink check and the file create).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            match fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+                .open(path)
             {
+                Ok(stub) => {
+                    stub.sync_all().map_err(|e| SentinelError::Quarantine {
+                        path: path.to_path_buf(),
+                        source: e,
+                    })?;
+                    // Preserve original permissions on the stub
+                    if let Some(perms) = original_permissions {
+                        let _ = fs::set_permissions(path, perms);
+                    }
+                }
+                Err(e) if e.raw_os_error() == Some(nix::libc::ELOOP) => {
+                    // ELOOP means the path is a symlink — skip stub write
+                    tracing::warn!(
+                        path = %path.display(),
+                        "original path is a symlink — skipping stub write to prevent symlink attack"
+                    );
+                }
+                Err(e) => {
+                    return Err(SentinelError::Quarantine {
+                        path: path.to_path_buf(),
+                        source: e,
+                    });
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix platforms, fall back to check-then-create.
+            let is_symlink = path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+
+            if is_symlink {
+                tracing::warn!(
+                    path = %path.display(),
+                    "original path is a symlink — skipping stub write to prevent symlink attack"
+                );
+            } else {
                 let stub = fs::File::create(path).map_err(|e| SentinelError::Quarantine {
                     path: path.to_path_buf(),
                     source: e,
@@ -450,12 +547,6 @@ impl Quarantine {
                     path: path.to_path_buf(),
                     source: e,
                 })?;
-            }
-
-            // Preserve original permissions on the stub
-            #[cfg(unix)]
-            if let Some(perms) = original_permissions {
-                let _ = fs::set_permissions(path, perms);
             }
         }
 
@@ -480,20 +571,15 @@ impl Quarantine {
         let meta_path = quarantine_path.with_extension("json");
 
         // Read metadata to find original path
-        let meta_str = fs::read_to_string(&meta_path).map_err(|_| {
-            SentinelError::QuarantineEntryNotFound { id: id.to_string() }
-        })?;
-        let metadata: QuarantineMetadata =
-            serde_json::from_str(&meta_str).map_err(|_| {
-                SentinelError::QuarantineEntryNotFound { id: id.to_string() }
-            })?;
+        let meta_str = fs::read_to_string(&meta_path)
+            .map_err(|_| SentinelError::QuarantineEntryNotFound { id: id.to_string() })?;
+        let metadata: QuarantineMetadata = serde_json::from_str(&meta_str)
+            .map_err(|_| SentinelError::QuarantineEntryNotFound { id: id.to_string() })?;
 
         // Read quarantined content
-        let content = fs::read(&quarantine_path).map_err(|e| {
-            SentinelError::Quarantine {
-                path: quarantine_path.clone(),
-                source: e,
-            }
+        let content = fs::read(&quarantine_path).map_err(|e| SentinelError::Quarantine {
+            path: quarantine_path.clone(),
+            source: e,
         })?;
 
         // Verify content integrity: SHA-256 hash must match the stored metadata hash
@@ -515,7 +601,9 @@ impl Quarantine {
         // Validate the restore path before writing
         validate_restore_path(&metadata.original_path)?;
 
-        // Check if the restore target is a symlink (symlink-swap attack prevention)
+        // Reject restore if the target path is now a symlink (symlink-swap
+        // attack prevention).  While rename() replaces a symlink rather than
+        // following it, rejecting this case is defence-in-depth.
         let is_symlink = metadata
             .original_path
             .symlink_metadata()
@@ -531,35 +619,13 @@ impl Quarantine {
             });
         }
 
-        // Atomic restore: write to temp file, sync, then rename into place
-        let restore_tmp = metadata.original_path.with_extension("sanctum_restore_tmp");
-        {
-            let mut file = fs::File::create(&restore_tmp).map_err(|e| {
-                SentinelError::Quarantine {
-                    path: metadata.original_path.clone(),
-                    source: e,
-                }
-            })?;
-            file.write_all(&content).map_err(|e| {
-                SentinelError::Quarantine {
-                    path: metadata.original_path.clone(),
-                    source: e,
-                }
-            })?;
-            file.sync_all().map_err(|e| {
-                SentinelError::Quarantine {
-                    path: metadata.original_path.clone(),
-                    source: e,
-                }
-            })?;
-        }
-        if let Err(e) = fs::rename(&restore_tmp, &metadata.original_path) {
-            let _ = fs::remove_file(&restore_tmp);
-            return Err(SentinelError::Quarantine {
-                path: metadata.original_path,
-                source: e,
-            });
-        }
+        // Atomic restore: write to temp file in the quarantine directory (which
+        // we control), sync, then rename into place.  Writing the temp file
+        // inside the quarantine directory avoids TOCTOU races where an attacker
+        // could plant a symlink at a predictable temp-file path next to the
+        // original.
+        let restore_tmp = self.quarantine_dir.join(format!("{id}.restore_tmp"));
+        write_temp_and_rename(&restore_tmp, &content, &metadata.original_path)?;
 
         // Clean up quarantine files
         let _ = fs::remove_file(&quarantine_path);
@@ -582,9 +648,7 @@ impl Quarantine {
         match fs::remove_file(&quarantine_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(SentinelError::QuarantineEntryNotFound {
-                    id: id.to_string(),
-                });
+                return Err(SentinelError::QuarantineEntryNotFound { id: id.to_string() });
             }
             Err(e) => {
                 return Err(SentinelError::Quarantine {
@@ -612,42 +676,39 @@ impl Quarantine {
 
         let mut entries = Vec::new();
 
-        let dir_entries = fs::read_dir(&self.quarantine_dir).map_err(|e| {
-            SentinelError::Quarantine {
+        let dir_entries =
+            fs::read_dir(&self.quarantine_dir).map_err(|e| SentinelError::Quarantine {
                 path: self.quarantine_dir.clone(),
                 source: e,
-            }
-        })?;
+            })?;
 
         for entry in dir_entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
                 match fs::read_to_string(&path) {
-                    Ok(meta_str) => {
-                        match serde_json::from_str::<QuarantineMetadata>(&meta_str) {
-                            Ok(metadata) => {
-                                let id = path
-                                    .file_stem()
-                                    .map(|s| s.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                let quarantined_at = metadata.quarantined_at;
-                                entries.push(QuarantineEntry {
-                                    id: id.clone(),
-                                    quarantine_path: self.quarantine_dir.join(&id),
-                                    metadata,
-                                    quarantined_at,
-                                    state: QuarantineState::Active,
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    path = %path.display(),
-                                    %e,
-                                    "corrupted quarantine metadata — entry will not appear in list"
-                                );
-                            }
+                    Ok(meta_str) => match serde_json::from_str::<QuarantineMetadata>(&meta_str) {
+                        Ok(metadata) => {
+                            let id = path
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            let quarantined_at = metadata.quarantined_at;
+                            entries.push(QuarantineEntry {
+                                id: id.clone(),
+                                quarantine_path: self.quarantine_dir.join(&id),
+                                metadata,
+                                quarantined_at,
+                                state: QuarantineState::Active,
+                            });
                         }
-                    }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                %e,
+                                "corrupted quarantine metadata — entry will not appear in list"
+                            );
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             path = %path.display(),
@@ -893,8 +954,7 @@ mod tests {
         // Tamper with metadata to set original_path to /etc/passwd
         let meta_path = entry.quarantine_path.with_extension("json");
         let meta_str = fs::read_to_string(&meta_path).expect("read meta");
-        let mut metadata: QuarantineMetadata =
-            serde_json::from_str(&meta_str).expect("parse meta");
+        let mut metadata: QuarantineMetadata = serde_json::from_str(&meta_str).expect("parse meta");
         metadata.original_path = PathBuf::from("/etc/passwd");
         let tampered = serde_json::to_string_pretty(&metadata).expect("serialize");
         fs::write(&meta_path, tampered).expect("write tampered meta");
@@ -917,8 +977,7 @@ mod tests {
         // Tamper with metadata to set a relative path
         let meta_path = entry.quarantine_path.with_extension("json");
         let meta_str = fs::read_to_string(&meta_path).expect("read meta");
-        let mut metadata: QuarantineMetadata =
-            serde_json::from_str(&meta_str).expect("parse meta");
+        let mut metadata: QuarantineMetadata = serde_json::from_str(&meta_str).expect("parse meta");
         metadata.original_path = PathBuf::from("relative/path/file.txt");
         let tampered = serde_json::to_string_pretty(&metadata).expect("serialize");
         fs::write(&meta_path, tampered).expect("write tampered meta");
@@ -941,8 +1000,7 @@ mod tests {
         // Tamper with metadata to include traversal
         let meta_path = entry.quarantine_path.with_extension("json");
         let meta_str = fs::read_to_string(&meta_path).expect("read meta");
-        let mut metadata: QuarantineMetadata =
-            serde_json::from_str(&meta_str).expect("parse meta");
+        let mut metadata: QuarantineMetadata = serde_json::from_str(&meta_str).expect("parse meta");
         metadata.original_path = PathBuf::from("/tmp/../../../etc/passwd");
         let tampered = serde_json::to_string_pretty(&metadata).expect("serialize");
         fs::write(&meta_path, tampered).expect("write tampered meta");
@@ -965,7 +1023,10 @@ mod tests {
 
         // The original_path in metadata should be valid (temp dir)
         let result = q.restore(&entry.id);
-        assert!(result.is_ok(), "valid temp path should be accepted: {result:?}");
+        assert!(
+            result.is_ok(),
+            "valid temp path should be accepted: {result:?}"
+        );
         assert_eq!(fs::read_to_string(&pth_path).expect("read"), content);
     }
 
@@ -986,7 +1047,11 @@ mod tests {
             .quarantine_file(&path2, &default_meta(&path2))
             .expect("quarantine 2");
 
-        assert_ne!(entry1.id, entry2.id, "IDs should differ: {} vs {}", entry1.id, entry2.id);
+        assert_ne!(
+            entry1.id, entry2.id,
+            "IDs should differ: {} vs {}",
+            entry1.id, entry2.id
+        );
     }
 
     #[test]
@@ -1032,7 +1097,10 @@ mod tests {
 
         // Restore should fail because the quarantined content is gone.
         let result = q.restore(&entry.id);
-        assert!(result.is_err(), "restore should fail when quarantined file is deleted");
+        assert!(
+            result.is_err(),
+            "restore should fail when quarantined file is deleted"
+        );
     }
 
     #[cfg(unix)]
@@ -1054,7 +1122,10 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o700, "quarantine dir should be owner-only (0o700), got {mode:#o}");
+        assert_eq!(
+            mode, 0o700,
+            "quarantine dir should be owner-only (0o700), got {mode:#o}"
+        );
     }
 
     #[test]
@@ -1130,7 +1201,10 @@ mod tests {
 
         // Restore should fail because the parent directory is gone.
         let result = q.restore(&entry.id);
-        assert!(result.is_err(), "restore should fail when parent directory is deleted");
+        assert!(
+            result.is_err(),
+            "restore should fail when parent directory is deleted"
+        );
     }
 
     // ── F1 test: delete on non-existent ID ──────────────────────────────
@@ -1195,7 +1269,10 @@ mod tests {
 
         // Restore should fail because the hash no longer matches
         let result = q.restore(&entry.id);
-        assert!(result.is_err(), "restore should fail when content has been tampered with");
+        assert!(
+            result.is_err(),
+            "restore should fail when content has been tampered with"
+        );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
             err_msg.contains("tampered"),
@@ -1244,10 +1321,17 @@ mod tests {
         // Quarantine the symlink path — should succeed (file content is read
         // via the symlink) but the stub write should be skipped.
         let result = q.quarantine_file(&link_path, &default_meta(&link_path));
-        assert!(result.is_ok(), "quarantine should succeed for symlink: {result:?}");
+        assert!(
+            result.is_ok(),
+            "quarantine should succeed for symlink: {result:?}"
+        );
 
         // The symlink should still exist and still be a symlink (not overwritten)
-        assert!(link_path.symlink_metadata().expect("meta").file_type().is_symlink());
+        assert!(link_path
+            .symlink_metadata()
+            .expect("meta")
+            .file_type()
+            .is_symlink());
         // The real file should not have been truncated
         let real_content = fs::read_to_string(&real_file).expect("read");
         assert_eq!(real_content, "payload", "real file should not be modified");

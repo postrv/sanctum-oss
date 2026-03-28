@@ -28,9 +28,9 @@ const fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
 
 /// Enforce a security floor on project-local AI firewall configs.
 ///
-/// Project-local configs must not disable `claude_hooks` or
-/// `redact_credentials`. If they attempt to, the values are forced back
-/// to `true` and a warning is emitted.
+/// Project-local configs must not disable `claude_hooks`,
+/// `redact_credentials`, or `mcp_audit`. If they attempt to, the values
+/// are forced back to `true` and a warning is emitted.
 fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
     if !cfg.claude_hooks {
         tracing::warn!(
@@ -43,6 +43,12 @@ fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
             "Project-local config cannot disable redact_credentials \u{2014} using global default"
         );
         cfg.redact_credentials = true;
+    }
+    if !cfg.mcp_audit {
+        tracing::warn!(
+            "Project-local config cannot disable mcp_audit \u{2014} using global default"
+        );
+        cfg.mcp_audit = true;
     }
 }
 
@@ -106,7 +112,26 @@ fn load_ai_firewall_config() -> Option<AiFirewallConfig> {
 ///
 /// `action` is one of `pre-bash`, `pre-write`, `pre-read`, `pre-mcp`, or `post-bash`.
 /// Tool invocation JSON is read from stdin.
+///
+/// Fail-closed: any error in the hook handler blocks the operation (exit code 2)
+/// rather than allowing it (exit code 1). This function never returns `Err`.
+#[allow(clippy::unnecessary_wraps)] // Result return type required by caller dispatch
 pub fn run(action: &str, verbose: bool) -> Result<(), CliError> {
+    // Fail-closed: any error in the hook handler must block the operation
+    // (exit code 2), not allow it (exit code 1). We catch all errors here.
+    match run_inner(action, verbose) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("sanctum: hook error (fail-closed): {e}");
+            }
+            std::process::exit(2);
+        }
+    }
+}
+
+fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
     use std::io::Read;
 
     if verbose {
@@ -295,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn security_floor_preserves_already_enabled() {
+    fn security_floor_enforces_mcp_audit() {
         let mut cfg = AiFirewallConfig {
             claude_hooks: true,
             redact_credentials: true,
@@ -303,8 +328,8 @@ mod tests {
             mcp_rules: Vec::new(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
-        // mcp_audit is not enforced by the floor, so it stays false.
-        assert!(!cfg.mcp_audit);
+        // mcp_audit is enforced by the floor, so it is forced to true.
+        assert!(cfg.mcp_audit);
         assert!(cfg.claude_hooks);
         assert!(cfg.redact_credentials);
     }

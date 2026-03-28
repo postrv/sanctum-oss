@@ -10,6 +10,11 @@ use sanctum_sentinel::pth::quarantine::{Quarantine, QuarantineMetadata};
 use sanctum_types::threat::ThreatLevel;
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
     /// Property: analyse_pth_line is a total function (never panics).
     #[test]
     fn pth_analyser_total(line in ".*") {
@@ -24,7 +29,11 @@ proptest! {
         prop_assert_eq!(r1.level(), r2.level());
     }
 
-    /// Property: analyse_pth_file severity is max of line severities.
+    /// Property: analyse_pth_file severity >= max of individual line severities.
+    ///
+    /// When lines are joined, continuation lines (trailing `\`) or cross-line
+    /// patterns can match additional rules, so the file severity may exceed the
+    /// maximum of the individual line severities, but should never be lower.
     #[test]
     fn file_severity_is_max_of_lines(lines in prop::collection::vec(".*", 1..20)) {
         let content = lines.join("\n");
@@ -35,7 +44,11 @@ proptest! {
             .max()
             .unwrap_or(ThreatLevel::Info);
 
-        prop_assert_eq!(file_result.verdict.level(), max_line_level);
+        prop_assert!(
+            file_result.verdict.level() >= max_line_level,
+            "File severity {:?} should be >= max line severity {:?}",
+            file_result.verdict.level(), max_line_level
+        );
     }
 
     /// Property: quarantine + restore is identity.

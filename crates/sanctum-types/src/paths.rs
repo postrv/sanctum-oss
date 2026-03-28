@@ -182,7 +182,11 @@ mod tests {
         let exe = std::env::current_exe().expect("current_exe should be available");
         let output = std::process::Command::new(exe)
             .env_remove("HOME")
-            .args(["--exact", "paths::tests::require_returns_err_when_home_unset_inner", "--nocapture"])
+            .args([
+                "--exact",
+                "paths::tests::require_returns_err_when_home_unset_inner",
+                "--nocapture",
+            ])
             .output()
             .expect("failed to spawn subprocess");
         assert!(

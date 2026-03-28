@@ -23,14 +23,8 @@ pub fn run(action: Option<&BudgetAction>) -> Result<(), CliError> {
             }
         }
         Some(BudgetAction::Set { session, daily }) => {
-            let session_cents = session
-                .as_deref()
-                .map(parse_dollar_amount)
-                .transpose()?;
-            let daily_cents = daily
-                .as_deref()
-                .map(parse_dollar_amount)
-                .transpose()?;
+            let session_cents = session.as_deref().map(parse_dollar_amount).transpose()?;
+            let daily_cents = daily.as_deref().map(parse_dollar_amount).transpose()?;
 
             let response = ipc_client::send_command(&IpcCommand::BudgetSet {
                 session_cents,
@@ -60,8 +54,9 @@ pub fn run(action: Option<&BudgetAction>) -> Result<(), CliError> {
                 }
             };
 
-            let response =
-                ipc_client::send_command(&IpcCommand::BudgetExtend { additional_cents: amount })?;
+            let response = ipc_client::send_command(&IpcCommand::BudgetExtend {
+                additional_cents: amount,
+            })?;
             match response {
                 IpcResponse::Ok { message } => {
                     #[allow(clippy::print_stdout)]
@@ -102,9 +97,9 @@ fn parse_dollar_amount(s: &str) -> Result<u64, CliError> {
         return Err(CliError::InvalidArgs("empty budget amount".to_string()));
     }
 
-    let amount: f64 = trimmed.parse().map_err(|_| {
-        CliError::InvalidArgs(format!("invalid budget amount: {s}"))
-    })?;
+    let amount: f64 = trimmed
+        .parse()
+        .map_err(|_| CliError::InvalidArgs(format!("invalid budget amount: {s}")))?;
 
     if amount < 0.0 {
         return Err(CliError::InvalidArgs(
@@ -121,9 +116,7 @@ fn parse_dollar_amount(s: &str) -> Result<u64, CliError> {
     let cents_f = (amount * 100.0).round();
     #[allow(clippy::cast_precision_loss)]
     if cents_f >= u64::MAX as f64 {
-        return Err(CliError::InvalidArgs(
-            "budget amount too large".to_string(),
-        ));
+        return Err(CliError::InvalidArgs("budget amount too large".to_string()));
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -275,17 +268,15 @@ mod tests {
 
     #[test]
     fn format_budget_summary_ok() {
-        let providers = vec![
-            ProviderBudgetInfo {
-                name: "OpenAI".to_string(),
-                session_spent_cents: 100,
-                session_limit_cents: Some(5000),
-                daily_spent_cents: 100,
-                daily_limit_cents: Some(20000),
-                alert_triggered: false,
-                session_exceeded: false,
-            },
-        ];
+        let providers = vec![ProviderBudgetInfo {
+            name: "OpenAI".to_string(),
+            session_spent_cents: 100,
+            session_limit_cents: Some(5000),
+            daily_spent_cents: 100,
+            daily_limit_cents: Some(20000),
+            alert_triggered: false,
+            session_exceeded: false,
+        }];
         let summary = format_budget_summary(&providers);
         assert!(summary.contains("$1.00"));
         assert!(summary.contains("OK"));
@@ -293,34 +284,30 @@ mod tests {
 
     #[test]
     fn format_budget_summary_exceeded() {
-        let providers = vec![
-            ProviderBudgetInfo {
-                name: "OpenAI".to_string(),
-                session_spent_cents: 6000,
-                session_limit_cents: Some(5000),
-                daily_spent_cents: 6000,
-                daily_limit_cents: Some(20000),
-                alert_triggered: true,
-                session_exceeded: true,
-            },
-        ];
+        let providers = vec![ProviderBudgetInfo {
+            name: "OpenAI".to_string(),
+            session_spent_cents: 6000,
+            session_limit_cents: Some(5000),
+            daily_spent_cents: 6000,
+            daily_limit_cents: Some(20000),
+            alert_triggered: true,
+            session_exceeded: true,
+        }];
         let summary = format_budget_summary(&providers);
         assert!(summary.contains("EXCEEDED"));
     }
 
     #[test]
     fn format_budget_summary_warning() {
-        let providers = vec![
-            ProviderBudgetInfo {
-                name: "OpenAI".to_string(),
-                session_spent_cents: 4000,
-                session_limit_cents: Some(5000),
-                daily_spent_cents: 4000,
-                daily_limit_cents: Some(20000),
-                alert_triggered: true,
-                session_exceeded: false,
-            },
-        ];
+        let providers = vec![ProviderBudgetInfo {
+            name: "OpenAI".to_string(),
+            session_spent_cents: 4000,
+            session_limit_cents: Some(5000),
+            daily_spent_cents: 4000,
+            daily_limit_cents: Some(20000),
+            alert_triggered: true,
+            session_exceeded: false,
+        }];
         let summary = format_budget_summary(&providers);
         assert!(summary.contains("WARNING"));
     }

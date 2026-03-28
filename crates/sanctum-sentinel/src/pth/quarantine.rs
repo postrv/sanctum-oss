@@ -1405,8 +1405,13 @@ mod kani_proofs {
     /// 1. From `Active`, `Approve` -> `Restored`, `Delete` -> `Deleted`, `Report` -> `Active`
     /// 2. `Deleted` is a terminal state — applying any action returns `Err`.
     /// 3. `Restored` is not terminal — actions can still be applied.
+    ///
+    /// Note: `SentinelError` transitively contains `std::io::Error` whose
+    /// `Box<dyn Error>` drop impl causes CBMC to spiral through recursive
+    /// unwinding. We use `mem::forget` to skip the drop verification — we
+    /// are testing state transitions, not `std::io::Error`'s destructor.
     #[kani::proof]
-    #[kani::unwind(10)]
+    #[kani::unwind(2)]
     fn quarantine_state_transitions() {
         let state: QuarantineState = kani::any();
         let action: QuarantineAction = kani::any();
@@ -1422,21 +1427,26 @@ mod kani_proofs {
                 // Non-terminal: all actions must succeed.
                 assert!(result.is_ok());
 
-                let new_state = result.unwrap();
-                match action {
-                    QuarantineAction::Approve => {
-                        assert_eq!(new_state, QuarantineState::Restored);
-                    }
-                    QuarantineAction::Delete => {
-                        assert_eq!(new_state, QuarantineState::Deleted);
-                    }
-                    QuarantineAction::Report => {
-                        // Report does not change state.
-                        assert_eq!(new_state, state);
+                if let Ok(new_state) = &result {
+                    match action {
+                        QuarantineAction::Approve => {
+                            assert_eq!(*new_state, QuarantineState::Restored);
+                        }
+                        QuarantineAction::Delete => {
+                            assert_eq!(*new_state, QuarantineState::Deleted);
+                        }
+                        QuarantineAction::Report => {
+                            // Report does not change state.
+                            assert_eq!(*new_state, state);
+                        }
                     }
                 }
             }
         }
+
+        // Prevent CBMC from verifying SentinelError's recursive drop impl
+        // (std::io::Error -> Box<dyn Error> -> deallocate spiral).
+        std::mem::forget(result);
     }
 
     #[kani::proof]

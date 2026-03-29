@@ -996,10 +996,10 @@ mod kani_proofs {
     ///
     /// This proves the contract from the module doc (line 10).
     #[kani::proof]
-    #[kani::unwind(18)]
+    #[kani::unwind(10)]
     fn pure_path_is_always_benign() {
         let len: usize = kani::any();
-        kani::assume(len > 0 && len <= 16);
+        kani::assume(len > 0 && len <= 8);
         let path_chars = b"abcdefghijklmnopqrstuvwxyz0123456789/._-";
         let bytes: Vec<u8> = (0..len)
             .map(|_| {

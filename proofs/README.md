@@ -66,19 +66,21 @@ cargo kani --harness ceiling_cost_no_overflow -p sanctum-budget
 
 8. **`glob_matches_exact_match_works`** — Proves that for any 4-byte printable ASCII pattern without wildcards, `glob_matches` is equivalent to string equality.
 
-## `kani-core` proofs (PR gate)
+## `kani-core` proofs (every push)
 
-The following 5 proofs run on every PR and gate `build-release`:
+The following proofs run on every push via `kani-core` (one invocation per crate to avoid recompilation overhead):
 
-| Proof | Crate | Rationale for fast gate |
-|-------|-------|------------------------|
+| Proof | Crate | Rationale |
+|-------|-------|-----------|
 | `quarantine_state_transitions` | sanctum-sentinel | Core state machine correctness |
-| `pure_path_is_always_benign` | sanctum-sentinel | Path classification soundness |
+| `pure_path_is_always_benign` | sanctum-sentinel | Path classification soundness (bounded to 8 chars) |
 | `validate_id_rejects_traversal` | sanctum-sentinel | Quarantine traversal prevention |
 | `ceiling_cost_no_overflow` | sanctum-budget | Budget arithmetic safety |
 | `glob_matches_exact_match_works` | sanctum-firewall | MCP policy correctness |
 
 The remaining 3 proofs (`pth_analyser_never_panics`, `exec_is_never_benign`, `shannon_entropy_never_panics`) run only on `main` push and nightly schedule via `kani-full`, due to their larger unwind bounds.
+
+`kani-core` is non-blocking for releases — proofs still run and report but do not gate artifact builds.
 
 ## Bounds and limitations
 

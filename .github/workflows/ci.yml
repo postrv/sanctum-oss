@@ -113,11 +113,9 @@ jobs:
         run: sed -i 's/^rust-version.*$//' Cargo.toml crates/*/Cargo.toml
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1
         with:
-          args: --harness quarantine_state_transitions -p sanctum-sentinel
-      - run: cargo kani --harness pure_path_is_always_benign -p sanctum-sentinel
-      - run: cargo kani --harness validate_id_rejects_traversal -p sanctum-sentinel
-      - run: cargo kani --harness ceiling_cost_no_overflow -p sanctum-budget
-      - run: cargo kani --harness glob_matches_exact_match_works -p sanctum-firewall
+          args: -p sanctum-sentinel
+      - run: cargo kani -p sanctum-budget
+      - run: cargo kani -p sanctum-firewall
 
   kani-full:
     if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'

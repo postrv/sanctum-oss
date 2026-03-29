@@ -1,0 +1,38 @@
+# Build output
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Fuzz corpus and artifacts (can be large)
+/fuzz/corpus/
+/fuzz/artifacts/
+
+# Coverage output
+/coverage/
+*.profraw
+*.profdata
+lcov.info
+
+# Local config overrides
+.sanctum/
+!tests/fixtures/
+.mcp.json
+forge.toml
+
+# Environment files
+.env*
+
+# Archive
+.archive/
+
+# Proptest regressions
+*.proptest-regressions

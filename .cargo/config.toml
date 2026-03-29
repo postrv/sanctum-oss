@@ -1,0 +1,9 @@
+[build]
+rustflags = [
+    # Stack protection
+    "-C", "overflow-checks=on",
+    # Position-independent executable (ASLR)
+    "-C", "relocation-model=pie",
+    # Note: panic=abort and strip=symbols are set in [profile.release] only.
+    # They cannot be in global rustflags because libtest requires unwinding.
+]

@@ -1,0 +1,35 @@
+[package]
+name = "sanctum-firewall"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AI firewall with credential redaction and hook handlers for Sanctum"
+
+[dependencies]
+sanctum-types = { path = "../sanctum-types", version = "0.1.0" }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "credential_redaction"
+harness = false
+
+[[bench]]
+name = "hook_dispatch"
+harness = false

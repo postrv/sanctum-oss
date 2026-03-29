@@ -1,0 +1,251 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ── Verify CI passed for the tagged commit ───────────────────────────────────
+  verify-ci:
+    permissions: { checks: read }
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Verify CI workflow passed for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Checking CI check runs for commit ${GITHUB_SHA}..."
+          REQUIRED_CHECKS="lint deny test-linux test-macos property-tests audit fuzz"
+          # Wait up to 30 minutes for CI checks to complete (tag push may race with CI)
+          for i in $(seq 1 180); do
+            ALL_PASSED=true
+            ANY_FAILED=false
+            ANY_PENDING=false
+            for check in $REQUIRED_CHECKS; do
+              # Query the Checks API (not Status API — GitHub Actions reports via Checks)
+              STATE=$(gh api "repos/${{ github.repository }}/commits/${GITHUB_SHA}/check-runs" \
+                --jq ".check_runs[] | select(.name == \"${check}\") | .conclusion" 2>/dev/null | head -1)
+              if [ -z "$STATE" ]; then
+                ALL_PASSED=false
+                ANY_PENDING=true
+              elif [ "$STATE" = "success" ]; then
+                :
+              elif [ "$STATE" = "failure" ] || [ "$STATE" = "cancelled" ] || [ "$STATE" = "timed_out" ]; then
+                echo "FATAL: CI check '${check}' has conclusion: ${STATE}"
+                ANY_FAILED=true
+              else
+                ALL_PASSED=false
+                ANY_PENDING=true
+              fi
+            done
+            if [ "$ANY_FAILED" = true ]; then
+              echo "Aborting release — CI checks failed for this commit."
+              exit 1
+            fi
+            if [ "$ALL_PASSED" = true ]; then
+              echo "All required CI checks passed."
+              exit 0
+            fi
+            echo "Some checks still pending (attempt ${i}/60, waiting 10s...)"
+            sleep 10
+          done
+          echo "FATAL: CI checks did not complete within 30 minutes. Aborting release."
+          echo "This is a safety measure — releases must not ship without CI verification."
+          exit 1
+
+  # ── Build binaries for all targets ──────────────────────────────────────────
+  build-release:
+    permissions: {}
+    needs: [verify-ci]
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.94.0
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - run: cargo test --all --all-features
+      - run: cargo clippy --all-targets --all-features
+      - name: Install cross (ARM Linux)
+        if: matrix.use_cross
+        run: cargo install cross --locked
+      - name: Build (native)
+        if: "!matrix.use_cross"
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sanctum-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/sanctum
+            target/${{ matrix.target }}/release/sanctum-daemon
+
+  # ── Sign all binaries with Sigstore (keyless OIDC) ─────────────────────────
+  sign:
+    permissions: { id-token: write }
+    needs: [build-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Generate SHA256 checksums
+        run: |
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            dir="sanctum-${target}"
+            if [ -d "$dir" ]; then
+              sha256sum "$dir/sanctum" | sed "s|  ${dir}/sanctum|  sanctum-${target}|" >> SHA256SUMS
+              sha256sum "$dir/sanctum-daemon" | sed "s|  ${dir}/sanctum-daemon|  sanctum-daemon-${target}|" >> SHA256SUMS
+            fi
+          done
+          cat SHA256SUMS
+      - name: Sign binaries
+        run: |
+          for binary in sanctum-*/sanctum sanctum-*/sanctum-daemon; do
+            echo "Signing ${binary}..."
+            cosign sign-blob --yes "$binary" \
+              --output-signature "${binary}.sig" \
+              --output-certificate "${binary}.cert" \
+              --rekor-url "https://rekor.sigstore.dev"
+          done
+      - name: Sign checksums
+        run: |
+          cosign sign-blob --yes SHA256SUMS \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.cert \
+            --rekor-url "https://rekor.sigstore.dev"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signatures
+          path: |
+            sanctum-*/*.sig
+            sanctum-*/*.cert
+            SHA256SUMS
+            SHA256SUMS.sig
+            SHA256SUMS.cert
+
+  # ── Generate and sign SBOM ─────────────────────────────────────────────────
+  sbom:
+    permissions: { id-token: write }
+    needs: [build-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.94.0
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx@0.5.7 --locked
+      - name: Generate SBOM
+        run: |
+          cargo cyclonedx --format json --override-filename sanctum-sbom.cdx --top-level
+          cp crates/sanctum-cli/sanctum-sbom.cdx.json sanctum-sbom.cdx.json
+      - name: Sign SBOM
+        run: |
+          cosign sign-blob --yes sanctum-sbom.cdx.json \
+            --output-signature sanctum-sbom.cdx.json.sig \
+            --output-certificate sanctum-sbom.cdx.json.cert \
+            --rekor-url "https://rekor.sigstore.dev"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom
+          path: |
+            sanctum-sbom.cdx.json
+            sanctum-sbom.cdx.json.sig
+            sanctum-sbom.cdx.json.cert
+
+  # ── Create GitHub Release with all signed artifacts ────────────────────────
+  release:
+    permissions: { contents: write }
+    needs: [sign, sbom]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # Flatten binaries and signatures into release-assets/
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            dir="sanctum-${target}"
+            if [ -d "$dir" ]; then
+              for file in "$dir"/sanctum "$dir"/sanctum-daemon; do
+                if [ -f "$file" ]; then
+                  base="$(basename "$file")-${target}"
+                  cp "$file" "release-assets/${base}"
+                fi
+              done
+            fi
+          done
+          # Copy signatures (from the signatures artifact)
+          if [ -d "signatures" ]; then
+            for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+              dir="signatures/sanctum-${target}"
+              if [ -d "$dir" ]; then
+                for sigfile in "$dir"/*.sig "$dir"/*.cert; do
+                  if [ -f "$sigfile" ]; then
+                    # e.g. sanctum.sig -> sanctum-x86_64-unknown-linux-gnu.sig
+                    fname="$(basename "$sigfile")"
+                    # Extract binary name and extension
+                    binary_name="${fname%%.*}"
+                    ext="${fname#*.}"
+                    cp "$sigfile" "release-assets/${binary_name}-${target}.${ext}"
+                  fi
+                done
+              fi
+            done
+            # Copy global checksums
+            cp signatures/SHA256SUMS release-assets/ 2>/dev/null || true
+            cp signatures/SHA256SUMS.sig release-assets/ 2>/dev/null || true
+            cp signatures/SHA256SUMS.cert release-assets/ 2>/dev/null || true
+          fi
+          # Copy SBOM
+          if [ -d "sbom" ]; then
+            cp sbom/sanctum-sbom.cdx.json* release-assets/ 2>/dev/null || true
+          fi
+          ls -la release-assets/
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.94.0
+      - name: Install git-cliff
+        run: cargo install git-cliff@2.8.0 --locked
+      - name: Generate changelog
+        run: git-cliff --latest --strip header --output RELEASE_NOTES.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" \
+            --title "Sanctum ${{ steps.version.outputs.version }}" \
+            --notes-file RELEASE_NOTES.md \
+            release-assets/*

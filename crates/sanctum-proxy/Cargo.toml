@@ -1,0 +1,26 @@
+[package]
+name = "sanctum-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transparent HTTP proxy for LLM API budget enforcement"
+
+[lints]
+workspace = true
+
+[dependencies]
+sanctum-types = { path = "../sanctum-types", version = "0.1.0" }
+sanctum-budget = { path = "../sanctum-budget", version = "0.1.0" }
+sanctum-firewall = { path = "../sanctum-firewall", version = "0.1.0" }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

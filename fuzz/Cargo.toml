@@ -1,0 +1,24 @@
+[package]
+name = "sanctum-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sanctum-sentinel = { path = "../crates/sanctum-sentinel" }
+sanctum-types = { path = "../crates/sanctum-types" }
+toml = "0.8"
+
+[[bin]]
+name = "fuzz_pth_analyser"
+path = "fuzz_targets/fuzz_pth_analyser.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_config_parser"
+path = "fuzz_targets/fuzz_config_parser.rs"
+doc = false

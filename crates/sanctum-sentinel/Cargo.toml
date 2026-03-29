@@ -1,0 +1,35 @@
+[package]
+name = "sanctum-sentinel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core runtime integrity monitoring: .pth watcher, process lineage, quarantine"
+
+[lints]
+workspace = true
+
+[dependencies]
+sanctum-types = { path = "../sanctum-types", version = "0.1.0" }
+notify = "7.0"
+nix = { version = "0.29", features = ["process", "signal", "fs"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "pth_analyser"
+harness = false

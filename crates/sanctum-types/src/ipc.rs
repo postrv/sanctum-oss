@@ -1,0 +1,666 @@
+//! Shared IPC types and framing protocol for daemon-CLI communication.
+//!
+//! This module defines the command/response types and the length-prefixed
+//! framing protocol used over Unix domain sockets. Both the daemon and CLI
+//! depend on these shared definitions to avoid duplication.
+//!
+//! # Protocol
+//!
+//! ```text
+//! [4 bytes big-endian length][JSON payload]
+//! ```
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+/// Maximum IPC message size (64KB).
+pub const MAX_MESSAGE_SIZE: usize = 64 * 1024;
+
+/// Commands sent from the CLI to the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "command")]
+pub enum IpcCommand {
+    /// Request daemon status.
+    Status,
+    /// Request list of quarantined items.
+    ListQuarantine,
+    /// Restore a quarantined item by ID.
+    RestoreQuarantine { id: String },
+    /// Delete a quarantined item by ID.
+    DeleteQuarantine { id: String },
+    /// Reload configuration.
+    ReloadConfig,
+    /// Graceful shutdown.
+    Shutdown,
+    /// Request budget status for all providers.
+    BudgetStatus,
+    /// Set budget limits (in cents).
+    BudgetSet {
+        session_cents: Option<u64>,
+        daily_cents: Option<u64>,
+    },
+    /// Extend the current session budget for all providers.
+    BudgetExtend { additional_cents: u64 },
+    /// Reset all session budget counters.
+    BudgetReset,
+    /// Record token usage for budget tracking.
+    RecordUsage {
+        provider: String,
+        model: String,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    /// Request unresolved threats from the audit log.
+    ListThreats {
+        category: Option<String>,
+        level: Option<String>,
+    },
+    /// Get details for a specific threat by ID.
+    GetThreatDetails { id: String },
+    /// Mark a threat as resolved.
+    ResolveThreat {
+        id: String,
+        action: String,
+        note: String,
+    },
+}
+
+impl IpcCommand {
+    /// Returns `true` for commands that modify daemon state and require
+    /// authentication via an IPC auth token.
+    ///
+    /// Read-only / informational commands (`Status`, `ListQuarantine`,
+    /// `BudgetStatus`, `ListThreats`, `GetThreatDetails`)
+    /// do not require authentication.
+    #[must_use]
+    pub const fn requires_auth(&self) -> bool {
+        matches!(
+            self,
+            Self::Shutdown
+                | Self::ReloadConfig
+                | Self::RestoreQuarantine { .. }
+                | Self::DeleteQuarantine { .. }
+                | Self::BudgetSet { .. }
+                | Self::BudgetExtend { .. }
+                | Self::BudgetReset
+                | Self::ResolveThreat { .. }
+                | Self::RecordUsage { .. }
+        )
+    }
+}
+
+/// Authenticated IPC message envelope.
+///
+/// Wraps an [`IpcCommand`] with an optional auth token. The `serde(flatten)`
+/// attribute means the serialised form is the same as an `IpcCommand` with an
+/// additional `auth_token` field — backwards-compatible with old clients that
+/// omit the token.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct IpcMessage {
+    /// The underlying command.
+    #[serde(flatten)]
+    pub command: IpcCommand,
+    /// Optional authentication token for privileged commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+}
+
+impl fmt::Debug for IpcMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IpcMessage")
+            .field("command", &self.command)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+/// Responses sent from the daemon to the CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "response")]
+pub enum IpcResponse {
+    /// Daemon status information.
+    Status {
+        version: String,
+        uptime_secs: u64,
+        watchers_active: u32,
+        quarantine_count: u32,
+    },
+    /// List of quarantined items.
+    QuarantineList { items: Vec<QuarantineListItem> },
+    /// Budget status for all tracked providers.
+    BudgetStatus { providers: Vec<ProviderBudgetInfo> },
+    /// Operation succeeded.
+    Ok { message: String },
+    /// Operation failed.
+    Error { message: String },
+    /// List of unresolved threats.
+    ThreatList {
+        threats: Vec<ThreatListItem>,
+        truncated: bool,
+    },
+    /// Detailed information about a single threat.
+    ThreatDetails {
+        id: String,
+        timestamp: String,
+        level: String,
+        category: String,
+        description: String,
+        source_path: String,
+        creator_pid: Option<u32>,
+        creator_exe: Option<String>,
+        action_taken: String,
+        quarantine_id: Option<String>,
+    },
+}
+
+/// Summary of a quarantined item for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarantineListItem {
+    pub id: String,
+    pub original_path: String,
+    pub reason: String,
+    pub quarantined_at: String,
+}
+
+/// Budget status for a single provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderBudgetInfo {
+    pub name: String,
+    pub session_spent_cents: u64,
+    pub session_limit_cents: Option<u64>,
+    pub daily_spent_cents: u64,
+    pub daily_limit_cents: Option<u64>,
+    pub alert_triggered: bool,
+    pub session_exceeded: bool,
+    pub daily_exceeded: bool,
+}
+
+/// Summary of a threat for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatListItem {
+    pub id: String,
+    pub timestamp: String,
+    pub level: String,
+    pub category: String,
+    pub description: String,
+    pub source_path: String,
+    pub action_taken: String,
+}
+
+/// Read a length-prefixed frame from a stream.
+///
+/// # Errors
+///
+/// Returns an `io::Error` if reading fails or the message exceeds `MAX_MESSAGE_SIZE`.
+pub async fn read_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Vec<u8>, std::io::Error> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    if len == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "zero-length frame is invalid",
+        ));
+    }
+
+    if len > MAX_MESSAGE_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("message too large: {len} bytes (max {MAX_MESSAGE_SIZE})"),
+        ));
+    }
+
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await?;
+
+    Ok(payload)
+}
+
+/// Write a length-prefixed frame to a stream.
+///
+/// # Errors
+///
+/// Returns an `io::Error` if writing fails or the payload exceeds `MAX_MESSAGE_SIZE`.
+pub async fn write_frame<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    payload: &[u8],
+) -> Result<(), std::io::Error> {
+    if payload.len() > MAX_MESSAGE_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_SIZE})",
+                payload.len()
+            ),
+        ));
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let len = payload.len() as u32;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_length_frame_rejected() {
+        // A frame with length prefix 0 should be rejected as invalid
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let data: Vec<u8> = 0u32.to_be_bytes().to_vec();
+            let mut cursor = std::io::Cursor::new(data);
+            let result = read_frame(&mut cursor).await;
+            assert!(result.is_err(), "zero-length frame should be rejected");
+        });
+    }
+
+    #[test]
+    fn test_record_usage_command_serialises_correctly() {
+        let cmd = IpcCommand::RecordUsage {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+        };
+
+        let json = serde_json::to_string(&cmd).expect("serialise");
+        let roundtripped: IpcCommand = serde_json::from_str(&json).expect("deserialise");
+
+        match roundtripped {
+            IpcCommand::RecordUsage {
+                provider,
+                model,
+                input_tokens,
+                output_tokens,
+            } => {
+                assert_eq!(provider, "anthropic");
+                assert_eq!(model, "claude-sonnet-4-6");
+                assert_eq!(input_tokens, 1_000_000);
+                assert_eq!(output_tokens, 500_000);
+            }
+            other => panic!("expected RecordUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_threats_command_serialises_correctly() {
+        let cmd = IpcCommand::ListThreats {
+            category: Some("PthInjection".to_string()),
+            level: Some("Critical".to_string()),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialise");
+        let roundtripped: IpcCommand = serde_json::from_str(&json).expect("deserialise");
+        match roundtripped {
+            IpcCommand::ListThreats { category, level } => {
+                assert_eq!(category.unwrap(), "PthInjection");
+                assert_eq!(level.unwrap(), "Critical");
+            }
+            other => panic!("expected ListThreats, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_threats_command_with_no_filters() {
+        let cmd = IpcCommand::ListThreats {
+            category: None,
+            level: None,
+        };
+        let json = serde_json::to_string(&cmd).expect("serialise");
+        let roundtripped: IpcCommand = serde_json::from_str(&json).expect("deserialise");
+        match roundtripped {
+            IpcCommand::ListThreats { category, level } => {
+                assert!(category.is_none());
+                assert!(level.is_none());
+            }
+            other => panic!("expected ListThreats, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_get_threat_details_command_serialises_correctly() {
+        let cmd = IpcCommand::GetThreatDetails {
+            id: "abcdef012345".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialise");
+        let roundtripped: IpcCommand = serde_json::from_str(&json).expect("deserialise");
+        match roundtripped {
+            IpcCommand::GetThreatDetails { id } => {
+                assert_eq!(id, "abcdef012345");
+            }
+            other => panic!("expected GetThreatDetails, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_threat_command_serialises_correctly() {
+        let cmd = IpcCommand::ResolveThreat {
+            id: "abcdef012345".to_string(),
+            action: "Restored".to_string(),
+            note: "Verified safe".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialise");
+        let roundtripped: IpcCommand = serde_json::from_str(&json).expect("deserialise");
+        match roundtripped {
+            IpcCommand::ResolveThreat { id, action, note } => {
+                assert_eq!(id, "abcdef012345");
+                assert_eq!(action, "Restored");
+                assert_eq!(note, "Verified safe");
+            }
+            other => panic!("expected ResolveThreat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_threat_list_response_serialises_correctly() {
+        let resp = IpcResponse::ThreatList {
+            threats: vec![ThreatListItem {
+                id: "abcdef012345".to_string(),
+                timestamp: "2025-06-15T12:00:00Z".to_string(),
+                level: "Critical".to_string(),
+                category: "PthInjection".to_string(),
+                description: "Suspicious .pth file".to_string(),
+                source_path: "/tmp/evil.pth".to_string(),
+                action_taken: "Quarantined".to_string(),
+            }],
+            truncated: false,
+        };
+        let json = serde_json::to_string(&resp).expect("serialise");
+        let roundtripped: IpcResponse = serde_json::from_str(&json).expect("deserialise");
+        match roundtripped {
+            IpcResponse::ThreatList { threats, truncated } => {
+                assert_eq!(threats.len(), 1);
+                assert_eq!(threats[0].id, "abcdef012345");
+                assert_eq!(threats[0].category, "PthInjection");
+                assert!(!truncated);
+            }
+            other => panic!("expected ThreatList, got {other:?}"),
+        }
+    }
+
+    // ---- requires_auth tests ----
+
+    #[test]
+    fn status_does_not_require_auth() {
+        assert!(!IpcCommand::Status.requires_auth());
+    }
+
+    #[test]
+    fn list_quarantine_does_not_require_auth() {
+        assert!(!IpcCommand::ListQuarantine.requires_auth());
+    }
+
+    #[test]
+    fn budget_status_no_auth_needed() {
+        assert!(!IpcCommand::BudgetStatus.requires_auth());
+    }
+
+    #[test]
+    fn shutdown_requires_auth() {
+        assert!(IpcCommand::Shutdown.requires_auth());
+    }
+
+    #[test]
+    fn reload_config_requires_auth() {
+        assert!(IpcCommand::ReloadConfig.requires_auth());
+    }
+
+    #[test]
+    fn restore_quarantine_requires_auth() {
+        assert!(IpcCommand::RestoreQuarantine {
+            id: "test".to_string(),
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn delete_quarantine_requires_auth() {
+        assert!(IpcCommand::DeleteQuarantine {
+            id: "test".to_string(),
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn budget_set_needs_auth() {
+        assert!(IpcCommand::BudgetSet {
+            session_cents: Some(100),
+            daily_cents: None,
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn budget_extend_requires_auth() {
+        assert!(IpcCommand::BudgetExtend {
+            additional_cents: 500,
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn budget_reset_requires_auth() {
+        assert!(IpcCommand::BudgetReset.requires_auth());
+    }
+
+    #[test]
+    fn resolve_threat_requires_auth() {
+        assert!(IpcCommand::ResolveThreat {
+            id: "t1".to_string(),
+            action: "dismiss".to_string(),
+            note: "ok".to_string(),
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn record_usage_requires_auth() {
+        assert!(IpcCommand::RecordUsage {
+            provider: "anthropic".to_string(),
+            model: "claude".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn list_threats_does_not_require_auth() {
+        assert!(!IpcCommand::ListThreats {
+            category: None,
+            level: None,
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn get_threat_details_does_not_require_auth() {
+        assert!(!IpcCommand::GetThreatDetails {
+            id: "x".to_string(),
+        }
+        .requires_auth());
+    }
+
+    // ---- IpcMessage serialization tests ----
+
+    #[test]
+    fn ipc_message_with_auth_token_roundtrips() {
+        let msg = IpcMessage {
+            command: IpcCommand::Shutdown,
+            auth_token: Some("abc123".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        assert!(json.contains("auth_token"));
+        assert!(json.contains("abc123"));
+
+        let roundtrip: IpcMessage = serde_json::from_str(&json).expect("deserialise");
+        assert!(matches!(roundtrip.command, IpcCommand::Shutdown));
+        assert_eq!(roundtrip.auth_token.unwrap(), "abc123");
+    }
+
+    #[test]
+    fn ipc_message_without_auth_token_roundtrips() {
+        let msg = IpcMessage {
+            command: IpcCommand::Status,
+            auth_token: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        // auth_token should be omitted due to skip_serializing_if
+        assert!(!json.contains("auth_token"));
+
+        let roundtrip: IpcMessage = serde_json::from_str(&json).expect("deserialise");
+        assert!(matches!(roundtrip.command, IpcCommand::Status));
+        assert!(roundtrip.auth_token.is_none());
+    }
+
+    #[test]
+    fn old_client_json_without_auth_token_deserialises_as_none() {
+        // Simulate an old client that only sends the command fields
+        let json = r#"{"command":"Status"}"#;
+        let msg: IpcMessage = serde_json::from_str(json).expect("deserialise");
+        assert!(matches!(msg.command, IpcCommand::Status));
+        assert!(msg.auth_token.is_none());
+    }
+
+    #[test]
+    fn test_threat_details_response_serialises_correctly() {
+        let resp = IpcResponse::ThreatDetails {
+            id: "abcdef012345".to_string(),
+            timestamp: "2025-06-15T12:00:00Z".to_string(),
+            level: "Critical".to_string(),
+            category: "PthInjection".to_string(),
+            description: "Suspicious .pth file".to_string(),
+            source_path: "/tmp/evil.pth".to_string(),
+            creator_pid: Some(12345),
+            creator_exe: Some("/usr/bin/python3".to_string()),
+            action_taken: "Quarantined".to_string(),
+            quarantine_id: Some("q-001".to_string()),
+        };
+        let json = serde_json::to_string(&resp).expect("serialise");
+        let roundtripped: IpcResponse = serde_json::from_str(&json).expect("deserialise");
+        match roundtripped {
+            IpcResponse::ThreatDetails {
+                id,
+                creator_pid,
+                creator_exe,
+                quarantine_id,
+                ..
+            } => {
+                assert_eq!(id, "abcdef012345");
+                assert_eq!(creator_pid, Some(12345));
+                assert_eq!(creator_exe, Some("/usr/bin/python3".to_string()));
+                assert_eq!(quarantine_id, Some("q-001".to_string()));
+            }
+            other => panic!("expected ThreatDetails, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_budget_info_daily_exceeded_roundtrips() {
+        let info = ProviderBudgetInfo {
+            name: "TestProvider".to_string(),
+            session_spent_cents: 100,
+            session_limit_cents: Some(500),
+            daily_spent_cents: 2000,
+            daily_limit_cents: Some(1000),
+            alert_triggered: true,
+            session_exceeded: false,
+            daily_exceeded: true,
+        };
+        let json = serde_json::to_string(&info).expect("serialise");
+        assert!(json.contains("\"daily_exceeded\":true"));
+        let roundtrip: ProviderBudgetInfo = serde_json::from_str(&json).expect("deserialise");
+        assert!(roundtrip.daily_exceeded);
+        assert!(!roundtrip.session_exceeded);
+    }
+
+    #[test]
+    fn ipc_message_with_record_usage_and_auth_token_roundtrips() {
+        let msg = IpcMessage {
+            command: IpcCommand::RecordUsage {
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 1000,
+                output_tokens: 500,
+            },
+            auth_token: Some("token123".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialise");
+        assert!(json.contains("auth_token"));
+        assert!(json.contains("token123"));
+        assert!(json.contains("RecordUsage"));
+
+        let roundtrip: IpcMessage = serde_json::from_str(&json).expect("deserialise");
+        assert!(matches!(roundtrip.command, IpcCommand::RecordUsage { .. }));
+        assert_eq!(roundtrip.auth_token.unwrap(), "token123");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod expanded_ipc_tests {
+    use super::*;
+
+    #[test]
+    fn frame_of_exactly_max_message_size_is_accepted() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let payload = vec![b'x'; MAX_MESSAGE_SIZE];
+            let mut buf: Vec<u8> = Vec::new();
+            write_frame(&mut buf, &payload)
+                .await
+                .expect("write_frame should accept payload of exactly MAX_MESSAGE_SIZE");
+            let mut cursor = std::io::Cursor::new(buf);
+            let read_payload = read_frame(&mut cursor)
+                .await
+                .expect("read_frame should accept payload of exactly MAX_MESSAGE_SIZE");
+            assert_eq!(read_payload.len(), MAX_MESSAGE_SIZE);
+        });
+    }
+
+    #[test]
+    fn frame_exceeding_max_message_size_is_rejected() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let payload = vec![b'x'; MAX_MESSAGE_SIZE + 1];
+            let mut buf: Vec<u8> = Vec::new();
+            let result = write_frame(&mut buf, &payload).await;
+            assert!(
+                result.is_err(),
+                "write_frame should reject payload exceeding MAX_MESSAGE_SIZE"
+            );
+            #[allow(clippy::cast_possible_truncation)]
+            let len = (MAX_MESSAGE_SIZE + 1) as u32;
+            let mut frame_data = len.to_be_bytes().to_vec();
+            frame_data.extend(payload);
+            let mut cursor = std::io::Cursor::new(frame_data);
+            let result = read_frame(&mut cursor).await;
+            assert!(
+                result.is_err(),
+                "read_frame should reject payload exceeding MAX_MESSAGE_SIZE"
+            );
+        });
+    }
+}

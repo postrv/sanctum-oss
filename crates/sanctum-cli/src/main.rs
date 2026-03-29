@@ -228,6 +228,10 @@ enum ProxyCliAction {
     Stop,
     /// Show proxy status.
     Status,
+    /// Generate and install the CA certificate.
+    InstallCa,
+    /// Add CA to the system trust store.
+    Trust,
 }
 
 #[derive(Subcommand)]

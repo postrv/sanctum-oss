@@ -20,6 +20,10 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
 bytes = { workspace = true }
+chrono = { workspace = true }
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rustls-pki-types = "1"
+dashmap = "6"
 url = "2"
 
 [dev-dependencies]

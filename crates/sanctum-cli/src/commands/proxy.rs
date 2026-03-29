@@ -4,9 +4,16 @@
 //! into any binary.  For v0.1.0, all proxy subcommands return informative error
 //! messages rather than pretending to work.
 
+use std::io::Write;
+
 use sanctum_types::errors::CliError;
 
 use crate::ProxyCliAction;
+
+/// Write informational output to stderr (for non-primary output).
+fn write_info(msg: &str) -> Result<(), CliError> {
+    writeln!(std::io::stderr(), "{msg}").map_err(CliError::Io)
+}
 
 /// Run the proxy command.
 ///
@@ -15,51 +22,36 @@ use crate::ProxyCliAction;
 pub fn run(action: &ProxyCliAction) -> Result<(), CliError> {
     match action {
         ProxyCliAction::Start { .. } => {
-            #[allow(clippy::print_stderr)]
-            {
-                eprintln!("sanctum proxy: preview feature (not yet wired into the daemon)");
-                eprintln!();
-                eprintln!("When complete, `sanctum proxy start` will:");
-                eprintln!(
-                    "  - Start a transparent HTTPS proxy on 127.0.0.1:{port}",
-                    port = sanctum_types::config::DEFAULT_PROXY_PORT
-                );
-                eprintln!("  - Intercept LLM API requests (OpenAI, Anthropic, Google)");
-                eprintln!("  - Enforce per-session and daily spend budgets");
-                eprintln!("  - Extract token usage from responses for budget tracking");
-                eprintln!();
-                eprintln!("Track progress: https://github.com/postrv/sanctum/issues");
-            }
+            write_info("sanctum proxy: preview feature (not yet wired into the daemon)")?;
+            write_info("")?;
+            write_info("When complete, `sanctum proxy start` will:")?;
+            write_info(&format!(
+                "  - Start a transparent HTTPS proxy on 127.0.0.1:{port}",
+                port = sanctum_types::config::DEFAULT_PROXY_PORT
+            ))?;
+            write_info("  - Intercept LLM API requests (OpenAI, Anthropic, Google)")?;
+            write_info("  - Enforce per-session and daily spend budgets")?;
+            write_info("  - Extract token usage from responses for budget tracking")?;
             Err(CliError::PreviewFeature(
                 "proxy management not yet available".to_string(),
             ))
         }
         ProxyCliAction::Stop => {
-            #[allow(clippy::print_stderr)]
-            {
-                eprintln!("sanctum proxy: preview feature (not yet wired into the daemon)");
-                eprintln!();
-                eprintln!("When complete, `sanctum proxy stop` will:");
-                eprintln!("  - Gracefully shut down the running HTTPS proxy");
-                eprintln!("  - Drain in-flight requests before stopping");
-                eprintln!();
-                eprintln!("Track progress: https://github.com/postrv/sanctum/issues");
-            }
+            write_info("sanctum proxy: preview feature (not yet wired into the daemon)")?;
+            write_info("")?;
+            write_info("When complete, `sanctum proxy stop` will:")?;
+            write_info("  - Gracefully shut down the running HTTPS proxy")?;
+            write_info("  - Drain in-flight requests before stopping")?;
             Err(CliError::PreviewFeature(
                 "proxy management not yet available".to_string(),
             ))
         }
         ProxyCliAction::Status => {
-            #[allow(clippy::print_stderr)]
-            {
-                eprintln!("sanctum proxy: preview feature (not yet wired into the daemon)");
-                eprintln!();
-                eprintln!("When complete, `sanctum proxy status` will:");
-                eprintln!("  - Show whether the proxy is running and its listen address");
-                eprintln!("  - Display current budget usage and remaining allowance");
-                eprintln!();
-                eprintln!("Track progress: https://github.com/postrv/sanctum/issues");
-            }
+            write_info("sanctum proxy: preview feature (not yet wired into the daemon)")?;
+            write_info("")?;
+            write_info("When complete, `sanctum proxy status` will:")?;
+            write_info("  - Show whether the proxy is running and its listen address")?;
+            write_info("  - Display current budget usage and remaining allowance")?;
             Err(CliError::PreviewFeature(
                 "proxy management not yet available".to_string(),
             ))

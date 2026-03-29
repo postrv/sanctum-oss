@@ -23,6 +23,8 @@
 //! - Hop-by-hop headers are stripped from forwarded responses
 //! - Body sizes are limited to prevent memory exhaustion
 
+pub mod ca;
+pub mod connect;
 pub mod error;
 pub mod handler;
 pub mod provider;
@@ -30,6 +32,8 @@ pub mod routing;
 pub mod server;
 pub mod usage;
 
+pub use ca::CaIdentity;
+pub use connect::ConnectState;
 pub use error::ProxyError;
 pub use handler::{HandlerState, ProxyRequest, ProxyResponse};
 pub use provider::{identify_provider, Provider};

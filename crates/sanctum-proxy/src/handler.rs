@@ -502,8 +502,9 @@ const fn error_type_str(error: &ProxyError) -> &'static str {
         ProxyError::BudgetBlocked { .. } => "budget_exceeded",
         ProxyError::ModelNotAllowed { .. } => "model_not_allowed",
         ProxyError::InvalidPath { .. } => "invalid_path",
+        ProxyError::SsrfBlocked { .. } => "ssrf_blocked",
         ProxyError::MethodNotAllowed { .. } => "method_not_allowed",
-        ProxyError::Upstream(_) => "upstream_error",
+        ProxyError::Upstream(_) | ProxyError::TunnelTimeout { .. } => "upstream_error",
         _ => "internal_error",
     }
 }

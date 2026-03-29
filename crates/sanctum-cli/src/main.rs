@@ -67,10 +67,10 @@ enum Commands {
         #[arg(long)]
         npm: bool,
         /// Root directory to scan for npm packages (defaults to current directory).
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", requires = "npm")]
         npm_path: Option<PathBuf>,
         /// Maximum depth for traversing into `node_modules` (default: 2).
-        #[arg(long, default_value = "2")]
+        #[arg(long, default_value = "2", requires = "npm")]
         npm_depth: usize,
     },
     /// Run a command under Sanctum monitoring (auto-starts daemon, enables file and credential watchers).
@@ -143,7 +143,7 @@ enum Commands {
         #[command(subcommand)]
         action: ProxyCliAction,
     },
-    /// Manage entropy-based secret detection.
+    /// Manage the allowlist for high-entropy strings flagged as possible secrets.
     Entropy {
         #[command(subcommand)]
         action: EntropyAction,
@@ -156,10 +156,10 @@ enum Commands {
 enum BudgetAction {
     /// Set budget limits.
     Set {
-        /// Budget limit (e.g. $50, 50.00).
+        /// Session budget limit (e.g. $50).
         #[arg(long, value_name = "AMOUNT")]
         session: Option<String>,
-        /// Budget limit (e.g. $50, 50.00).
+        /// Daily budget limit (e.g. $50).
         #[arg(long, value_name = "AMOUNT")]
         daily: Option<String>,
     },
@@ -250,12 +250,17 @@ enum ProxyCliAction {
 }
 
 #[derive(Subcommand)]
-enum EntropyAction {
-    /// Add a string to the entropy allowlist (stores only its hash).
+pub enum EntropyAction {
+    /// Add a value to the entropy allowlist.
+    ///
+    /// Pass value as argument or pipe via stdin:
+    ///   echo <value> | sanctum entropy allow
     Allow {
-        /// The string value to allowlist.
-        value: String,
+        /// The high-entropy string to allowlist (omit to read from stdin).
+        value: Option<String>,
     },
+    /// List all allowlisted entropy values.
+    List,
     /// Review recently flagged high-entropy strings from the audit log.
     Review,
 }
@@ -298,10 +303,7 @@ fn main() -> ExitCode {
         Commands::Fix { action, json, yes } => commands::fix::run(action.as_ref(), json, yes),
         Commands::Hook { action, verbose } => commands::hook::run(&action, verbose),
         Commands::Hooks { action } => commands::hooks::run(&action),
-        Commands::Entropy { action } => match action {
-            EntropyAction::Allow { value } => commands::entropy::run_allow(&value),
-            EntropyAction::Review => commands::entropy::run_review(),
-        },
+        Commands::Entropy { action } => commands::entropy::run(&action),
         Commands::Proxy { action } => commands::proxy::run(&action),
         Commands::Daemon { action } => commands::daemon::run(&action),
         Commands::Doctor => commands::doctor::run(),
@@ -315,6 +317,78 @@ fn main() -> ExitCode {
                 eprintln!("Error: {e}");
             }
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn npm_path_without_npm_flag_is_rejected() {
+        let result = Cli::try_parse_from(["sanctum", "scan", "--npm-path", "/some/path"]);
+        assert!(
+            result.is_err(),
+            "--npm-path without --npm should be rejected by clap"
+        );
+    }
+
+    #[test]
+    fn npm_depth_without_npm_flag_is_rejected() {
+        let result = Cli::try_parse_from(["sanctum", "scan", "--npm-depth", "3"]);
+        assert!(
+            result.is_err(),
+            "--npm-depth without --npm should be rejected by clap"
+        );
+    }
+
+    #[test]
+    fn npm_path_with_npm_flag_is_accepted() {
+        let result = Cli::try_parse_from(["sanctum", "scan", "--npm", "--npm-path", "/some/path"]);
+        assert!(
+            result.is_ok(),
+            "--npm-path with --npm should be accepted: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn npm_depth_with_npm_flag_is_accepted() {
+        let result = Cli::try_parse_from(["sanctum", "scan", "--npm", "--npm-depth", "5"]);
+        assert!(
+            result.is_ok(),
+            "--npm-depth with --npm should be accepted: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn entropy_allow_accepts_optional_value() {
+        let cli =
+            Cli::try_parse_from(["sanctum", "entropy", "allow", "my-secret"]).expect("should parse");
+        match cli.command {
+            Commands::Entropy {
+                action: EntropyAction::Allow { value },
+            } => {
+                assert_eq!(value.as_deref(), Some("my-secret"));
+            }
+            _ => panic!("expected Entropy Allow variant"),
+        }
+    }
+
+    #[test]
+    fn entropy_allow_without_value_parses() {
+        let cli = Cli::try_parse_from(["sanctum", "entropy", "allow"]).expect("should parse");
+        match cli.command {
+            Commands::Entropy {
+                action: EntropyAction::Allow { value },
+            } => {
+                assert!(value.is_none(), "value should be None when omitted");
+            }
+            _ => panic!("expected Entropy Allow variant"),
         }
     }
 }

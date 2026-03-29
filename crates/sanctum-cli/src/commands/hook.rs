@@ -33,6 +33,8 @@ const fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
         // Fail-closed: when config parsing fails, block unmatched MCP tools
         // rather than silently allowing them.
         default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+        entropy_threshold: 5.0,
+        entropy_min_length: 20,
     }
 }
 
@@ -59,6 +61,20 @@ fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
             "Project-local config cannot disable mcp_audit \u{2014} using global default"
         );
         cfg.mcp_audit = true;
+    }
+    // Enforce entropy threshold floor: cannot go below 3.5 bits/char.
+    if cfg.entropy_threshold < 3.5 {
+        tracing::warn!(
+            "Project-local config cannot set entropy_threshold below 3.5 \u{2014} using 3.5"
+        );
+        cfg.entropy_threshold = 3.5;
+    }
+    // Enforce entropy min_length floor: cannot go below 16 characters.
+    if cfg.entropy_min_length < 16 {
+        tracing::warn!(
+            "Project-local config cannot set entropy_min_length below 16 \u{2014} using 16"
+        );
+        cfg.entropy_min_length = 16;
     }
     // Prevent local configs from weakening the MCP default policy to Allow.
     // A malicious repo could include .sanctum/config.toml with
@@ -830,6 +846,8 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.claude_hooks);
@@ -845,6 +863,8 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.redact_credentials);
@@ -860,6 +880,8 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // mcp_audit is enforced by the floor, so it is forced to true.
@@ -878,6 +900,8 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // Local config cannot weaken MCP policy to Allow — forced to Deny
@@ -897,6 +921,8 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Warn,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // Warn is acceptable — not weakened
@@ -1051,5 +1077,47 @@ mod tests {
             !msg.contains("lifecycle scripts"),
             "lifecycle warning suppressed when watch_lifecycle=false"
         );
+    }
+
+    #[test]
+    fn security_floor_enforces_entropy_threshold_minimum() {
+        let mut cfg = AiFirewallConfig {
+            entropy_threshold: 2.0,
+            entropy_min_length: 20,
+            ..AiFirewallConfig::default()
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!(
+            cfg.entropy_threshold >= 3.5,
+            "entropy_threshold below 3.5 should be overridden, got: {}",
+            cfg.entropy_threshold,
+        );
+    }
+
+    #[test]
+    fn security_floor_enforces_entropy_min_length_minimum() {
+        let mut cfg = AiFirewallConfig {
+            entropy_threshold: 5.0,
+            entropy_min_length: 8,
+            ..AiFirewallConfig::default()
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!(
+            cfg.entropy_min_length >= 16,
+            "entropy_min_length below 16 should be overridden, got: {}",
+            cfg.entropy_min_length,
+        );
+    }
+
+    #[test]
+    fn security_floor_allows_valid_entropy_config() {
+        let mut cfg = AiFirewallConfig {
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
+            ..AiFirewallConfig::default()
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!((cfg.entropy_threshold - 5.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.entropy_min_length, 20);
     }
 }

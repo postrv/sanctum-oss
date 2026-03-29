@@ -3,6 +3,7 @@ pub mod budget;
 pub mod config;
 pub mod daemon;
 pub mod doctor;
+pub mod entropy;
 pub mod fix;
 pub mod hook;
 pub mod hooks;

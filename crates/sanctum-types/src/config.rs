@@ -279,11 +279,27 @@ pub struct AiFirewallConfig {
     /// Default policy for MCP tools that do not match any explicit rule.
     #[serde(default)]
     pub default_mcp_policy: McpDefaultPolicy,
+    /// Shannon entropy threshold (bits/char) for the entropy-based fallback.
+    #[serde(default = "default_entropy_threshold")]
+    pub entropy_threshold: f64,
+    /// Minimum token length for entropy-based secret detection.
+    #[serde(default = "default_entropy_min_length")]
+    pub entropy_min_length: usize,
 }
 
 /// Default timeout for package registry lookups (3 seconds).
 const fn default_package_check_timeout() -> u64 {
     3000
+}
+
+/// Default entropy threshold (5.0 bits/char).
+const fn default_entropy_threshold() -> f64 {
+    5.0
+}
+
+/// Default minimum length for entropy-based detection (20 characters).
+const fn default_entropy_min_length() -> usize {
+    20
 }
 
 impl Default for AiFirewallConfig {
@@ -296,6 +312,8 @@ impl Default for AiFirewallConfig {
             package_check_timeout_ms: default_package_check_timeout(),
             mcp_rules: Vec::new(),
             default_mcp_policy: McpDefaultPolicy::Allow,
+            entropy_threshold: default_entropy_threshold(),
+            entropy_min_length: default_entropy_min_length(),
         }
     }
 }

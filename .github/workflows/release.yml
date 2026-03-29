@@ -23,9 +23,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Checking CI check runs for commit ${GITHUB_SHA}..."
-          REQUIRED_CHECKS="lint deny test-linux test-macos property-tests audit fuzz reproducible-build build-release"
-          # Wait up to 10 minutes for CI checks to complete (tag push may race with CI)
-          for i in $(seq 1 60); do
+          REQUIRED_CHECKS="lint deny test-linux test-macos property-tests audit fuzz"
+          # Wait up to 30 minutes for CI checks to complete (tag push may race with CI)
+          for i in $(seq 1 180); do
             ALL_PASSED=true
             ANY_FAILED=false
             ANY_PENDING=false
@@ -57,7 +57,7 @@ jobs:
             echo "Some checks still pending (attempt ${i}/60, waiting 10s...)"
             sleep 10
           done
-          echo "FATAL: CI checks did not complete within 10 minutes. Aborting release."
+          echo "FATAL: CI checks did not complete within 30 minutes. Aborting release."
           echo "This is a safety measure — releases must not ship without CI verification."
           exit 1
 

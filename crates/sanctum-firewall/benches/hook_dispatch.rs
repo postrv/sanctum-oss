@@ -9,6 +9,7 @@ fn make_hook_input(tool_name: &str, tool_input: serde_json::Value) -> HookInput 
         tool_name: tool_name.to_string(),
         tool_input,
         config: None,
+        entropy_allowlist: Vec::new(),
     }
 }
 

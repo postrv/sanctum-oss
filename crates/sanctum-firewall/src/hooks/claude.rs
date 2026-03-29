@@ -389,6 +389,19 @@ const SENSITIVE_READ_PATHS: &[&str] = &[
     "$HOME/.config/gh/",
     "~/.local/share/keyrings/",
     "$HOME/.local/share/keyrings/",
+    // AI tool configuration directories
+    "~/.claude/",
+    "$HOME/.claude/",
+    "~/.cursor/",
+    "$HOME/.cursor/",
+    "~/.copilot/",
+    "$HOME/.copilot/",
+    "~/.aider/",
+    "$HOME/.aider/",
+    "~/.cline/",
+    "$HOME/.cline/",
+    "~/.roo/",
+    "$HOME/.roo/",
 ];
 
 /// Sensitive file name patterns that should never be read.
@@ -415,6 +428,10 @@ const SENSITIVE_READ_FILES: &[&str] = &[
     ".zsh_history",
     ".node_repl_history",
     ".python_history",
+    // AI tool configuration files (project-level)
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".cursor/mcp.json",
 ];
 
 /// Sensitive environment variable names whose values should not be echoed.
@@ -896,13 +913,17 @@ fn is_credential_file_access(command: &str) -> bool {
     // that "cat\t.env" matches the same as "cat .env".
     let normalised = command.replace('\t', " ");
 
+    // Case-insensitive matching for macOS APFS (case-preserving filesystem).
+    // Lowercasing only for credential path pattern matching, not for display.
+    let normalised_lower = normalised.to_ascii_lowercase();
+
     // 1. Check direct read commands (cat, less, head, tail, more).
     for cmd in DIRECT_READ_COMMANDS {
         let space_variant = format!("{cmd} ");
         // Check both original (tab) and normalised (space) forms.
         if normalised.contains(&space_variant) || command_invokes(&normalised, cmd) {
             for pattern in CREDENTIAL_FILE_PATTERNS {
-                if matches_credential_pattern(&normalised, pattern) {
+                if matches_credential_pattern(&normalised_lower, pattern) {
                     return true;
                 }
             }
@@ -914,7 +935,7 @@ fn is_credential_file_access(command: &str) -> bool {
         let space_variant = format!("{cmd} ");
         if normalised.contains(&space_variant) || command_invokes(&normalised, cmd) {
             for pattern in CREDENTIAL_FILE_PATTERNS {
-                if matches_credential_pattern(&normalised, pattern) {
+                if matches_credential_pattern(&normalised_lower, pattern) {
                     return true;
                 }
             }
@@ -930,12 +951,12 @@ fn is_credential_file_access(command: &str) -> bool {
         let redir_space = format!("< {pattern}");
         if EXACT_FILENAME_PATTERNS.contains(pattern) {
             // For exact patterns, check with word-boundary after redirect
-            if matches_credential_pattern(&normalised, &redir_no_space)
-                || matches_credential_pattern(&normalised, &redir_space)
+            if matches_credential_pattern(&normalised_lower, &redir_no_space)
+                || matches_credential_pattern(&normalised_lower, &redir_space)
             {
                 return true;
             }
-        } else if normalised.contains(&redir_no_space) || normalised.contains(&redir_space) {
+        } else if normalised_lower.contains(&redir_no_space) || normalised_lower.contains(&redir_space) {
             return true;
         }
     }
@@ -2056,6 +2077,7 @@ mod tests {
             tool_name: tool_name.to_owned(),
             tool_input,
             config: None,
+            entropy_allowlist: Vec::new(),
         }
     }
 
@@ -3388,6 +3410,7 @@ mod tests {
             tool_name: tool_name.to_owned(),
             tool_input,
             config: None,
+            entropy_allowlist: Vec::new(),
         }
     }
 
@@ -3404,6 +3427,7 @@ mod tests {
                 mcp_audit: true,
                 ..Default::default()
             }),
+            entropy_allowlist: Vec::new(),
         }
     }
 
@@ -3529,6 +3553,7 @@ mod tests {
                 mcp_audit: false,
                 ..Default::default()
             }),
+            entropy_allowlist: Vec::new(),
         };
         let mut log = McpAuditLog::new();
         let _output = pre_mcp_tool_use(&input, Some(&mut log));
@@ -3551,6 +3576,7 @@ mod tests {
                 }],
                 ..Default::default()
             }),
+            entropy_allowlist: Vec::new(),
         };
         let output = pre_mcp_tool_use(&input, None);
         assert_eq!(
@@ -5408,7 +5434,7 @@ mod tests {
     #[test]
     fn test_case_insensitive_credential_path() {
         // macOS filesystem is case-insensitive; ~/.SSH/id_rsa should be blocked
-        let output = pre_bash(&bash_input("myreader ~/.SSH/id_rsa"));
+        let output = pre_bash(&make_input("bash", serde_json::json!({"command": "myreader ~/.SSH/id_rsa"})));
         assert_eq!(
             output.decision,
             HookDecision::Block,
@@ -5418,7 +5444,7 @@ mod tests {
 
     #[test]
     fn test_case_insensitive_env_path() {
-        let output = pre_bash(&bash_input("myreader /home/user/.ENV"));
+        let output = pre_bash(&make_input("bash", serde_json::json!({"command": "myreader /home/user/.ENV"})));
         assert_eq!(
             output.decision,
             HookDecision::Block,
@@ -5828,6 +5854,7 @@ mod expanded_claude_tests {
             tool_name: tool_name.to_owned(),
             tool_input,
             config: None,
+            entropy_allowlist: Vec::new(),
         }
     }
 
@@ -5915,6 +5942,107 @@ mod expanded_claude_tests {
         assert!(
             packages.is_empty(),
             "extract_all_packages does not yet handle npx"
+        );
+    }
+
+    // ---- Case-insensitive credential path matching (Fix 4) ----
+
+    #[test]
+    fn pre_bash_blocks_uppercase_ssh_path() {
+        // macOS APFS is case-insensitive: uppercase paths should be caught
+        let output = pre_bash(&make_test_input("bash", serde_json::json!({"command": "cat ~/.SSH/config"})));
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "uppercase .SSH should be blocked"
+        );
+    }
+
+    #[test]
+    fn pre_bash_blocks_uppercase_env_file() {
+        let output = pre_bash(&make_test_input("bash", serde_json::json!({"command": "cat .ENV"})));
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "uppercase .ENV should be blocked"
+        );
+    }
+
+    #[test]
+    fn pre_bash_blocks_mixed_case_docker_config() {
+        let output = pre_bash(&make_test_input("bash", serde_json::json!({"command": "cat ~/.Docker/Config.json"})));
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "mixed-case .Docker/Config.json should be blocked"
+        );
+    }
+
+    // ---- AI dotfiles in sensitive read paths (Fix 6) ----
+
+    #[test]
+    fn pre_read_blocks_claude_settings() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.claude/settings.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "claude settings should be blocked"
+        );
+    }
+
+    #[test]
+    fn pre_read_blocks_cursor_mcp_config() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.cursor/mcp.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "cursor mcp config should be blocked"
+        );
+    }
+
+    #[test]
+    fn pre_read_blocks_copilot_dir() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.copilot/config.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "copilot files should be blocked"
+        );
+    }
+
+    #[test]
+    fn pre_read_blocks_aider_dir() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.aider/config.yml"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "aider files should be blocked"
+        );
+    }
+
+    #[test]
+    fn pre_read_blocks_cline_dir() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.cline/settings.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "cline files should be blocked"
+        );
+    }
+
+    #[test]
+    fn pre_read_blocks_roo_dir() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.roo/config.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "roo files should be blocked"
         );
     }
 }

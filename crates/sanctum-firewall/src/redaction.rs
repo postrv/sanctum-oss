@@ -154,6 +154,117 @@ pub fn redact_credentials(text: &str) -> (String, Vec<RedactionEvent>) {
     (entropy_pass, events)
 }
 
+/// Scan text for credentials with configurable entropy detection parameters.
+///
+/// Like [`redact_credentials`] but accepts an entropy threshold, minimum token
+/// length, and an allowlist of SHA-256 hashes for tokens that should be skipped
+/// by the entropy fallback scanner.
+///
+/// The `allowlist_hashes` parameter contains hex-encoded SHA-256 hashes of
+/// known-safe high-entropy strings (e.g., build hashes, UUIDs) that should not
+/// be flagged by the entropy detector.
+#[must_use]
+pub fn redact_credentials_with_config(
+    text: &str,
+    entropy_threshold: f64,
+    entropy_min_length: usize,
+    allowlist_hashes: &[String],
+) -> (String, Vec<RedactionEvent>) {
+    // Regex-based pattern matching (same as redact_credentials).
+    let mut raw_matches: Vec<RawMatch> = Vec::new();
+
+    for pattern in PATTERNS {
+        for mat in pattern.regex.find_iter(text) {
+            let matched = mat.as_str();
+            if pattern.name == "OpenAI API Key"
+                && (matched.starts_with("sk-ecdsa-") || matched.starts_with("sk-ed25519-"))
+            {
+                continue;
+            }
+            raw_matches.push(RawMatch {
+                credential_type: pattern.name,
+                start: mat.start(),
+                end: mat.end(),
+                matched_text: matched.to_owned(),
+            });
+        }
+    }
+
+    raw_matches.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+
+    let mut selected: Vec<RawMatch> = Vec::new();
+    let mut last_end: usize = 0;
+
+    for m in raw_matches {
+        if m.start >= last_end {
+            last_end = m.end;
+            selected.push(m);
+        }
+    }
+
+    let mut result = String::with_capacity(text.len());
+    let mut events = Vec::with_capacity(selected.len());
+    let mut pos: usize = 0;
+
+    for m in &selected {
+        if m.start > pos {
+            result.push_str(&text[pos..m.start]);
+        }
+
+        let hash = Sha256::digest(m.matched_text.as_bytes());
+        let full_hex = hex::encode(hash);
+        let hash_prefix = &full_hex[..4];
+
+        let _ = write!(result, "[REDACTED:{}:{}]", m.credential_type, hash_prefix);
+
+        events.push(RedactionEvent {
+            credential_type: m.credential_type.to_owned(),
+            hash_prefix: hash_prefix.to_owned(),
+            start: m.start,
+            end: m.end,
+        });
+
+        pos = m.end;
+    }
+
+    if pos < text.len() {
+        result.push_str(&text[pos..]);
+    }
+
+    // Entropy-based fallback with configurable parameters and allowlist.
+    let mut entropy_pass = String::with_capacity(result.len());
+    for token in result.split_inclusive(|c: char| c.is_whitespace()) {
+        let trimmed = token.trim_end();
+        if !trimmed.starts_with("[REDACTED:")
+            && is_high_entropy_secret(trimmed, entropy_threshold, entropy_min_length)
+        {
+            let hash = Sha256::digest(trimmed.as_bytes());
+            let full_hex = hex::encode(hash);
+
+            // Skip tokens whose SHA-256 hash is in the allowlist.
+            if allowlist_hashes.iter().any(|h| h == &full_hex) {
+                entropy_pass.push_str(token);
+                continue;
+            }
+
+            let hash_prefix = &full_hex[..4];
+            let _ = write!(entropy_pass, "[POSSIBLE_SECRET_REDACTED:{hash_prefix}]");
+            let trailing = &token[trimmed.len()..];
+            entropy_pass.push_str(trailing);
+            events.push(RedactionEvent {
+                credential_type: "High-Entropy Secret".to_owned(),
+                hash_prefix: hash_prefix.to_owned(),
+                start: 0,
+                end: 0,
+            });
+        } else {
+            entropy_pass.push_str(token);
+        }
+    }
+
+    (entropy_pass, events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +725,53 @@ mod expanded_tests {
         assert!(
             !events.iter().any(|e| e.credential_type == "OpenAI API Key"),
             "should not produce OpenAI API Key event for sk-ed25519 FIDO key"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn with_config_uses_custom_threshold() {
+        let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
+        let input = format!("config: {secret}");
+        let (output, events) = redact_credentials_with_config(&input, 99.0, 20, &[]);
+        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(output.contains(secret));
+    }
+
+    #[test]
+    fn with_config_uses_custom_min_length() {
+        let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
+        let input = format!("config: {secret}");
+        let (output, events) = redact_credentials_with_config(&input, 3.0, 100, &[]);
+        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(output.contains(secret));
+    }
+
+    #[test]
+    fn with_config_respects_allowlist() {
+        let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
+        let hash = sha2::Sha256::digest(secret.as_bytes());
+        let hex_hash = hex::encode(hash);
+
+        let input = format!("config: {secret}");
+        let allowlist = vec![hex_hash];
+        let (output, events) = redact_credentials_with_config(&input, 3.0, 20, &allowlist);
+        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(output.contains(secret));
+    }
+
+    #[test]
+    fn with_config_still_catches_regex_patterns() {
+        let input = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+        let (_, events) = redact_credentials_with_config(input, 99.0, 100, &[]);
+        assert!(
+            events.iter().any(|e| e.credential_type == "AWS Access Key"),
+            "regex patterns should still be caught regardless of entropy config"
         );
     }
 }

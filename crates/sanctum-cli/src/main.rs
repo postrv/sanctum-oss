@@ -135,6 +135,20 @@ enum Commands {
     },
     /// Check installation health.
     Doctor,
+    /// Manage entropy-based secret detection.
+    Entropy {
+        #[command(subcommand)]
+        action: EntropyAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum EntropyAction {
+    /// Add a value to the entropy allowlist (stores SHA-256 hash only).
+    Allow {
+        /// The value to allowlist.
+        value: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -266,6 +280,9 @@ fn main() -> ExitCode {
         Commands::Proxy { action } => commands::proxy::run(&action),
         Commands::Daemon { action } => commands::daemon::run(&action),
         Commands::Doctor => commands::doctor::run(),
+        Commands::Entropy { action } => match action {
+            EntropyAction::Allow { value } => commands::entropy::allow(&value),
+        },
     };
 
     match result {

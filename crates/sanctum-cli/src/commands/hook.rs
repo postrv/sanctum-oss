@@ -22,7 +22,8 @@ use sanctum_types::threat::{Action, ThreatCategory, ThreatEvent, ThreatLevel};
 ///
 /// Used as a fail-closed fallback when a config file exists but cannot be
 /// read or parsed.
-const fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
+#[allow(clippy::missing_const_for_fn)] // f64 fields prevent const
+fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
     AiFirewallConfig {
         redact_credentials: true,
         claude_hooks: true,
@@ -33,6 +34,8 @@ const fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
         // Fail-closed: when config parsing fails, block unmatched MCP tools
         // rather than silently allowing them.
         default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+        entropy_threshold: 5.0,
+        entropy_min_length: 20,
     }
 }
 
@@ -60,14 +63,43 @@ fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
         );
         cfg.mcp_audit = true;
     }
-    // Prevent local configs from weakening the MCP default policy to Allow.
+    // Prevent local configs from weakening the MCP default policy to Allow or Warn.
     // A malicious repo could include .sanctum/config.toml with
-    // `default_mcp_policy = "allow"` to bypass MCP restrictions.
-    if cfg.default_mcp_policy == sanctum_types::config::McpDefaultPolicy::Allow {
+    // `default_mcp_policy = "allow"` or `"warn"` to bypass MCP restrictions.
+    // Warn maps to exit code 0 so MCP tools still proceed -- it must be
+    // treated the same as Allow for security floor purposes.
+    if cfg.default_mcp_policy == sanctum_types::config::McpDefaultPolicy::Allow
+        || cfg.default_mcp_policy == sanctum_types::config::McpDefaultPolicy::Warn
+    {
         tracing::warn!(
-            "Project-local config cannot set default_mcp_policy to 'allow' \u{2014} using 'deny'"
+            "Project-local config cannot weaken default_mcp_policy below 'deny' \u{2014} using 'deny'"
         );
         cfg.default_mcp_policy = sanctum_types::config::McpDefaultPolicy::Deny;
+    }
+
+    // Prevent local configs from disabling slopsquatting detection.
+    if !cfg.check_package_existence {
+        tracing::warn!(
+            "Project-local config cannot disable check_package_existence \u{2014} using global default"
+        );
+        cfg.check_package_existence = true;
+    }
+
+    // Enforce entropy detection security floor: threshold >= 3.5, min_length >= 16.
+    // A malicious local config could set threshold to 99.0 to disable detection.
+    if cfg.entropy_threshold < 3.5 {
+        tracing::warn!(
+            "Project-local config entropy_threshold {} below security floor 3.5 \u{2014} clamping",
+            cfg.entropy_threshold
+        );
+        cfg.entropy_threshold = 3.5;
+    }
+    if cfg.entropy_min_length < 16 {
+        tracing::warn!(
+            "Project-local config entropy_min_length {} below security floor 16 \u{2014} clamping",
+            cfg.entropy_min_length
+        );
+        cfg.entropy_min_length = 16;
     }
 }
 
@@ -404,6 +436,15 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
     input.config.clone_from(&ai_config);
     tracing::debug!(config_loaded = ai_config.is_some(), "firewall config");
 
+    // Load entropy allowlist from disk (best-effort; empty if file missing).
+    let paths = sanctum_types::paths::WellKnownPaths::default();
+    let allowlist_path = paths.data_dir.join("entropy_allowlist.txt");
+    input.entropy_allowlist = sanctum_firewall::allowlist::load_allowlist(&allowlist_path);
+    tracing::debug!(
+        allowlist_len = input.entropy_allowlist.len(),
+        "entropy allowlist"
+    );
+
     // Load NpmConfig for package manager hooks (best-effort; defaults if unavailable).
     let npm_config = load_npm_config();
     tracing::debug!(
@@ -512,6 +553,7 @@ mod tests {
             tool_name: tool_name.to_owned(),
             tool_input,
             config: None,
+            entropy_allowlist: Vec::new(),
         }
     }
 
@@ -829,6 +871,8 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.claude_hooks);
@@ -844,6 +888,8 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.redact_credentials);
@@ -859,6 +905,8 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // mcp_audit is enforced by the floor, so it is forced to true.
@@ -877,6 +925,8 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // Local config cannot weaken MCP policy to Allow — forced to Deny
@@ -887,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn security_floor_allows_mcp_warn_policy() {
+    fn security_floor_blocks_mcp_warn_policy() {
         let mut cfg = AiFirewallConfig {
             claude_hooks: true,
             redact_credentials: true,
@@ -896,12 +946,14 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Warn,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
         };
         enforce_ai_firewall_security_floor(&mut cfg);
-        // Warn is acceptable — not weakened
+        // Warn maps to exit code 0, so it must be forced to Deny
         assert_eq!(
             cfg.default_mcp_policy,
-            sanctum_types::config::McpDefaultPolicy::Warn
+            sanctum_types::config::McpDefaultPolicy::Deny
         );
     }
 
@@ -1048,6 +1100,138 @@ mod tests {
         assert!(
             !msg.contains("lifecycle scripts"),
             "lifecycle warning suppressed when watch_lifecycle=false"
+        );
+    }
+
+    // ---- MCP warn blocking in security floor (Fix 7) ----
+
+    #[test]
+    fn security_floor_blocks_mcp_warn_policy_to_deny() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Warn,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert_eq!(
+            cfg.default_mcp_policy,
+            sanctum_types::config::McpDefaultPolicy::Deny,
+            "Warn policy should be forced to Deny"
+        );
+    }
+
+    #[test]
+    fn security_floor_preserves_mcp_deny_policy() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert_eq!(
+            cfg.default_mcp_policy,
+            sanctum_types::config::McpDefaultPolicy::Deny,
+            "Deny policy should remain Deny"
+        );
+    }
+
+    // ---- Package existence check floor (Fix 8) ----
+
+    #[test]
+    fn security_floor_forces_package_check_on() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            check_package_existence: false,
+            package_check_timeout_ms: 3000,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            entropy_threshold: 5.0,
+            entropy_min_length: 20,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!(
+            cfg.check_package_existence,
+            "check_package_existence should be forced to true"
+        );
+    }
+
+    // ---- Entropy config security floor (Fix 3) ----
+
+    #[test]
+    fn security_floor_clamps_low_entropy_threshold() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            entropy_threshold: 2.0,
+            entropy_min_length: 20,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!(
+            cfg.entropy_threshold >= 3.5,
+            "entropy_threshold below 3.5 should be clamped"
+        );
+    }
+
+    #[test]
+    fn security_floor_clamps_low_min_length() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            entropy_threshold: 5.0,
+            entropy_min_length: 8,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!(
+            cfg.entropy_min_length >= 16,
+            "entropy_min_length below 16 should be clamped"
+        );
+    }
+
+    #[test]
+    fn security_floor_preserves_valid_entropy_config() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            entropy_threshold: 4.5,
+            entropy_min_length: 20,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!(
+            (cfg.entropy_threshold - 4.5).abs() < f64::EPSILON,
+            "valid entropy_threshold should be preserved"
+        );
+        assert_eq!(
+            cfg.entropy_min_length, 20,
+            "valid entropy_min_length should be preserved"
         );
     }
 }

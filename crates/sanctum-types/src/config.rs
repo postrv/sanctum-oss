@@ -274,6 +274,25 @@ pub struct AiFirewallConfig {
     /// Default policy for MCP tools that do not match any explicit rule.
     #[serde(default)]
     pub default_mcp_policy: McpDefaultPolicy,
+    /// Shannon entropy threshold for high-entropy secret detection (bits/char).
+    /// Higher values mean fewer false positives but may miss some secrets.
+    /// Security floor: minimum 3.5.
+    #[serde(default = "default_entropy_threshold")]
+    pub entropy_threshold: f64,
+    /// Minimum string length for entropy-based secret detection.
+    /// Security floor: minimum 16.
+    #[serde(default = "default_entropy_min_length")]
+    pub entropy_min_length: usize,
+}
+
+/// Default Shannon entropy threshold for secret detection (5.0 bits/char).
+const fn default_entropy_threshold() -> f64 {
+    5.0
+}
+
+/// Default minimum string length for entropy-based secret detection.
+const fn default_entropy_min_length() -> usize {
+    20
 }
 
 /// Default timeout for package registry lookups (3 seconds).
@@ -291,6 +310,8 @@ impl Default for AiFirewallConfig {
             package_check_timeout_ms: default_package_check_timeout(),
             mcp_rules: Vec::new(),
             default_mcp_policy: McpDefaultPolicy::Allow,
+            entropy_threshold: default_entropy_threshold(),
+            entropy_min_length: default_entropy_min_length(),
         }
     }
 }

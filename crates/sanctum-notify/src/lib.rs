@@ -101,12 +101,17 @@ pub fn notify_threat(event: &ThreatEvent) {
         ThreatLevel::Info => format!("Sanctum: {}", category_display(event)),
     };
 
-    let body = format!(
-        "{} | Path: {} | Action: {}",
-        event.description,
-        truncate_path(&event.source_path),
-        event.action_taken,
-    );
+    let body = if event.level == ThreatLevel::Info {
+        // Info-level: omit path to keep the notification short
+        format!("{}\nAction: {}", event.description, event.action_taken)
+    } else {
+        format!(
+            "{}\n{}\nAction: {}",
+            event.description,
+            truncate_path(&event.source_path),
+            event.action_taken,
+        )
+    };
 
     if let Err(e) = send_notification(&summary, &body) {
         tracing::warn!(%e, "failed to send desktop notification");

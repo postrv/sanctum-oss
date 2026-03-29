@@ -93,6 +93,18 @@ pub enum CliError {
     #[error("invalid arguments: {0}")]
     InvalidArgs(String),
 
+    /// External command failed (editor, daemon binary, etc.).
+    #[error("command failed: {0}")]
+    CommandFailed(String),
+
+    /// Daemon returned an application-level error (connection succeeded).
+    #[error("daemon error: {0}")]
+    DaemonError(String),
+
+    /// Feature is in preview / not yet implemented.
+    #[error("preview feature: {0}")]
+    PreviewFeature(String),
+
     /// General I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

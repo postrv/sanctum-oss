@@ -434,33 +434,53 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                 let config_snapshot = ctx.shared_config.read().await.clone();
                 let quarantine = Arc::clone(ctx.shared_quarantine);
                 let audit_path = ctx.audit_path.to_path_buf();
-                tokio::task::spawn_blocking(move || {
+                let handle = tokio::task::spawn_blocking(move || {
                     let quarantine_guard = quarantine.blocking_lock();
                     event_handler::handle_watch_event(&event, &quarantine_guard, &config_snapshot, &audit_path);
+                });
+                tokio::spawn(async move {
+                    if let Err(e) = handle.await {
+                        tracing::error!("watch event task panicked: {e}");
+                    }
                 });
             }
 
             // Handle credential file events (dispatched to blocking thread for audit I/O)
             Some(cred_event) = ctx.cred_rx.recv() => {
                 let audit_path = ctx.audit_path.to_path_buf();
-                tokio::task::spawn_blocking(move || {
+                let handle = tokio::task::spawn_blocking(move || {
                     event_handler::handle_credential_event(&cred_event, &audit_path);
+                });
+                tokio::spawn(async move {
+                    if let Err(e) = handle.await {
+                        tracing::error!("credential event task panicked: {e}");
+                    }
                 });
             }
 
             // Handle network anomaly events (dispatched to blocking thread for audit I/O)
             Some(net_event) = ctx.net_rx.recv() => {
                 let audit_path = ctx.audit_path.to_path_buf();
-                tokio::task::spawn_blocking(move || {
+                let handle = tokio::task::spawn_blocking(move || {
                     event_handler::handle_network_event(&net_event, &audit_path);
+                });
+                tokio::spawn(async move {
+                    if let Err(e) = handle.await {
+                        tracing::error!("network event task panicked: {e}");
+                    }
                 });
             }
 
             // Handle npm lifecycle events (dispatched to blocking thread for audit I/O)
             Some(npm_event) = ctx.npm_rx.recv() => {
                 let audit_path = ctx.audit_path.to_path_buf();
-                tokio::task::spawn_blocking(move || {
+                let handle = tokio::task::spawn_blocking(move || {
                     event_handler::handle_npm_event(&npm_event, &audit_path);
+                });
+                tokio::spawn(async move {
+                    if let Err(e) = handle.await {
+                        tracing::error!("npm event task panicked: {e}");
+                    }
                 });
             }
 
@@ -493,8 +513,13 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                 let budget = Arc::clone(ctx.shared_budget);
                 let data_dir = ctx.data_dir.to_path_buf();
                 let state_path = ctx.budget_state_path.to_path_buf();
-                tokio::task::spawn_blocking(move || {
+                let handle = tokio::task::spawn_blocking(move || {
                     save_budget_state_blocking(&budget, &data_dir, &state_path);
+                });
+                tokio::spawn(async move {
+                    if let Err(e) = handle.await {
+                        tracing::error!("budget save task panicked: {e}");
+                    }
                 });
             }
         }
@@ -906,8 +931,13 @@ async fn handle_record_usage(
             // Offload blocking file I/O to a dedicated thread to avoid
             // stalling the tokio event loop (matches other audit write sites).
             let audit = audit_path.to_path_buf();
-            tokio::task::spawn_blocking(move || {
+            let handle = tokio::task::spawn_blocking(move || {
                 audit::append_audit_event(&event, &audit);
+            });
+            tokio::spawn(async move {
+                if let Err(e) = handle.await {
+                    tracing::error!("audit write task panicked: {e}");
+                }
             });
         }
     }

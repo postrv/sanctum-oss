@@ -81,12 +81,14 @@ struct Finding {
 }
 
 /// Run the scan command.
-pub fn run() -> Result<(), CliError> {
+pub fn run(json: bool) -> Result<(), CliError> {
     let cwd = std::env::current_dir()?;
 
-    #[allow(clippy::print_stdout)]
-    {
-        println!("Scanning {} for credential exposure...", cwd.display());
+    if !json {
+        #[allow(clippy::print_stdout)]
+        {
+            println!("Scanning {} for credential exposure...", cwd.display());
+        }
     }
 
     let mut findings = Vec::new();
@@ -103,26 +105,59 @@ pub fn run() -> Result<(), CliError> {
     // Check .gitignore coverage
     scan_gitignore(&cwd, &mut findings);
 
-    #[allow(clippy::print_stdout)]
-    {
-        if findings.is_empty() {
-            println!("No credential exposure issues found.");
-        } else {
-            println!();
-            println!("Found {} issue(s):", findings.len());
-            println!("{:-<72}", "");
-            for (i, finding) in findings.iter().enumerate() {
-                println!();
-                println!("  [{}/{}] {}", i + 1, findings.len(), finding.kind);
-                println!(
-                    "    File: {}:{}",
-                    finding.file.display(),
-                    finding.line_number
-                );
-                println!("    Detail: {}", finding.detail);
-                println!("    Fix: {}", finding.remediation);
+    if json {
+        #[allow(clippy::print_stdout)]
+        {
+            for finding in &findings {
+                let obj = serde_json::json!({
+                    "file": finding.file.display().to_string(),
+                    "line": finding.line_number,
+                    "kind": finding.kind,
+                    "detail": finding.detail,
+                    "remediation": finding.remediation,
+                });
+                let line = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string());
+                println!("{line}");
             }
-            println!();
+            let summary = serde_json::json!({
+                "summary": true,
+                "total_findings": findings.len(),
+                "ok": findings.is_empty(),
+            });
+            let summary_line = serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string());
+            println!("{summary_line}");
+        }
+    } else {
+        #[allow(clippy::print_stdout)]
+        {
+            if findings.is_empty() {
+                println!("No credential exposure issues found.");
+            } else {
+                println!();
+                println!("Found {} issue(s):", findings.len());
+                println!("{:-<72}", "");
+                for (i, finding) in findings.iter().enumerate() {
+                    println!();
+                    println!("  [{}/{}] {}", i + 1, findings.len(), finding.kind);
+                    println!(
+                        "    File: {}:{}",
+                        finding.file.display(),
+                        finding.line_number
+                    );
+                    println!("    Detail: {}", finding.detail);
+                    println!("    Fix: {}", finding.remediation);
+                }
+                println!();
+            }
+        }
+
+        if !findings.is_empty() {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "Run `sanctum fix list` to see active threats, or `sanctum audit` for the full event log."
+                );
+            }
         }
     }
 
@@ -383,6 +418,46 @@ fn walk_dir(dir: &Path, callback: &mut dyn FnMut(&Path), depth: usize) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn finding_json_has_expected_fields() {
+        let finding = Finding {
+            file: PathBuf::from("/tmp/project/.env"),
+            line_number: 3,
+            kind: "Plaintext secret in .env file".to_string(),
+            detail: "AWS_SECRET_ACCESS_KEY contains a value (40 chars)".to_string(),
+            remediation: "Use a secrets manager or environment variables at runtime".to_string(),
+        };
+
+        let obj = serde_json::json!({
+            "file": finding.file.display().to_string(),
+            "line": finding.line_number,
+            "kind": finding.kind,
+            "detail": finding.detail,
+            "remediation": finding.remediation,
+        });
+
+        let json_str = serde_json::to_string(&obj).expect("should serialise to JSON");
+
+        // Parse back to validate it's valid JSON with expected fields
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("should be valid JSON");
+        assert_eq!(
+            parsed.get("file").and_then(|v| v.as_str()),
+            Some("/tmp/project/.env")
+        );
+        assert_eq!(
+            parsed.get("line").and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            parsed.get("kind").and_then(|v| v.as_str()),
+            Some("Plaintext secret in .env file")
+        );
+        assert!(parsed.get("detail").is_some());
+        assert!(parsed.get("remediation").is_some());
+    }
 
     #[allow(clippy::expect_used)]
     #[test]

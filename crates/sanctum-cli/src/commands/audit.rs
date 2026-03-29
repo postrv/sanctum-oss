@@ -8,6 +8,8 @@ use sanctum_types::errors::CliError;
 use sanctum_types::paths::WellKnownPaths;
 use sanctum_types::threat::{ThreatEvent, ThreatLevel};
 
+use super::colorize_level;
+
 /// Run the audit command.
 ///
 /// Reads the NDJSON audit log and displays events, optionally filtered
@@ -80,6 +82,14 @@ pub fn run(last: Option<&str>, level: Option<&str>, json: bool) -> Result<(), Cl
         }
     }
 
+    if found_any && !json {
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!();
+            eprintln!("Tip: run `sanctum fix` to review and resolve unresolved threats.");
+        }
+    }
+
     Ok(())
 }
 
@@ -147,9 +157,9 @@ fn parse_level(s: &str) -> Result<ThreatLevel, CliError> {
 /// Print a single event in human-readable format with color.
 fn print_event(event: &ThreatEvent) {
     let level_str = match event.level {
-        ThreatLevel::Critical => "\x1b[31m[CRITICAL]\x1b[0m",
-        ThreatLevel::Warning => "\x1b[33m[WARNING]\x1b[0m",
-        ThreatLevel::Info => "\x1b[34m[INFO]\x1b[0m",
+        ThreatLevel::Critical => colorize_level("Critical"),
+        ThreatLevel::Warning => colorize_level("Warning"),
+        ThreatLevel::Info => colorize_level("Info"),
     };
 
     let timestamp = event.timestamp.format("%Y-%m-%d %H:%M:%S UTC");

@@ -31,6 +31,18 @@ pub fn resolve_upstream(
 ) -> Result<String, ProxyError> {
     validate_path(path)?;
 
+    // Validate query string for the same forbidden characters as the path.
+    if let Some(q) = query {
+        if q.contains(FORBIDDEN_PATH_CHARS) {
+            return Err(ProxyError::InvalidPath {
+                reason: format!(
+                    "query string contains forbidden characters: {}",
+                    truncate_for_log(q)
+                ),
+            });
+        }
+    }
+
     let hostname = provider.hostname();
     let base = query.map_or_else(
         || format!("https://{hostname}{path}"),
@@ -83,12 +95,19 @@ pub fn validate_path(path: &str) -> Result<(), ProxyError> {
 }
 
 /// Truncate a string for safe inclusion in log messages.
+///
+/// Uses char-boundary-aware slicing so that multi-byte UTF-8 characters
+/// are never split, which would cause a panic on `&s[..n]`.
 fn truncate_for_log(s: &str) -> String {
     const MAX_LOG_LEN: usize = 80;
     if s.len() <= MAX_LOG_LEN {
         s.to_owned()
     } else {
-        let mut truncated = s[..MAX_LOG_LEN].to_owned();
+        let mut end = MAX_LOG_LEN;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut truncated = s[..end].to_owned();
         truncated.push_str("...");
         truncated
     }
@@ -190,5 +209,123 @@ mod tests {
         let result = truncate_for_log(&long);
         assert!(result.len() < 100);
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_for_log_empty() {
+        let result = truncate_for_log("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_truncate_for_log_exact_boundary() {
+        // Exactly 80 ASCII chars -- should not be truncated.
+        let s = "a".repeat(80);
+        let result = truncate_for_log(&s);
+        assert_eq!(result, s);
+    }
+
+    #[test]
+    fn test_truncate_for_log_one_over_boundary() {
+        // 81 ASCII chars -- should be truncated.
+        let s = "a".repeat(81);
+        let result = truncate_for_log(&s);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.len(), 83); // 80 + "..."
+    }
+
+    #[test]
+    fn test_truncate_for_log_multibyte_chinese() {
+        // Chinese chars are 3 bytes each in UTF-8.
+        // 27 Chinese chars = 81 bytes, which exceeds 80.
+        let s = "\u{4e16}".repeat(27); // '世' repeated
+        assert_eq!(s.len(), 81);
+        let result = truncate_for_log(&s);
+        // Should not panic and should truncate at a char boundary.
+        assert!(result.ends_with("..."));
+        // The truncated portion should be valid UTF-8 (it compiled, so it is).
+        // Should contain 26 Chinese chars (78 bytes) + "..."
+        let without_ellipsis = &result[..result.len() - 3];
+        assert_eq!(without_ellipsis.len(), 78);
+        assert_eq!(without_ellipsis.chars().count(), 26);
+    }
+
+    #[test]
+    fn test_truncate_for_log_multibyte_emoji() {
+        // Emoji like '😀' are 4 bytes each in UTF-8.
+        // 20 emoji = 80 bytes exactly (should not be truncated).
+        let s = "\u{1F600}".repeat(20);
+        assert_eq!(s.len(), 80);
+        let result = truncate_for_log(&s);
+        assert_eq!(result, s);
+
+        // 21 emoji = 84 bytes (should truncate at byte 80 = char boundary).
+        let s2 = "\u{1F600}".repeat(21);
+        assert_eq!(s2.len(), 84);
+        let result2 = truncate_for_log(&s2);
+        assert!(result2.ends_with("..."));
+        let without_ellipsis = &result2[..result2.len() - 3];
+        assert_eq!(without_ellipsis.len(), 80);
+        assert_eq!(without_ellipsis.chars().count(), 20);
+    }
+
+    #[test]
+    fn test_truncate_for_log_multibyte_split_boundary() {
+        // 79 ASCII bytes + a 2-byte char = 81 bytes total.
+        // Byte 80 is mid-char, so truncation should back up to byte 79.
+        let mut s = "a".repeat(79);
+        s.push('\u{00E9}'); // 'é' is 2 bytes in UTF-8
+        assert_eq!(s.len(), 81);
+        let result = truncate_for_log(&s);
+        assert!(result.ends_with("..."));
+        let without_ellipsis = &result[..result.len() - 3];
+        // Should be the 79 ASCII chars (backed up from mid-char at byte 80).
+        assert_eq!(without_ellipsis.len(), 79);
+    }
+
+    // ---------- Fix 6: Query string validation ----------
+
+    #[test]
+    fn test_query_with_at_sign_rejected() {
+        let result = resolve_upstream(&Provider::OpenAi, "/v1/chat", Some("user@evil.com"));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ProxyError::InvalidPath { .. }));
+        assert!(err.to_string().contains("query string"));
+    }
+
+    #[test]
+    fn test_query_with_cr_rejected() {
+        let result = resolve_upstream(&Provider::OpenAi, "/v1/chat", Some("foo\rbar"));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ProxyError::InvalidPath { .. }));
+    }
+
+    #[test]
+    fn test_query_with_lf_rejected() {
+        let result = resolve_upstream(&Provider::OpenAi, "/v1/chat", Some("foo\nbar"));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ProxyError::InvalidPath { .. }));
+    }
+
+    #[test]
+    fn test_query_normal_accepted() {
+        let result = resolve_upstream(
+            &Provider::OpenAi,
+            "/v1/chat",
+            Some("model=gpt-4&stream=true"),
+        );
+        assert!(result.is_ok());
+        let url = result.unwrap();
+        assert!(url.contains("model=gpt-4"));
+        assert!(url.contains("stream=true"));
+    }
+
+    #[test]
+    fn test_query_empty_accepted() {
+        let result = resolve_upstream(&Provider::OpenAi, "/v1/chat", Some(""));
+        assert!(result.is_ok());
     }
 }

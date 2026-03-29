@@ -14,17 +14,12 @@ workspace = true
 sanctum-types = { path = "../sanctum-types", version = "0.1.0" }
 sanctum-budget = { path = "../sanctum-budget", version = "0.1.0" }
 sanctum-firewall = { path = "../sanctum-firewall", version = "0.1.0" }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { workspace = true }
-http-body-util = { workspace = true }
 reqwest = { workspace = true }
 bytes = { workspace = true }
-http = "1"
 url = "2"
 
 [dev-dependencies]

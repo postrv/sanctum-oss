@@ -13,12 +13,23 @@ pub fn run(action: &DaemonAction) -> Result<(), CliError> {
         DaemonAction::Stop => stop_daemon(),
         DaemonAction::Restart => {
             let _ = stop_daemon();
-            // Wait briefly for shutdown
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            wait_for_shutdown();
             start_daemon()
         }
         DaemonAction::Status => crate::commands::status::run(),
     }
+}
+
+/// Poll until the daemon socket disappears, up to 2 seconds (20 x 100 ms).
+fn wait_for_shutdown() {
+    let paths = WellKnownPaths::default();
+    for _ in 0..20 {
+        if !paths.socket_path.exists() && !paths.pid_file.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Timed out — proceed to start anyway; start_daemon will handle stale sockets.
 }
 
 fn start_daemon() -> Result<(), CliError> {
@@ -63,7 +74,7 @@ fn start_daemon() -> Result<(), CliError> {
             }
             Ok(())
         }
-        Err(e) => Err(CliError::InvalidArgs(format!(
+        Err(e) => Err(CliError::CommandFailed(format!(
             "failed to start daemon: {e}. Is sanctum-daemon in your PATH?"
         ))),
     }

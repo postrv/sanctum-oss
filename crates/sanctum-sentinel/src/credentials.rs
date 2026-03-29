@@ -322,7 +322,7 @@ fn macos_find_accessor_inner(path: &Path) -> (Option<u32>, Option<String>) {
 
     // Spawn lsof as a child process so we can enforce a timeout.
     let child = Command::new("lsof")
-        .arg(&*path_str)
+        .args(["--", &*path_str])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn();

@@ -112,6 +112,8 @@ sanctum hooks install claude # Install Claude Code hooks
 sanctum hooks remove claude  # Remove Claude Code hooks
 
 sanctum daemon start|stop|restart
+
+sanctum proxy start|stop|status  # (preview)
 ```
 
 ## Configuration
@@ -154,8 +156,8 @@ Full configuration reference: see `sanctum config --recommended` for annotated d
 ### From source (recommended for security-conscious users)
 
 ```bash
-git clone https://github.com/postrv/sanctum-oss
-cd sanctum-oss
+git clone https://github.com/postrv/sanctum
+cd sanctum
 cargo build --release
 # Binaries: target/release/sanctum, target/release/sanctum-daemon
 ```
@@ -214,16 +216,16 @@ Sanctum does **not** require nono. Each tool provides independent value.
 
 ## Architecture
 
-8 crates, ~29,300 lines of Rust:
+8 crates, ~35,500 lines of Rust:
 
 | Crate | Purpose |
 |-------|---------|
-| `sanctum-cli` | CLI interface -- 13 commands via clap |
+| `sanctum-cli` | CLI interface -- 14 commands via clap |
 | `sanctum-daemon` | Background daemon, IPC server (14 commands), event loop |
 | `sanctum-sentinel` | `.pth` monitoring, quarantine, credential watching, network anomaly detection |
 | `sanctum-firewall` | Credential redaction (37 patterns), Shannon entropy, MCP policy engine |
 | `sanctum-budget` | Spend tracking, 3 provider parsers (OpenAI, Anthropic, Google) |
-| `sanctum-proxy` | HTTP budget proxy foundation (provider identification) |
+| `sanctum-proxy` | HTTP budget proxy with body limits, credential redaction, budget enforcement, SSRF prevention, and usage extraction (preview -- server wiring pending) |
 | `sanctum-types` | Shared types, config schema, threat model, platform paths |
 | `sanctum-notify` | Cross-platform desktop notifications (macOS + Linux) |
 
@@ -237,14 +239,14 @@ Sanctum is a security tool. It holds itself to a higher standard than the code i
 - No `print!()` / `println!()` / `eprint!()` -- all output goes through structured channels
 
 **Testing**:
-- 1,170 tests (unit, integration, end-to-end)
+- 1,405 tests (unit, integration, end-to-end)
 - 8 Kani bounded model checking proofs (panic-freedom, state machine correctness, overflow safety)
 - 2 fuzz targets on security-critical parsers (CI runs 30s per target on PRs, 2.5h nightly)
 - 9 property-based tests verifying core invariants across random inputs
 - 0 clippy warnings (pedantic + nursery lints enabled)
 
 **Supply chain**:
-- All 193 dependencies audited and version-pinned
+- All 282 dependencies audited and version-pinned
 - `cargo-deny` enforces license policy and advisory database checks in CI
 - Sigstore-signed release binaries with SBOM and Rekor transparency log
 - Reproducible builds verified in CI (build twice, compare SHA-256)

@@ -451,6 +451,21 @@ impl Quarantine {
 
         // Write content to quarantine and fsync to ensure durability
         {
+            #[cfg(unix)]
+            let mut qfile = {
+                use std::os::unix::fs::OpenOptionsExt;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&quarantine_path)
+                    .map_err(|e| SentinelError::Quarantine {
+                        path: quarantine_path.clone(),
+                        source: e,
+                    })?
+            };
+            #[cfg(not(unix))]
             let mut qfile =
                 fs::File::create(&quarantine_path).map_err(|e| SentinelError::Quarantine {
                     path: quarantine_path.clone(),
@@ -1139,6 +1154,31 @@ mod tests {
         assert_eq!(
             mode, 0o700,
             "quarantine dir should be owner-only (0o700), got {mode:#o}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quarantine_file_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pth_path = dir.path().join("evil.pth");
+        fs::write(&pth_path, "exec(...)").expect("write");
+
+        let q = Quarantine::new(dir.path().join("quarantine"));
+        let entry = q
+            .quarantine_file(&pth_path, &default_meta(&pth_path))
+            .expect("quarantine should succeed");
+
+        let mode = fs::metadata(&entry.quarantine_path)
+            .expect("quarantine file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "quarantine file should be owner-read/write only (0o600), got {mode:#o}"
         );
     }
 

@@ -11,7 +11,7 @@
 //!   any network request is made.
 //! - Cache files are integrity-checked with SHA-256 and symlink-checked
 //!   before reading.
-//! - HTTP redirect following is limited to 3 hops (SSRF mitigation).
+//! - HTTP redirect following is disabled (SSRF mitigation).
 //! - Multi-package commands (e.g. `npm install a b c`) extract all names.
 
 use std::path::{Path, PathBuf};
@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 /// Maximum number of redirects to follow for registry checks (SSRF mitigation).
+/// Currently unused because we use `Policy::none()`, but retained for documentation.
+#[allow(dead_code)]
 const MAX_REDIRECTS: usize = 3;
 
 /// A package registry that can be checked for package existence.
@@ -476,7 +478,7 @@ pub fn write_cache(
 /// Check if a package exists on its registry.
 ///
 /// Uses a cached result if available. Otherwise makes an HTTP HEAD request
-/// to the registry with a limited redirect policy (max 3 hops).
+/// to the registry with redirects disabled (SSRF mitigation).
 ///
 /// # Errors
 ///
@@ -498,7 +500,7 @@ pub async fn check_package_exists(name: &str, registry: Registry) -> CheckResult
     };
 
     let client = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
@@ -827,18 +829,14 @@ mod tests {
     // --- Redirect policy ---
 
     #[test]
-    fn test_redirect_policy_limited() {
-        // Verify the constant is sensible at compile time
-        const {
-            assert!(MAX_REDIRECTS <= 5, "redirect policy should be limited");
-            assert!(MAX_REDIRECTS > 0, "at least one redirect should be allowed");
-        }
-
-        // Verify we can build a client with the limited redirect policy
+    fn test_redirect_policy_none() {
+        // Verify we can build a client with the no-redirect policy.
+        // Package registry existence checks should never follow redirects
+        // to prevent SSRF via redirect to internal hosts.
         let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+            .redirect(reqwest::redirect::Policy::none())
             .build();
-        assert!(client.is_ok(), "client with limited redirects should build");
+        assert!(client.is_ok(), "client with no redirects should build");
     }
 
     #[test]

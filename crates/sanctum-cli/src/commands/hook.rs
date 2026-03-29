@@ -129,31 +129,10 @@ fn load_ai_firewall_config() -> Option<AiFirewallConfig> {
 
 /// Load `NpmConfig` from the config file (best-effort).
 ///
-/// Looks for an `[npm]` section in the config TOML. If not found or parse
-/// fails, returns defaults (all protections on). This ensures `NpmConfig` is
-/// available even when the types crate doesn't define it yet.
+/// Deserializes through `SanctumConfig` (single source of truth for all config
+/// fields) and maps the `[sentinel.npm]` section to the firewall's `NpmConfig`.
+/// If no config file exists or parsing fails, returns defaults (all protections on).
 fn load_npm_config() -> NpmConfig {
-    /// Minimal TOML-level npm config struct for deserialization.
-    #[derive(serde::Deserialize)]
-    struct NpmSection {
-        #[serde(default = "default_true")]
-        watch_lifecycle: bool,
-        #[serde(default = "default_true")]
-        ignore_scripts_warning: bool,
-        #[serde(default)]
-        allowlist: Vec<String>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ConfigWithNpm {
-        #[serde(default)]
-        npm: Option<NpmSection>,
-    }
-
-    const fn default_true() -> bool {
-        true
-    }
-
     // Try project-local first, then global
     let config_path = {
         let local = std::path::PathBuf::from(".sanctum/config.toml");
@@ -178,12 +157,12 @@ fn load_npm_config() -> NpmConfig {
         return NpmConfig::default();
     };
 
-    match toml::from_str::<ConfigWithNpm>(&content) {
-        Ok(cfg) => cfg.npm.map_or_else(NpmConfig::default, |npm| NpmConfig {
-            watch_lifecycle: npm.watch_lifecycle,
-            ignore_scripts_warning: npm.ignore_scripts_warning,
-            allowlist: npm.allowlist,
-        }),
+    match toml::from_str::<sanctum_types::config::SanctumConfig>(&content) {
+        Ok(cfg) => NpmConfig {
+            watch_lifecycle: cfg.sentinel.npm.watch_lifecycle,
+            ignore_scripts_warning: cfg.sentinel.npm.ignore_scripts_warning,
+            allowlist: cfg.sentinel.npm.allowlist,
+        },
         Err(_) => NpmConfig::default(),
     }
 }
@@ -266,7 +245,13 @@ fn record_hook_threat_event(
     };
 
     let category = infer_threat_category(action, message);
-    let source_path = extract_source_path(input, action);
+    let raw_source_path = extract_source_path(input, action);
+    // Redact credentials from the source_path before storing in the audit log.
+    // The truncated command string may contain the very credentials that
+    // triggered the hook block.
+    let (redacted, _) =
+        sanctum_firewall::redaction::redact_credentials(&raw_source_path.to_string_lossy());
+    let source_path = PathBuf::from(redacted);
 
     let event = ThreatEvent {
         timestamp: chrono::Utc::now(),
@@ -987,6 +972,27 @@ mod tests {
         assert!(cfg.watch_lifecycle);
         assert!(cfg.ignore_scripts_warning);
         assert!(cfg.allowlist.is_empty());
+    }
+
+    #[test]
+    fn source_path_redacts_embedded_credentials() {
+        // A command containing an API key should have it redacted in the
+        // source_path stored in the ThreatEvent.
+        let cmd = "curl -H \"Authorization: Bearer sk-proj-abcdef1234567890abcdef1234567890abcdef1234567890ab\" http://api.openai.com";
+        let input = make_input("bash", json!({ "command": cmd }));
+        let raw_path = extract_source_path(&input, "pre-bash");
+        let (redacted, _) =
+            sanctum_firewall::redaction::redact_credentials(&raw_path.to_string_lossy());
+        let redacted_path = PathBuf::from(&redacted);
+        let path_str = redacted_path.to_string_lossy();
+        assert!(
+            !path_str.contains("sk-proj-abcdef1234567890abcdef1234567890"),
+            "source_path should not contain raw API key, got: {path_str}"
+        );
+        assert!(
+            path_str.contains("[REDACTED:"),
+            "source_path should contain redaction placeholder, got: {path_str}"
+        );
     }
 
     #[test]

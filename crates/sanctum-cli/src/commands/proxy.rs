@@ -30,13 +30,40 @@ pub fn run(action: &ProxyCliAction) -> Result<(), CliError> {
                 eprintln!();
                 eprintln!("Track progress: https://github.com/sanctum-dev/sanctum/issues/proxy");
             }
-            Err(CliError::InvalidArgs(
-                "proxy management not yet available — preview feature".to_string(),
+            Err(CliError::PreviewFeature(
+                "proxy management not yet available".to_string(),
             ))
         }
-        ProxyCliAction::Stop | ProxyCliAction::Status => Err(CliError::InvalidArgs(
-            "proxy management not yet available — preview feature".to_string(),
-        )),
+        ProxyCliAction::Stop => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("sanctum proxy: preview feature (not yet wired into the daemon)");
+                eprintln!();
+                eprintln!("When complete, `sanctum proxy stop` will:");
+                eprintln!("  - Gracefully shut down the running HTTPS proxy");
+                eprintln!("  - Drain in-flight requests before stopping");
+                eprintln!();
+                eprintln!("Track progress: https://github.com/sanctum-dev/sanctum/issues/proxy");
+            }
+            Err(CliError::PreviewFeature(
+                "proxy management not yet available".to_string(),
+            ))
+        }
+        ProxyCliAction::Status => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("sanctum proxy: preview feature (not yet wired into the daemon)");
+                eprintln!();
+                eprintln!("When complete, `sanctum proxy status` will:");
+                eprintln!("  - Show whether the proxy is running and its listen address");
+                eprintln!("  - Display current budget usage and remaining allowance");
+                eprintln!();
+                eprintln!("Track progress: https://github.com/sanctum-dev/sanctum/issues/proxy");
+            }
+            Err(CliError::PreviewFeature(
+                "proxy management not yet available".to_string(),
+            ))
+        }
     }
 }
 

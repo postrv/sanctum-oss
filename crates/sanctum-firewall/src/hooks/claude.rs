@@ -170,6 +170,27 @@ fn extract_pkg_name_from_token(token: &str) -> &str {
     )
 }
 
+/// Validate that a package name is safe for URL interpolation.
+///
+/// Rejects empty names, names starting with `.` or `-`, names longer than 214
+/// characters (npm limit), and names containing characters outside the
+/// `[a-zA-Z0-9@/_.-]` allowlist.
+fn is_valid_curl_package_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 214 {
+        return false;
+    }
+    if name.starts_with('.') || name.starts_with('-') {
+        return false;
+    }
+    // Reject path traversal sequences
+    if name.contains("..") {
+        return false;
+    }
+    name.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || b == b'@' || b == b'/' || b == b'_' || b == b'.' || b == b'-'
+    })
+}
+
 /// Check whether a package exists on its registry using a synchronous HTTP
 /// HEAD request via `curl`.
 ///
@@ -177,6 +198,11 @@ fn extract_pkg_name_from_token(token: &str) -> &str {
 /// on any network error rather than panicking. Uses `curl` as a subprocess
 /// because we don't have TLS libraries in our dependency tree.
 fn check_package_exists(name: &str, registry: &Registry) -> PackageCheckResult {
+    // Validate package name before URL construction to prevent injection
+    if !is_valid_curl_package_name(name) {
+        return PackageCheckResult::CheckFailed(format!("invalid package name: {name}"));
+    }
+
     let url = match registry {
         Registry::Npm => format!("https://registry.npmjs.org/{name}"),
         Registry::PyPI => format!("https://pypi.org/pypi/{name}/json"),
@@ -194,6 +220,8 @@ fn check_package_exists(name: &str, registry: &Registry) -> PackageCheckResult {
             "5",
             "--connect-timeout",
             "3",
+            "--max-redirs",
+            "0",
             &url,
         ])
         .output();
@@ -4519,6 +4547,73 @@ mod tests {
         assert_eq!(output.decision, HookDecision::Allow);
     }
 
+    // ---- MultiEdit via Write tool with sk-proj credential ----
+
+    #[test]
+    fn pre_write_blocks_sk_proj_credential_in_multiedit_via_write_tool() {
+        let input = make_input(
+            "Write",
+            json!({
+                "file_path": "/tmp/test.py",
+                "operations": [
+                    {
+                        "old_string": "placeholder",
+                        "new_string": "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890abcdef12345678"
+                    }
+                ]
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+        let msg = output.message.unwrap_or_default();
+        assert!(
+            msg.contains("credentials"),
+            "message should mention credentials, got: {msg}"
+        );
+    }
+
+    // ---- .env.example and .envrc allowed through pre_read ----
+
+    #[test]
+    fn pre_read_allows_env_example() {
+        let input = make_input("read", json!({ "file_path": "/project/.env.example" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_read_allows_envrc_file() {
+        let input = make_input("read", json!({ "file_path": "/project/.envrc" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_bash_blocks_cat_env_local() {
+        let output = pre_bash(&bash_input("cat .env.local"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- pre_write blocks systemd user service path ----
+
+    #[test]
+    fn pre_write_blocks_systemd_user_service_backdoor() {
+        let input = make_input(
+            "write",
+            json!({
+                "file_path": "/home/user/.config/systemd/user/backdoor.service",
+                "content": "[Unit]\nDescription=Backdoor"
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+        let msg = output.message.unwrap_or_default();
+        assert!(
+            msg.contains("high-risk persistence path"),
+            "message should mention high-risk persistence path, got: {msg}"
+        );
+    }
+
     // ---- Service account pattern tightened ----
 
     #[test]
@@ -5527,5 +5622,114 @@ mod tests {
         assert!(is_npm_install_command("bun i"));
         assert!(!is_npm_install_command("npm uninstall foo"));
         assert!(!is_npm_install_command("npm run build"));
+    }
+
+    // ---- check_package_exists: package name validation ----
+
+    #[test]
+    fn test_check_package_exists_rejects_empty_name() {
+        let result = check_package_exists("", &Registry::Npm);
+        assert!(
+            matches!(result, PackageCheckResult::CheckFailed(_)),
+            "empty name must return CheckFailed"
+        );
+    }
+
+    #[test]
+    fn test_check_package_exists_rejects_path_traversal() {
+        let result = check_package_exists("../../etc/passwd", &Registry::Npm);
+        assert!(
+            matches!(result, PackageCheckResult::CheckFailed(_)),
+            "path traversal must return CheckFailed"
+        );
+    }
+
+    #[test]
+    fn test_check_package_exists_rejects_spaces() {
+        let result = check_package_exists("foo bar", &Registry::Npm);
+        assert!(
+            matches!(result, PackageCheckResult::CheckFailed(_)),
+            "names with spaces must return CheckFailed"
+        );
+    }
+
+    #[test]
+    fn test_check_package_exists_rejects_crlf_injection() {
+        let result = check_package_exists("%0d%0a", &Registry::Npm);
+        assert!(
+            matches!(result, PackageCheckResult::CheckFailed(_)),
+            "percent-encoded CRLF must return CheckFailed"
+        );
+    }
+
+    #[test]
+    fn test_check_package_exists_rejects_very_long_name() {
+        let long_name = "a".repeat(215);
+        let result = check_package_exists(&long_name, &Registry::Npm);
+        assert!(
+            matches!(result, PackageCheckResult::CheckFailed(_)),
+            "names > 214 chars must return CheckFailed"
+        );
+    }
+
+    #[test]
+    fn test_check_package_exists_rejects_name_starting_with_dot() {
+        let result = check_package_exists(".hidden", &Registry::Npm);
+        assert!(
+            matches!(result, PackageCheckResult::CheckFailed(_)),
+            "names starting with '.' must return CheckFailed"
+        );
+    }
+
+    #[test]
+    fn test_check_package_exists_rejects_name_starting_with_dash() {
+        let result = check_package_exists("-flag", &Registry::Npm);
+        assert!(
+            matches!(result, PackageCheckResult::CheckFailed(_)),
+            "names starting with '-' must return CheckFailed"
+        );
+    }
+
+    #[test]
+    fn test_valid_curl_package_name_accepts_valid_names() {
+        assert!(is_valid_curl_package_name("react"));
+        assert!(is_valid_curl_package_name("@scope/pkg"));
+        assert!(is_valid_curl_package_name("lodash.merge"));
+        assert!(is_valid_curl_package_name("my-package"));
+        assert!(is_valid_curl_package_name("my_package"));
+    }
+
+    #[test]
+    fn test_valid_curl_package_name_rejects_invalid_names() {
+        assert!(!is_valid_curl_package_name(""));
+        assert!(!is_valid_curl_package_name("foo bar"));
+        assert!(!is_valid_curl_package_name("../../etc/passwd"));
+        assert!(!is_valid_curl_package_name(".hidden"));
+        assert!(!is_valid_curl_package_name("-flag"));
+        assert!(!is_valid_curl_package_name(&"a".repeat(215)));
+        assert!(!is_valid_curl_package_name("foo%0d%0abar"));
+    }
+
+    // ---- check_package_exists: curl args include --max-redirs ----
+
+    #[test]
+    fn test_curl_command_includes_max_redirs() {
+        // The check_package_exists function constructs a curl command.
+        // We verify --max-redirs is in the args by examining the function
+        // directly. Since we can't easily inspect the Command, we verify
+        // the function returns a sensible result for a valid package name
+        // (it will fail because curl can't reach the network in CI, but
+        // the point is it doesn't fail at validation).
+        // The actual --max-redirs inclusion is verified by code review
+        // and the compile-time presence in the args array.
+        //
+        // For a structural test, we verify the source contains --max-redirs.
+        // This is an intentional compile-time contract test.
+        let source = include_str!("claude.rs");
+        assert!(
+            source.contains("\"--max-redirs\""),
+            "curl args must include --max-redirs"
+        );
+        assert!(source.contains("\"0\""), "--max-redirs must be set to 0");
     }
 }

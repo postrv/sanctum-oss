@@ -57,13 +57,17 @@ enum Commands {
         delete: Option<String>,
     },
     /// Scan for credential exposure in the current project.
-    Scan,
-    /// Run a command with Sanctum protections.
+    Scan {
+        /// Output findings as NDJSON (one JSON object per line).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a command under Sanctum monitoring (auto-starts daemon, enables file and credential watchers).
     Run {
         /// Enable sandbox via nono (if installed).
         #[arg(long)]
         sandbox: bool,
-        /// The command to run.
+        /// Command and arguments (use -- to separate flags, e.g. sanctum run -- npm test).
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -87,7 +91,7 @@ enum Commands {
         #[arg(long)]
         last: Option<String>,
         /// Filter by threat level (info, warning, critical).
-        #[arg(long)]
+        #[arg(long, value_parser = ["info", "warning", "critical"])]
         level: Option<String>,
         /// Output as JSON (one event per line).
         #[arg(long)]
@@ -105,6 +109,7 @@ enum Commands {
         yes: bool,
     },
     /// Claude Code hook handler (called by PreToolUse/PostToolUse hooks).
+    #[command(hide = true)]
     Hook {
         /// Hook action: pre-bash, pre-write, pre-read, post-bash.
         action: String,
@@ -135,14 +140,17 @@ enum Commands {
 enum BudgetAction {
     /// Set budget limits.
     Set {
-        #[arg(long)]
+        /// Budget limit (e.g. $50, 50.00).
+        #[arg(long, value_name = "AMOUNT")]
         session: Option<String>,
-        #[arg(long)]
+        /// Budget limit (e.g. $50, 50.00).
+        #[arg(long, value_name = "AMOUNT")]
         daily: Option<String>,
     },
     /// Extend current session budget.
     Extend {
-        #[arg(long)]
+        /// Amount to add (e.g. $20).
+        #[arg(long, value_name = "AMOUNT")]
         session: Option<String>,
     },
     /// Reset budget counters.
@@ -169,10 +177,10 @@ pub enum FixAction {
     /// List all unresolved threats.
     List {
         /// Filter by category (pth, credential, mcp, budget).
-        #[arg(long)]
+        #[arg(long, value_parser = ["pth", "credential", "mcp", "budget"])]
         category: Option<String>,
         /// Filter by threat level (info, warning, critical).
-        #[arg(long)]
+        #[arg(long, value_parser = ["info", "warning", "critical"])]
         level: Option<String>,
     },
     /// Remediate a specific threat by ID.
@@ -180,7 +188,7 @@ pub enum FixAction {
         /// Threat ID from the audit log.
         id: String,
         /// Action: restore, delete, dismiss, allowlist.
-        #[arg(long)]
+        #[arg(long, value_parser = ["restore", "delete", "dismiss", "allowlist"])]
         action: Option<String>,
     },
     /// Batch-remediate all unresolved threats.
@@ -196,11 +204,13 @@ enum HooksAction {
     /// Install hooks for a tool.
     Install {
         /// Tool to install hooks for (e.g., "claude").
+        #[arg(value_parser = ["claude"])]
         tool: String,
     },
     /// Remove hooks for a tool.
     Remove {
         /// Tool to remove hooks from.
+        #[arg(value_parser = ["claude"])]
         tool: String,
     },
 }
@@ -242,7 +252,7 @@ fn main() -> ExitCode {
             approve,
             delete,
         } => commands::review::run(json, approve.as_deref(), delete.as_deref()),
-        Commands::Scan => commands::scan::run(),
+        Commands::Scan { json } => commands::scan::run(json),
         Commands::Run { sandbox, command } => commands::run::run(sandbox, &command),
         Commands::Config { edit, recommended } => commands::config::run(edit, recommended),
         Commands::Budget { action } => commands::budget::run(action.as_ref()),

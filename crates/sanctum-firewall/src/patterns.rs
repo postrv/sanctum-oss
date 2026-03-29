@@ -74,7 +74,7 @@ static_regex!(
 );
 static_regex!(
     BEARER_TOKEN_RE,
-    r"\b(?i:authorization)[=: ]+Bearer [A-Za-z0-9_\-]{20,}"
+    r"\b(?i:authorization)[=: ]+(?i:Bearer) [A-Za-z0-9_\-]{20,}"
 );
 static_regex!(PRIVATE_KEY_RE, r"-----BEGIN[A-Z ]*PRIVATE KEY-----");
 static_regex!(
@@ -477,6 +477,15 @@ mod tests {
     fn bearer_token_matches_equals_separator() {
         let input = "Authorization=Bearer abcdefghijklmnopqrstuvwxyz1234";
         assert!(BEARER_TOKEN_RE.is_match(input));
+    }
+
+    #[test]
+    fn bearer_token_matches_lowercase_bearer() {
+        let input = "authorization: bearer sk-abcdefghijklmnopqrstuvwxyz1234";
+        assert!(
+            BEARER_TOKEN_RE.is_match(input),
+            "lowercase 'bearer' should be detected (RFC allows case-insensitive)"
+        );
     }
 
     #[test]

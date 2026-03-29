@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP built-in sensitive path restrictions**: All MCP tools are blocked from accessing `.ssh/`, `.aws/`, `.gnupg/`, `.env`, `.pth`, `sitecustomize.py`, and other sensitive paths, regardless of user rules
 - **macOS credential access tracing**: Best-effort `lsof` probe identifies which process accessed credential files (previously returned no process info on macOS)
 - **BudgetOverrun threat events**: Budget limit exceedances now emit `ThreatEvent` records to the audit log
-- **1,170 tests** across 8 crates (up from 899)
+- **1,405 tests** across 8 crates (up from 899)
 
 ### Fixed
 - **`sanctum scan` exit code**: Returns non-zero exit code when credential findings are detected, enabling CI/CD gate checks

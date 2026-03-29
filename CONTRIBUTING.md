@@ -5,8 +5,8 @@ Thanks for your interest in contributing. Sanctum is a security tool, so contrib
 ## Getting started
 
 ```bash
-git clone https://github.com/postrv/sanctum-oss
-cd sanctum-oss
+git clone https://github.com/postrv/sanctum
+cd sanctum
 cargo build --workspace
 cargo test --workspace --all-features
 ```

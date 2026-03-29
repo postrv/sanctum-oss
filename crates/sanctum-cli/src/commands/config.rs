@@ -21,7 +21,13 @@ pub fn run(edit: bool, recommended: bool) -> Result<(), CliError> {
     if edit {
         let editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
-            .unwrap_or_else(|_| "vi".to_string());
+            .unwrap_or_else(|_| {
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!("Opening in vi (set $EDITOR to change)...");
+                }
+                "vi".to_string()
+            });
 
         let path = if let Some(p) = config_path {
             p
@@ -59,10 +65,12 @@ pub fn run(edit: bool, recommended: bool) -> Result<(), CliError> {
         let status = std::process::Command::new(&editor)
             .arg(&path)
             .status()
-            .map_err(|e| CliError::InvalidArgs(format!("failed to open editor '{editor}': {e}")))?;
+            .map_err(|e| {
+                CliError::CommandFailed(format!("failed to open editor '{editor}': {e}"))
+            })?;
 
         if !status.success() {
-            return Err(CliError::InvalidArgs(
+            return Err(CliError::CommandFailed(
                 "editor exited with error".to_string(),
             ));
         }

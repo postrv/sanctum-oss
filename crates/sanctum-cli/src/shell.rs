@@ -25,7 +25,7 @@ pub fn generate_shell_hook(shell: Shell) -> String {
 
 fn generate_zsh_hook() -> String {
     r#"# Sanctum shell hook — add to ~/.zshrc:
-#   eval "$(sanctum init zsh)"
+#   eval "$(sanctum init --shell zsh)"
 
 _sanctum_hook() {
     # Auto-start daemon if not running
@@ -48,7 +48,7 @@ export SANCTUM_ACTIVE=1
 
 fn generate_bash_hook() -> String {
     r#"# Sanctum shell hook — add to ~/.bashrc:
-#   eval "$(sanctum init bash)"
+#   eval "$(sanctum init --shell bash)"
 
 _sanctum_hook() {
     # Auto-start daemon if not running
@@ -71,7 +71,7 @@ export SANCTUM_ACTIVE=1
 
 fn generate_fish_hook() -> String {
     r"# Sanctum shell hook — add to ~/.config/fish/config.fish:
-#   sanctum init fish | source
+#   sanctum init --shell fish | source
 
 if not set -q SANCTUM_ACTIVE
     if not sanctum daemon status >/dev/null 2>&1

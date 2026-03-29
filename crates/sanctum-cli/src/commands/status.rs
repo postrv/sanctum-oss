@@ -52,8 +52,8 @@ pub fn run() -> Result<(), CliError> {
 
             Ok(())
         }
-        IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-        _ => Err(CliError::ConnectionFailed(
+        IpcResponse::Error { message } => Err(CliError::DaemonError(message)),
+        _ => Err(CliError::DaemonError(
             "unexpected response from daemon".to_string(),
         )),
     }

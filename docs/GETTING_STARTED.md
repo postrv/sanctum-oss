@@ -83,6 +83,7 @@ This configures Claude Code to route tool calls through Sanctum's AI firewall. T
 - **pre-bash**: blocks credential exfiltration via shell commands
 - **pre-write**: blocks credentials from being written to files
 - **pre-read**: blocks reading of sensitive files (SSH keys, `.env`, etc.)
+- **pre-mcp**: audits MCP tool calls against policy rules
 - **post-bash**: monitors command output for credential leakage
 
 ## Step 5: Verify your setup

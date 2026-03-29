@@ -2,6 +2,7 @@
 
 use sanctum_types::errors::CliError;
 
+use crate::commands::colorize_level;
 use crate::ipc_client::{self, IpcCommand, IpcResponse, ThreatListItem};
 use crate::FixAction;
 
@@ -61,8 +62,8 @@ fn run_list(category: Option<String>, level: Option<String>, json: bool) -> Resu
 
             Ok(())
         }
-        IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-        _ => Err(CliError::ConnectionFailed(
+        IpcResponse::Error { message } => Err(CliError::DaemonError(message)),
+        _ => Err(CliError::DaemonError(
             "unexpected response from daemon".to_string(),
         )),
     }
@@ -75,12 +76,7 @@ fn print_threat_table(threats: &[ThreatListItem]) {
         println!("Unresolved threats ({} total):", threats.len());
         println!("{:-<80}", "");
         for threat in threats {
-            let level_str = match threat.level.as_str() {
-                "Critical" => "\x1b[31m[CRITICAL]\x1b[0m",
-                "Warning" => "\x1b[33m[WARNING]\x1b[0m",
-                "Info" => "\x1b[34m[INFO]\x1b[0m",
-                other => other,
-            };
+            let level_str = colorize_level(&threat.level);
 
             println!(
                 "  {id}  {ts}  {level}  {desc}",
@@ -139,9 +135,9 @@ fn run_resolve(id: &str, action: Option<&str>, yes: bool) -> Result<(), CliError
                 );
                 return Ok(());
             }
-            IpcResponse::Error { message } => return Err(CliError::ConnectionFailed(message)),
+            IpcResponse::Error { message } => return Err(CliError::DaemonError(message)),
             _ => {
-                return Err(CliError::ConnectionFailed(
+                return Err(CliError::DaemonError(
                     "unexpected response from daemon".to_string(),
                 ));
             }
@@ -165,8 +161,8 @@ fn run_resolve(id: &str, action: Option<&str>, yes: bool) -> Result<(), CliError
             }
             Ok(())
         }
-        IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-        _ => Err(CliError::ConnectionFailed(
+        IpcResponse::Error { message } => Err(CliError::DaemonError(message)),
+        _ => Err(CliError::DaemonError(
             "unexpected response from daemon".to_string(),
         )),
     }
@@ -186,12 +182,7 @@ fn print_threat_details(
     action_taken: &str,
     quarantine_id: Option<&str>,
 ) {
-    let level_str = match level {
-        "Critical" => "\x1b[31m[CRITICAL]\x1b[0m",
-        "Warning" => "\x1b[33m[WARNING]\x1b[0m",
-        "Info" => "\x1b[34m[INFO]\x1b[0m",
-        other => other,
-    };
+    let level_str = colorize_level(level);
 
     #[allow(clippy::print_stdout)]
     {
@@ -301,8 +292,8 @@ fn run_all(category: Option<&str>, yes: bool) -> Result<(), CliError> {
 
             Ok(())
         }
-        IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-        _ => Err(CliError::ConnectionFailed(
+        IpcResponse::Error { message } => Err(CliError::DaemonError(message)),
+        _ => Err(CliError::DaemonError(
             "unexpected response from daemon".to_string(),
         )),
     }

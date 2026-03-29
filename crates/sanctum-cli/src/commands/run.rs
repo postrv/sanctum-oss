@@ -85,7 +85,7 @@ pub fn run(sandbox: bool, command: &[String]) -> Result<(), CliError> {
         .args(&args)
         .env("SANCTUM_ACTIVE", "1")
         .status()
-        .map_err(|e| CliError::InvalidArgs(format!("failed to execute '{program}': {e}")))?;
+        .map_err(|e| CliError::CommandFailed(format!("failed to execute '{program}': {e}")))?;
 
     if !status.success() {
         let code = status.code().unwrap_or(1);

@@ -34,8 +34,8 @@ fn approve_item(id: &str) -> Result<(), CliError> {
             }
             Ok(())
         }
-        IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-        _ => Err(CliError::ConnectionFailed(
+        IpcResponse::Error { message } => Err(CliError::DaemonError(message)),
+        _ => Err(CliError::DaemonError(
             "unexpected response from daemon".to_string(),
         )),
     }
@@ -54,8 +54,8 @@ fn delete_item(id: &str) -> Result<(), CliError> {
             }
             Ok(())
         }
-        IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-        _ => Err(CliError::ConnectionFailed(
+        IpcResponse::Error { message } => Err(CliError::DaemonError(message)),
+        _ => Err(CliError::DaemonError(
             "unexpected response from daemon".to_string(),
         )),
     }
@@ -106,8 +106,8 @@ fn list_quarantine(json: bool) -> Result<(), CliError> {
             }
             Ok(())
         }
-        IpcResponse::Error { message } => Err(CliError::ConnectionFailed(message)),
-        _ => Err(CliError::ConnectionFailed(
+        IpcResponse::Error { message } => Err(CliError::DaemonError(message)),
+        _ => Err(CliError::DaemonError(
             "unexpected response from daemon".to_string(),
         )),
     }

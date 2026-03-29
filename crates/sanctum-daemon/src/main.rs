@@ -33,18 +33,6 @@ use ipc::{
 };
 use sanctum_types::auth;
 
-/// Placeholder event type for npm lifecycle monitoring.
-///
-/// Once `sanctum-sentinel` exposes an `NpmWatcher`, this type should be replaced
-/// by the sentinel crate's `NpmEvent` type.
-#[derive(Debug, Clone)]
-pub struct NpmLifecycleEvent {
-    /// Human-readable description of the lifecycle event.
-    pub description: String,
-    /// The project directory where the event occurred.
-    pub project_dir: std::path::PathBuf,
-}
-
 fn main() -> ExitCode {
     // Initialise tracing subscriber
     tracing_subscriber::fmt()
@@ -196,32 +184,6 @@ async fn run_daemon(
         }
     };
 
-    // Start npm lifecycle watcher if configured
-    let (npm_tx, mut npm_rx) = tokio::sync::mpsc::channel::<NpmLifecycleEvent>(256);
-    {
-        let npm_config_snap = shared_config.read().await.clone();
-        if npm_config_snap.sentinel.watch_npm {
-            let dirs = &npm_config_snap.sentinel.npm.project_dirs;
-            if dirs.is_empty() {
-                tracing::warn!(
-                    "watch_npm enabled but no project_dirs configured in [sentinel.npm]"
-                );
-            } else {
-                tracing::info!(
-                    count = dirs.len(),
-                    "npm lifecycle monitoring enabled (watcher not yet implemented)"
-                );
-            }
-            // NpmWatcher is not yet available in sanctum-sentinel.
-            // When it is added, wire it here following the network watcher pattern:
-            //   let npm_watcher = NpmWatcher::new(&dirs, npm_tx);
-            // For now, drop the sender so the receiver returns None immediately.
-        } else {
-            tracing::info!("npm lifecycle monitoring disabled (watch_npm = false)");
-        }
-        drop(npm_tx);
-    }
-
     // Register signal handlers
     let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
     {
@@ -268,7 +230,6 @@ async fn run_daemon(
         shared_quarantine: &shared_quarantine,
         cred_rx: &mut cred_rx,
         net_rx: &mut net_rx,
-        npm_rx: &mut npm_rx,
         sigterm: &mut sigterm,
         sigint: &mut sigint,
         sighup: &mut sighup,
@@ -469,19 +430,6 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                 tokio::spawn(async move {
                     if let Err(e) = handle.await {
                         tracing::error!("network event task panicked: {e}");
-                    }
-                });
-            }
-
-            // Handle npm lifecycle events (dispatched to blocking thread for audit I/O)
-            Some(npm_event) = ctx.npm_rx.recv() => {
-                let audit_path = ctx.audit_path.to_path_buf();
-                let handle = tokio::task::spawn_blocking(move || {
-                    event_handler::handle_npm_event(&npm_event, &audit_path);
-                });
-                tokio::spawn(async move {
-                    if let Err(e) = handle.await {
-                        tracing::error!("npm event task panicked: {e}");
                     }
                 });
             }
@@ -1629,56 +1577,4 @@ mod tests {
         }
     }
 
-    // ============================================================
-    // C1: NpmWatcher config-driven startup
-    // ============================================================
-
-    #[test]
-    fn test_daemon_starts_npm_watcher_when_configured() {
-        // When watch_npm=true and project_dirs are set, the daemon should
-        // create the npm channel and attempt to start the watcher.
-        // Since NpmWatcher is not yet in sanctum-sentinel, the tx gets
-        // dropped and the rx immediately returns None.
-        let config = sanctum_types::config::SanctumConfig {
-            sentinel: sanctum_types::config::SentinelConfig {
-                watch_npm: true,
-                npm: sanctum_types::config::NpmConfig {
-                    project_dirs: vec!["/tmp/myproject".to_string()],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        // Verify the config fields are set correctly
-        assert!(config.sentinel.watch_npm);
-        assert_eq!(config.sentinel.npm.project_dirs.len(), 1);
-
-        // Simulate what the daemon does: create channel, check config, drop tx
-        let (npm_tx, mut npm_rx) = tokio::sync::mpsc::channel::<NpmLifecycleEvent>(256);
-        if config.sentinel.watch_npm {
-            // NpmWatcher would be created here when available
-            drop(npm_tx);
-        }
-        // Receiver should return None immediately since sender was dropped
-        assert!(npm_rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn test_daemon_skips_npm_watcher_when_disabled() {
-        let config = sanctum_types::config::SanctumConfig::default();
-        assert!(
-            !config.sentinel.watch_npm,
-            "watch_npm should default to false"
-        );
-
-        // Simulate what the daemon does when watch_npm=false
-        let (npm_tx, mut npm_rx) = tokio::sync::mpsc::channel::<NpmLifecycleEvent>(256);
-        if !config.sentinel.watch_npm {
-            drop(npm_tx);
-        }
-        // Receiver should return None immediately since sender was dropped
-        assert!(npm_rx.try_recv().is_err());
-    }
 }

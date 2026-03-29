@@ -4,6 +4,7 @@
 //! [`scanner`] submodule for deep package content analysis.
 
 pub mod scanner;
+pub mod watcher;
 
 /// Check whether a lockfile change is expected given the current context.
 ///

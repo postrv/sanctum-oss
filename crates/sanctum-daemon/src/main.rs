@@ -198,28 +198,107 @@ async fn run_daemon(
 
     // Start npm lifecycle watcher if configured
     let (npm_tx, mut npm_rx) = tokio::sync::mpsc::channel::<NpmLifecycleEvent>(256);
-    {
+    let (npm_file_tx, mut npm_file_rx) =
+        tokio::sync::mpsc::channel::<sanctum_sentinel::npm::watcher::NpmFileEvent>(256);
+    let _npm_watcher = {
         let npm_config_snap = shared_config.read().await.clone();
         if npm_config_snap.sentinel.watch_npm {
-            let dirs = &npm_config_snap.sentinel.npm.project_dirs;
-            if dirs.is_empty() {
+            let project_dirs: Vec<std::path::PathBuf> = npm_config_snap
+                .sentinel
+                .npm
+                .project_dirs
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+
+            if project_dirs.is_empty() {
                 tracing::warn!(
                     "watch_npm enabled but no project_dirs configured in [sentinel.npm]"
                 );
+                None
             } else {
-                tracing::info!(
-                    count = dirs.len(),
-                    "npm lifecycle monitoring enabled (watcher not yet implemented)"
-                );
+                let nm_dirs =
+                    sanctum_sentinel::npm::watcher::discover_node_modules(&project_dirs);
+                if nm_dirs.is_empty() {
+                    tracing::warn!("no node_modules directories found in configured project_dirs");
+                    None
+                } else {
+                    tracing::info!(
+                        count = nm_dirs.len(),
+                        "npm lifecycle monitoring enabled"
+                    );
+                    match sanctum_sentinel::npm::watcher::NpmWatcher::start(&nm_dirs, npm_file_tx) {
+                        Ok(w) => {
+                            tracing::info!("npm filesystem watcher started");
+                            Some(w)
+                        }
+                        Err(e) => {
+                            tracing::error!(%e, "failed to start npm filesystem watcher");
+                            None
+                        }
+                    }
+                }
             }
-            // NpmWatcher is not yet available in sanctum-sentinel.
-            // When it is added, wire it here following the network watcher pattern:
-            //   let npm_watcher = NpmWatcher::new(&dirs, npm_tx);
-            // For now, drop the sender so the receiver returns None immediately.
         } else {
             tracing::info!("npm lifecycle monitoring disabled (watch_npm = false)");
+            drop(npm_file_tx);
+            None
         }
-        drop(npm_tx);
+    };
+    // Drop the legacy npm_tx sender so npm_rx returns None when no watcher exists
+    drop(npm_tx);
+
+    // Spawn npm debouncer task to handle batching of filesystem events
+    {
+        let audit_path_npm = audit_path.clone();
+        tokio::spawn(async move {
+            let mut debouncer = sanctum_sentinel::npm::watcher::NpmDebouncer::new();
+            loop {
+                // Wait for events or debounce timeout
+                let timeout = debouncer
+                    .time_until_check()
+                    .unwrap_or(Duration::from_secs(1));
+                tokio::select! {
+                    maybe_event = npm_file_rx.recv() => {
+                        if let Some(event) = maybe_event {
+                            debouncer.record_event(event.package_dir);
+                        } else {
+                            // Channel closed -- scan any remaining and exit
+                            if debouncer.has_pending() {
+                                let dirs: Vec<std::path::PathBuf> =
+                                    debouncer.drain().into_iter().collect();
+                                let audit_p = audit_path_npm.clone();
+                                let handle = tokio::task::spawn_blocking(move || {
+                                    event_handler::handle_npm_scan_results(&dirs, &audit_p);
+                                });
+                                if let Err(e) = handle.await {
+                                    tracing::error!("npm scan task panicked: {e}");
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    () = tokio::time::sleep(timeout) => {
+                        // Check if debounce timeout elapsed
+                    }
+                }
+
+                // After receiving events or timeout, check if we should scan
+                if debouncer.should_scan() {
+                    let dirs: Vec<std::path::PathBuf> =
+                        debouncer.drain().into_iter().collect();
+                    let audit_p = audit_path_npm.clone();
+                    let handle = tokio::task::spawn_blocking(move || {
+                        event_handler::handle_npm_scan_results(&dirs, &audit_p);
+                    });
+                    tokio::spawn(async move {
+                        if let Err(e) = handle.await {
+                            tracing::error!("npm scan task panicked: {e}");
+                        }
+                    });
+                }
+            }
+        });
     }
 
     // Register signal handlers

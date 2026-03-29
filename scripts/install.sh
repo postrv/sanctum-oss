@@ -1,6 +1,6 @@
 #!/bin/sh
 # Sanctum installer
-# Usage: curl -fsSL https://sanctum.dev/install | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/postrv/sanctum/main/scripts/install.sh | sh
 #
 # This script downloads the latest Sanctum binary for your platform,
 # verifies its Sigstore signature, and installs it to /usr/local/bin.

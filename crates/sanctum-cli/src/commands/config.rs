@@ -120,7 +120,7 @@ fn find_config_path() -> Option<PathBuf> {
 
 const fn default_config() -> &'static str {
     r#"# Sanctum configuration
-# https://sanctum.dev/docs/config
+# https://github.com/postrv/sanctum/blob/main/docs/ARCHITECTURE.md
 
 [sentinel]
 watch_pth = true

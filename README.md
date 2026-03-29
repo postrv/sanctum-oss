@@ -5,14 +5,14 @@
 Your AI coding assistant can read your SSH keys, leak your AWS credentials, and run up a $10,000 API bill before you notice. Sanctum watches for all of it -- silently, in the background, without slowing you down.
 
 ```bash
-curl -fsSL https://sanctum.dev/install | sh
+curl -fsSL https://raw.githubusercontent.com/postrv/sanctum/main/scripts/install.sh | sh
 sanctum init
 # That's it. The daemon starts with your shell.
 ```
 
 ## Why this exists
 
-In January 2026, a [supply chain attack on LiteLLM](https://sanctum.dev/blog/litellm) (CVE-2026-33634) injected a malicious `.pth` file into Python's `site-packages`. Every time the interpreter started -- even `python3 --version` -- it ran attacker code. Credentials were exfiltrated. MITRE ATT&CK classifies this as [T1546.018](https://attack.mitre.org/techniques/T1546/018/) and notes it "cannot be easily mitigated with preventive controls."
+On March 24, 2026, a [supply chain attack on LiteLLM](https://github.com/BerriAI/litellm/issues/24512) (CVE-2026-33634, CVSS 9.4) injected a malicious `.pth` file (`litellm_init.pth`) into Python's `site-packages`. Every time the interpreter started -- even `python3 --version` -- it ran attacker code that stole SSH keys, cloud tokens, Kubernetes secrets, and `.env` files. MITRE ATT&CK classifies this as [T1546.018](https://attack.mitre.org/techniques/T1546/018/) and notes it "cannot be easily mitigated with preventive controls."
 
 That attack worked because nothing was watching.
 
@@ -24,7 +24,7 @@ Sanctum watches.
 
 Monitors every Python `site-packages` directory for new or modified `.pth` files. Each line is classified as benign (`import`-only), suspicious (dynamic code), or critical (exec/eval/network). Critical files are quarantined immediately and replaced with empty stubs.
 
-When a `.pth` file appears, Sanctum traces the process lineage to determine *who* created it. `pip install` creating a `.pth`? Expected. Python startup silently writing new `.pth` files? That's [the attack](https://sanctum.dev/blog/litellm).
+When a `.pth` file appears, Sanctum traces the process lineage to determine *who* created it. `pip install` creating a `.pth`? Expected. Python startup silently writing new `.pth` files? That's the attack.
 
 ```
 $ sanctum review
@@ -167,7 +167,7 @@ Requires Rust 1.94.0+ (pinned in `rust-toolchain.toml`).
 ### Script installer
 
 ```bash
-curl -fsSL https://sanctum.dev/install | sh
+curl -fsSL https://raw.githubusercontent.com/postrv/sanctum/main/scripts/install.sh | sh
 ```
 
 The installer verifies SHA-256 checksums (mandatory) and Sigstore signatures (if `cosign` is installed). See [SECURITY.md](docs/SECURITY.md) for the verification model.

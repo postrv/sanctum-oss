@@ -13,7 +13,6 @@
 Instead, please report vulnerabilities via one of:
 
 1. **GitHub Private Advisory**: [Create a private advisory](https://github.com/postrv/sanctum/security/advisories/new) on this repository.
-2. **Email**: security@sanctum.dev (PGP key available at sanctum.dev/.well-known/security.txt)
 
 ### What to include
 

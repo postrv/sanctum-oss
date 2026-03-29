@@ -22,7 +22,7 @@ sudo cp target/release/sanctum target/release/sanctum-daemon /usr/local/bin/
 ### Via install script
 
 ```bash
-curl -fsSL https://sanctum.dev/install | sh
+curl -fsSL https://raw.githubusercontent.com/postrv/sanctum/main/scripts/install.sh | sh
 ```
 
 The installer verifies SHA-256 checksums and, if [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is available, Sigstore signatures. See [SECURITY.md](SECURITY.md) for details.

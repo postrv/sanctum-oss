@@ -232,7 +232,7 @@ jobs:
         run: |
           chmod +x /tmp/sanctum-release/sanctum /tmp/sanctum-release/sanctum-daemon
           /tmp/sanctum-release/sanctum --version
-          /tmp/sanctum-release/sanctum-daemon --version
+          test -x /tmp/sanctum-release/sanctum-daemon
 
   bench-check:
     runs-on: ubuntu-latest

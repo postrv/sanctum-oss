@@ -69,16 +69,16 @@ pub fn run() -> Result<(), CliError> {
             result: check_python(),
         },
         Check {
-            name: "Node.js",
-            result: check_node(),
+            name: "nono sandbox",
+            result: check_nono(),
         },
         Check {
             name: "npm ignore-scripts",
             result: check_npm_ignore_scripts(),
         },
         Check {
-            name: "nono",
-            result: check_nono(),
+            name: "Node.js",
+            result: check_node(),
         },
         Check {
             name: "Claude hooks",
@@ -212,15 +212,17 @@ fn check_python() -> CheckResult {
     }
 }
 
-/// Check whether Node.js is available.
-fn check_node() -> CheckResult {
-    match std::process::Command::new("node").arg("--version").output() {
+/// Check whether `nono` sandbox is available.
+fn check_nono() -> CheckResult {
+    match std::process::Command::new("which").arg("nono").output() {
         Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            CheckResult::Pass(format!("Node.js {version}"))
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            CheckResult::Pass(path)
         }
         _ => CheckResult::Warn(
-            "Node.js not found (optional — needed for npm ecosystem monitoring)".to_string(),
+            "not installed (optional \u{2014} provides filesystem sandboxing). \
+             See: https://nono.sh"
+                .to_string(),
         ),
     }
 }
@@ -232,28 +234,34 @@ fn check_npm_ignore_scripts() -> CheckResult {
         .output()
     {
         Ok(output) if output.status.success() => {
-            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let value = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_lowercase();
             if value == "true" {
-                CheckResult::Pass("npm ignore-scripts is enabled".to_string())
+                CheckResult::Pass("enabled".to_string())
             } else {
                 CheckResult::Warn(
-                    "npm lifecycle scripts are enabled — consider 'npm config set ignore-scripts true'"
+                    "npm lifecycle scripts are enabled \u{2014} packages can execute \
+                     arbitrary code during install. Run: npm config set ignore-scripts true"
                         .to_string(),
                 )
             }
         }
-        _ => CheckResult::Warn("npm not found".to_string()),
+        _ => CheckResult::Warn("npm not found (skipped)".to_string()),
     }
 }
 
-/// Check whether `nono` sandbox is available.
-fn check_nono() -> CheckResult {
-    match std::process::Command::new("which").arg("nono").output() {
+/// Check whether Node.js is available.
+fn check_node() -> CheckResult {
+    match std::process::Command::new("node").arg("--version").output() {
         Ok(output) if output.status.success() => {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            CheckResult::Pass(path)
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let version = version.strip_prefix('v').unwrap_or(&version).to_string();
+            CheckResult::Pass(version)
         }
-        _ => CheckResult::Warn("not installed (optional sandbox)".to_string()),
+        _ => CheckResult::Warn(
+            "not installed (optional for npm/Node.js project analysis)".to_string(),
+        ),
     }
 }
 
@@ -284,7 +292,7 @@ fn check_claude_hooks() -> CheckResult {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -336,43 +344,61 @@ mod tests {
     }
 
     #[test]
-    fn doctor_includes_node_check() {
-        // Verify that "Node.js" is a valid check name by constructing a Check.
-        let check = Check {
-            name: "Node.js",
-            result: check_node(),
-        };
-        assert_eq!(check.name, "Node.js");
+    fn check_nono_returns_warn_or_pass() {
+        // nono may or may not be installed; either way it should not panic
+        let result = check_nono();
+        match &result {
+            CheckResult::Pass(p) => assert!(!p.is_empty(), "pass should have a path"),
+            CheckResult::Warn(w) => {
+                assert!(
+                    w.contains("nono.sh"),
+                    "warn should contain URL reference, got: {w}"
+                );
+                assert!(
+                    w.contains("filesystem sandboxing"),
+                    "warn should explain purpose, got: {w}"
+                );
+            }
+            CheckResult::Fail(_) => panic!("nono check should never fail"),
+        }
     }
 
     #[test]
-    fn doctor_includes_npm_ignore_scripts_check() {
-        // Verify that "npm ignore-scripts" is a valid check name by constructing a Check.
-        let check = Check {
-            name: "npm ignore-scripts",
-            result: check_npm_ignore_scripts(),
-        };
-        assert_eq!(check.name, "npm ignore-scripts");
-    }
-
-    #[test]
-    fn check_node_returns_result() {
-        let result = check_node();
-        // Node may or may not be installed — both Pass and Warn are valid.
-        assert!(
-            matches!(result, CheckResult::Pass(_) | CheckResult::Warn(_)),
-            "check_node should return Pass or Warn, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn check_npm_ignore_scripts_returns_result() {
+    fn check_npm_ignore_scripts_returns_warn_or_pass() {
+        // npm may or may not be installed; either way it should not panic
         let result = check_npm_ignore_scripts();
-        // npm may or may not be installed — both Pass and Warn are valid.
-        assert!(
-            matches!(result, CheckResult::Pass(_) | CheckResult::Warn(_)),
-            "check_npm_ignore_scripts should return Pass or Warn, got {result:?}"
-        );
+        match &result {
+            CheckResult::Pass(p) => assert_eq!(p, "enabled"),
+            CheckResult::Warn(w) => {
+                // Either npm not found or scripts are enabled
+                assert!(
+                    w.contains("npm") || w.contains("lifecycle"),
+                    "warn should mention npm, got: {w}"
+                );
+            }
+            CheckResult::Fail(_) => panic!("npm check should never fail"),
+        }
+    }
+
+    #[test]
+    fn check_node_returns_warn_or_pass() {
+        let result = check_node();
+        match &result {
+            CheckResult::Pass(v) => {
+                // Should not have the 'v' prefix
+                assert!(
+                    !v.starts_with('v'),
+                    "version should not start with 'v', got: {v}"
+                );
+            }
+            CheckResult::Warn(w) => {
+                assert!(
+                    w.contains("not installed"),
+                    "warn should say not installed, got: {w}"
+                );
+            }
+            CheckResult::Fail(_) => panic!("node check should never fail"),
+        }
     }
 
     #[test]

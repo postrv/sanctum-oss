@@ -209,8 +209,8 @@ enum HooksAction {
 enum ProxyCliAction {
     /// Start the HTTP gateway proxy.
     Start {
-        /// Port to listen on (default: 7842).
-        #[arg(long, default_value = "7842")]
+        /// Port to listen on (default: 9847).
+        #[arg(long, default_value = "9847")]
         port: u16,
     },
     /// Stop the running proxy.
@@ -227,6 +227,8 @@ enum DaemonAction {
     Stop,
     /// Restart the daemon.
     Restart,
+    /// Show daemon status.
+    Status,
 }
 
 fn main() -> ExitCode {
@@ -250,14 +252,7 @@ fn main() -> ExitCode {
         Commands::Fix { action, json, yes } => commands::fix::run(action.as_ref(), json, yes),
         Commands::Hook { action, verbose } => commands::hook::run(&action, verbose),
         Commands::Hooks { action } => commands::hooks::run(&action),
-        Commands::Proxy { action } => {
-            let proxy_action = match action {
-                ProxyCliAction::Start { port } => commands::proxy::ProxyAction::Start { port },
-                ProxyCliAction::Stop => commands::proxy::ProxyAction::Stop,
-                ProxyCliAction::Status => commands::proxy::ProxyAction::Status,
-            };
-            commands::proxy::run(&proxy_action)
-        }
+        Commands::Proxy { action } => commands::proxy::run(&action),
         Commands::Daemon { action } => commands::daemon::run(&action),
         Commands::Doctor => commands::doctor::run(),
     };

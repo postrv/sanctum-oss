@@ -21,6 +21,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

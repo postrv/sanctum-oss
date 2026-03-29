@@ -35,17 +35,6 @@ Quarantined items:
      Creator: python3 (PID 48291) via zsh -> Terminal
 ```
 
-### npm lifecycle hook attacks
-
-Monitors npm, yarn, pnpm, and bun install commands for lifecycle script execution. Unknown packages running `postinstall` or `preinstall` scripts trigger warnings. Scripts containing `eval()`, `child_process`, `.unref()`, or credential access patterns are blocked immediately.
-
-```
-$ echo '{"command":"npm install evil-pkg"}' | sanctum hook post-bash
-{"decision":"block","reason":"Critical: npm lifecycle script executed suspicious code during install."}
-```
-
-Sanctum also suggests `--ignore-scripts` when you run `npm install` without it.
-
 ### Credential leaks to AI tools
 
 Scans all content passing through AI tool hooks against 37 credential patterns -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, GCP, Azure, Docker Hub, Vault, and more. Catches secrets before they leave your machine, not after they're in a training set.
@@ -74,7 +63,7 @@ Monitors access to `~/.ssh`, `~/.aws/credentials`, `~/.kube/config`, and other s
 
 ### Network anomalies
 
-Detects outbound connections on unusual ports, to blocklisted destinations, or from unexpected processes. Uses a learning period to establish baselines, then alerts on deviations.
+Detects outbound connections on unusual ports, to blocklisted destinations, or from unexpected processes. Uses configurable rules-based detection with safe port allowlists and process allowlists.
 
 ## Claude Code integration
 
@@ -232,7 +221,7 @@ Sanctum does **not** require nono. Each tool provides independent value.
 | `sanctum-cli` | CLI interface -- 13 commands via clap |
 | `sanctum-daemon` | Background daemon, IPC server (14 commands), event loop |
 | `sanctum-sentinel` | `.pth` monitoring, quarantine, credential watching, network anomaly detection |
-| `sanctum-firewall` | Credential redaction (37 patterns), Shannon entropy, MCP policy engine, npm lifecycle detection |
+| `sanctum-firewall` | Credential redaction (37 patterns), Shannon entropy, MCP policy engine |
 | `sanctum-budget` | Spend tracking, 3 provider parsers (OpenAI, Anthropic, Google) |
 | `sanctum-proxy` | HTTP budget proxy foundation (provider identification) |
 | `sanctum-types` | Shared types, config schema, threat model, platform paths |

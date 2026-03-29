@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use sanctum_firewall::hooks::claude;
+use sanctum_firewall::hooks::claude::NpmConfig;
 use sanctum_firewall::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use sanctum_types::config::AiFirewallConfig;
 use sanctum_types::errors::CliError;
@@ -26,12 +27,12 @@ const fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
         redact_credentials: true,
         claude_hooks: true,
         mcp_audit: true,
+        check_package_existence: true,
+        package_check_timeout_ms: 3000,
         mcp_rules: Vec::new(),
         // Fail-closed: when config parsing fails, block unmatched MCP tools
         // rather than silently allowing them.
         default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
-        check_package_existence: true,
-        package_check_timeout_ms: 3000,
     }
 }
 
@@ -124,6 +125,67 @@ fn load_ai_firewall_config() -> Option<AiFirewallConfig> {
     }
 
     None
+}
+
+/// Load `NpmConfig` from the config file (best-effort).
+///
+/// Looks for an `[npm]` section in the config TOML. If not found or parse
+/// fails, returns defaults (all protections on). This ensures `NpmConfig` is
+/// available even when the types crate doesn't define it yet.
+fn load_npm_config() -> NpmConfig {
+    /// Minimal TOML-level npm config struct for deserialization.
+    #[derive(serde::Deserialize)]
+    struct NpmSection {
+        #[serde(default = "default_true")]
+        watch_lifecycle: bool,
+        #[serde(default = "default_true")]
+        ignore_scripts_warning: bool,
+        #[serde(default)]
+        allowlist: Vec<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ConfigWithNpm {
+        #[serde(default)]
+        npm: Option<NpmSection>,
+    }
+
+    const fn default_true() -> bool {
+        true
+    }
+
+    // Try project-local first, then global
+    let config_path = {
+        let local = std::path::PathBuf::from(".sanctum/config.toml");
+        if local.exists() {
+            Some(local)
+        } else {
+            let paths = sanctum_types::paths::WellKnownPaths::default();
+            let global = paths.config_dir.join("config.toml");
+            if global.exists() {
+                Some(global)
+            } else {
+                None
+            }
+        }
+    };
+
+    let Some(path) = config_path else {
+        return NpmConfig::default();
+    };
+
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return NpmConfig::default();
+    };
+
+    match toml::from_str::<ConfigWithNpm>(&content) {
+        Ok(cfg) => cfg.npm.map_or_else(NpmConfig::default, |npm| NpmConfig {
+            watch_lifecycle: npm.watch_lifecycle,
+            ignore_scripts_warning: npm.ignore_scripts_warning,
+            allowlist: npm.allowlist,
+        }),
+        Err(_) => NpmConfig::default(),
+    }
 }
 
 /// Infer the threat category from the hook action and decision message.
@@ -343,14 +405,23 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
     input.config.clone_from(&ai_config);
     tracing::debug!(config_loaded = ai_config.is_some(), "firewall config");
 
+    // Load NpmConfig for package manager hooks (best-effort; defaults if unavailable).
+    let npm_config = load_npm_config();
+    tracing::debug!(
+        watch_lifecycle = npm_config.watch_lifecycle,
+        ignore_scripts_warning = npm_config.ignore_scripts_warning,
+        allowlist_len = npm_config.allowlist.len(),
+        "npm config"
+    );
+
     tracing::debug!(%action, tool_name = %input.tool_name, "dispatching hook");
 
     let output: HookOutput = match action {
-        "pre-bash" => claude::pre_bash(&input),
+        "pre-bash" => claude::pre_bash_with_npm_config(&input, &npm_config),
         "pre-write" => claude::pre_write(&input),
         "pre-read" => claude::pre_read(&input),
         "pre-mcp" => claude::pre_mcp_tool_use(&input, None),
-        "post-bash" => claude::post_bash(&input),
+        "post-bash" => claude::post_bash_with_npm_config(&input, &npm_config),
         _ => {
             return Err(CliError::InvalidArgs(format!(
                 "unknown hook action '{action}'. Supported: pre-bash, pre-write, pre-read, pre-mcp, post-bash"
@@ -755,9 +826,10 @@ mod tests {
             claude_hooks: false,
             redact_credentials: true,
             mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
-            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.claude_hooks);
@@ -769,9 +841,10 @@ mod tests {
             claude_hooks: true,
             redact_credentials: false,
             mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
-            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.redact_credentials);
@@ -783,9 +856,10 @@ mod tests {
             claude_hooks: true,
             redact_credentials: true,
             mcp_audit: false,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
-            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // mcp_audit is enforced by the floor, so it is forced to true.
@@ -800,9 +874,10 @@ mod tests {
             claude_hooks: true,
             redact_credentials: true,
             mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
-            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // Local config cannot weaken MCP policy to Allow — forced to Deny
@@ -818,9 +893,10 @@ mod tests {
             claude_hooks: true,
             redact_credentials: true,
             mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Warn,
-            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // Warn is acceptable — not weakened
@@ -901,5 +977,57 @@ mod tests {
         // auth_token should be omitted due to skip_serializing_if
         assert!(!json.contains("auth_token"));
         assert!(json.contains("\"command\":\"RecordUsage\""));
+    }
+
+    // ---- NpmConfig loading tests ----
+
+    #[test]
+    fn npm_config_defaults_all_protections_on() {
+        let cfg = NpmConfig::default();
+        assert!(cfg.watch_lifecycle);
+        assert!(cfg.ignore_scripts_warning);
+        assert!(cfg.allowlist.is_empty());
+    }
+
+    #[test]
+    fn load_npm_config_returns_defaults_when_no_config() {
+        // load_npm_config should never panic, even when config files don't exist.
+        let cfg = load_npm_config();
+        assert!(cfg.watch_lifecycle);
+        assert!(cfg.ignore_scripts_warning);
+    }
+
+    #[test]
+    fn pre_bash_with_npm_config_passes_through() {
+        let npm_config = NpmConfig {
+            watch_lifecycle: false,
+            ignore_scripts_warning: false,
+            allowlist: vec!["react".to_owned()],
+        };
+        let input = make_input("bash", json!({"command": "ls -la"}));
+        let output = claude::pre_bash_with_npm_config(&input, &npm_config);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn post_bash_with_npm_config_respects_lifecycle_flag() {
+        let npm_config = NpmConfig {
+            watch_lifecycle: false,
+            ..NpmConfig::default()
+        };
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "npm install foo",
+                "stdout": "postinstall script ran",
+                "stderr": ""
+            }),
+        );
+        let output = claude::post_bash_with_npm_config(&input, &npm_config);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(
+            !msg.contains("lifecycle scripts"),
+            "lifecycle warning suppressed when watch_lifecycle=false"
+        );
     }
 }

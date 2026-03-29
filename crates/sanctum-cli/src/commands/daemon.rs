@@ -17,6 +17,7 @@ pub fn run(action: &DaemonAction) -> Result<(), CliError> {
             std::thread::sleep(std::time::Duration::from_millis(500));
             start_daemon()
         }
+        DaemonAction::Status => crate::commands::status::run(),
     }
 }
 

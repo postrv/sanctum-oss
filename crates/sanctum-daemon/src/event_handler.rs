@@ -272,6 +272,34 @@ pub fn handle_network_event(event: &sanctum_sentinel::network::NetworkEvent, aud
     }
 }
 
+// ── Npm lifecycle event handling ─────────────────────────────────────────────
+
+/// Handle an npm lifecycle event by creating a threat event and sending notification.
+pub fn handle_npm_event(event: &crate::NpmLifecycleEvent, audit_path: &Path) {
+    tracing::warn!(
+        project_dir = %event.project_dir.display(),
+        description = %event.description,
+        "npm lifecycle event detected"
+    );
+
+    let threat_event = sanctum_types::threat::ThreatEvent {
+        timestamp: chrono::Utc::now(),
+        level: sanctum_types::threat::ThreatLevel::Warning,
+        category: sanctum_types::threat::ThreatCategory::NpmLifecycleAttack,
+        description: format!(
+            "npm lifecycle event in {}: {}",
+            event.project_dir.display(),
+            event.description,
+        ),
+        source_path: event.project_dir.clone(),
+        creator_pid: None,
+        creator_exe: None,
+        action_taken: sanctum_types::threat::Action::Alerted,
+    };
+    sanctum_notify::notify_threat(&threat_event);
+    crate::audit::append_audit_event(&threat_event, audit_path);
+}
+
 // ── Verdict handlers ────────────────────────────────────────────────────────
 
 /// Handle a safe or allowlisted .pth file verdict, escalating if lineage is suspicious.
@@ -727,6 +755,37 @@ mod tests {
         assert!(
             audit_contents.contains("Quarantined"),
             "audit log should record action as Quarantined on success, got: {audit_contents}"
+        );
+    }
+
+    // ============================================================
+    // C1: NpmLifecycleEvent handler generates audit events
+    // ============================================================
+
+    #[test]
+    fn npm_event_generates_audit_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+
+        let event = crate::NpmLifecycleEvent {
+            description: "suspicious postinstall script".to_string(),
+            project_dir: std::path::PathBuf::from("/tmp/evil-package"),
+        };
+
+        handle_npm_event(&event, &audit_path);
+
+        let audit_contents = std::fs::read_to_string(&audit_path).unwrap_or_default();
+        assert!(
+            audit_contents.contains("NpmLifecycleAttack"),
+            "audit log should contain NpmLifecycleAttack, got: {audit_contents}"
+        );
+        assert!(
+            audit_contents.contains("suspicious postinstall script"),
+            "audit log should contain event description, got: {audit_contents}"
+        );
+        assert!(
+            audit_contents.contains("Alerted"),
+            "audit log should record action as Alerted, got: {audit_contents}"
         );
     }
 }

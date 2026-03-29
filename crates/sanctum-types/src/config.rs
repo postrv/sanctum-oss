@@ -298,6 +298,12 @@ impl Default for AiFirewallConfig {
     }
 }
 
+/// Default listen port for the HTTP budget proxy.
+///
+/// Used by both [`ProxyConfig::default()`] and the CLI `--port` argument
+/// to ensure consistent defaults across the codebase.
+pub const DEFAULT_PROXY_PORT: u16 = 9847;
+
 /// HTTP Budget Proxy configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -322,7 +328,7 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            listen_port: 9847,
+            listen_port: DEFAULT_PROXY_PORT,
             enforce_budget: true,
             enforce_allowed_models: true,
             ca_validity_days: 365,

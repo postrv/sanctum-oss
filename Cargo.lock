@@ -1776,6 +1776,7 @@ name = "sanctum-proxy"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -1789,6 +1790,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1801,6 +1803,7 @@ dependencies = [
  "nix",
  "notify",
  "proptest",
+ "regex",
  "sanctum-types",
  "serde",
  "serde_json",

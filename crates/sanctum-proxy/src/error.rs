@@ -56,25 +56,45 @@ pub enum ProxyError {
         provider: String,
     },
 
-    /// Upstream HTTP request failed.
-    #[error("upstream request failed: {reason}")]
-    UpstreamRequest {
-        /// Description of the failure.
+    /// Request or response body too large.
+    #[error("payload too large: {reason}")]
+    PayloadTooLarge {
+        /// Description of what was too large.
         reason: String,
     },
 
-    /// Failed to read request body.
-    #[error("failed to read request body: {reason}")]
-    BodyRead {
-        /// Description of the failure.
+    /// Path injection or SSRF attempt detected.
+    #[error("invalid request path: {reason}")]
+    InvalidPath {
+        /// Description of the path validation failure.
         reason: String,
     },
 
-    /// Hyper HTTP error.
-    #[error("HTTP error: {0}")]
-    Http(#[from] hyper::http::Error),
+    /// HTTP client error (e.g., upstream request failed).
+    #[error("upstream request failed: {0}")]
+    Upstream(String),
 
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl ProxyError {
+    /// Map this error to an HTTP status code.
+    #[must_use]
+    pub const fn status_code(&self) -> u16 {
+        match self {
+            Self::PayloadTooLarge { .. } => 413,
+            Self::BudgetBlocked { .. } => 429,
+            Self::ModelNotAllowed { .. } => 403,
+            Self::InvalidPath { .. } => 400,
+            Self::Upstream(_) => 502,
+            Self::Bind { .. }
+            | Self::NonLocalhostBind { .. }
+            | Self::CaGeneration { .. }
+            | Self::CaKeyFile { .. }
+            | Self::UsageParse { .. }
+            | Self::Io(_) => 500,
+        }
+    }
 }

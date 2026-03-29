@@ -9,7 +9,7 @@ description = "AI firewall with credential redaction and hook handlers for Sanct
 
 [dependencies]
 sanctum-types = { path = "../sanctum-types", version = "0.1.0" }
-regex = "1"
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

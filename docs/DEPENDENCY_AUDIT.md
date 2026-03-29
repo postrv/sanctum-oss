@@ -79,6 +79,9 @@ Note: `notify-rust` is commented out due to upstream zbus/Rust edition incompati
 | `sha2` | 0.10.x | SHA-256 for content hashing | RustCrypto project. Multiple independent audits. |
 | `hex` | 0.4.x | Hex encoding for hash display | Trivial crate, no unsafe, no dependencies. |
 | `chrono` | 0.4.x | Timestamp handling | RustSec clean. Well-established. |
+| `reqwest` | 0.12.x | HTTP HEAD requests to npm/PyPI registries for slopsquatting detection | Uses rustls-tls (no OpenSSL). Fail-open: network errors allow install with warning. Adds ~50 transitive deps via hyper/rustls. RustSec clean. |
+
+Note: `sanctum-firewall` makes outbound HTTPS HEAD requests to `registry.npmjs.org` and `pypi.org` during `pre-bash` hook slopsquatting checks. These are fail-open with a configurable timeout (default 3s). No request bodies are sent; only HTTP status codes are inspected.
 
 ## Budget: sanctum-budget
 

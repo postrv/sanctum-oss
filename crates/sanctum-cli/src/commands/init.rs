@@ -136,7 +136,8 @@ config_version = 1
 [sentinel]
 watch_pth = true
 watch_credentials = true
-watch_network = false
+watch_network = false  # opt-in: monitors outbound connections, may need tuning
+watch_npm = false
 pth_response = "quarantine"
 
 [ai_firewall]
@@ -152,6 +153,8 @@ alert_at_percent = 75
     );
 
     if detect_npm_project(project_dir) {
+        // Replace watch_npm = false with true since we detected an npm project
+        default_config = default_config.replace("watch_npm = false", "watch_npm = true");
         default_config.push_str(
             r"
 [sentinel.npm]

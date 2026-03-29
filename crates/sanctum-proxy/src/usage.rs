@@ -1,139 +1,68 @@
-//! Usage extraction from LLM API response bodies.
+//! Usage extraction and budget recording from upstream responses.
 //!
-//! Parses JSON responses to extract token usage, which is then fed into the
-//! budget tracker. Each provider uses a slightly different schema for reporting
-//! usage in responses.
+//! After forwarding a request to the upstream LLM API, this module parses
+//! the response body to extract token usage data and records it in the
+//! budget tracker.
 
-use crate::provider::Provider;
+use sanctum_budget::{parse_usage, BudgetTracker, UsageData};
+use tracing::warn;
 
-/// Extracted usage data from an API response.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsageData {
-    /// The provider name string (e.g. "openai", "anthropic", "google").
-    pub provider: String,
-    /// The model identifier from the response.
-    pub model: String,
-    /// Number of input (prompt) tokens.
-    pub input_tokens: u64,
-    /// Number of output (completion) tokens.
-    pub output_tokens: u64,
-}
-
-/// Extract token usage from an API response body.
+/// Attempt to extract usage data from an upstream response body.
 ///
-/// Returns `None` if the body cannot be parsed or does not contain usage
-/// information. This is intentionally lenient -- streaming intermediate
-/// chunks and non-JSON responses simply return `None`.
+/// Returns `None` if the body cannot be parsed (e.g., non-JSON or
+/// missing usage fields). Failures are logged but not propagated,
+/// because failing to extract usage should not break the proxy.
 #[must_use]
-pub fn extract_usage(provider: &Provider, body: &str) -> Option<UsageData> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let obj = value.as_object()?;
-
-    match provider {
-        Provider::OpenAi => extract_openai(obj),
-        Provider::Anthropic => extract_anthropic(obj),
-        Provider::Google => extract_google(obj),
+pub fn extract_usage(body: &str) -> Option<UsageData> {
+    match parse_usage(body) {
+        Ok(data) => Some(data),
+        Err(e) => {
+            warn!(error = %e, "failed to extract usage from upstream response");
+            None
+        }
     }
 }
 
-/// Extract usage from an OpenAI-format response.
+/// Record usage data in the budget tracker if extraction succeeds.
 ///
-/// Expected structure:
-/// ```json
-/// { "model": "gpt-4o", "usage": { "prompt_tokens": N, "completion_tokens": N } }
-/// ```
-fn extract_openai(obj: &serde_json::Map<String, serde_json::Value>) -> Option<UsageData> {
-    let usage = obj.get("usage")?.as_object()?;
-    let model = obj
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-
-    let input_tokens = usage
-        .get("prompt_tokens")
-        .and_then(serde_json::Value::as_u64)?;
-    let output_tokens = usage
-        .get("completion_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-
-    Some(UsageData {
-        provider: "openai".to_string(),
-        model: model.to_string(),
-        input_tokens,
-        output_tokens,
-    })
-}
-
-/// Extract usage from an Anthropic-format response.
-///
-/// Expected structure:
-/// ```json
-/// { "model": "claude-...", "usage": { "input_tokens": N, "output_tokens": N } }
-/// ```
-fn extract_anthropic(obj: &serde_json::Map<String, serde_json::Value>) -> Option<UsageData> {
-    let usage = obj.get("usage")?.as_object()?;
-    let model = obj
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-
-    let input_tokens = usage
-        .get("input_tokens")
-        .and_then(serde_json::Value::as_u64)?;
-    let output_tokens = usage
-        .get("output_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-
-    Some(UsageData {
-        provider: "anthropic".to_string(),
-        model: model.to_string(),
-        input_tokens,
-        output_tokens,
-    })
-}
-
-/// Extract usage from a Google-format response.
-///
-/// Expected structure:
-/// ```json
-/// { "modelVersion": "gemini-...", "usageMetadata": { "promptTokenCount": N, "candidatesTokenCount": N } }
-/// ```
-fn extract_google(obj: &serde_json::Map<String, serde_json::Value>) -> Option<UsageData> {
-    let usage_meta = obj.get("usageMetadata")?.as_object()?;
-    let model = obj
-        .get("modelVersion")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-
-    let input_tokens = usage_meta
-        .get("promptTokenCount")
-        .and_then(serde_json::Value::as_u64)?;
-    let output_tokens = usage_meta
-        .get("candidatesTokenCount")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-
-    Some(UsageData {
-        provider: "google".to_string(),
-        model: model.to_string(),
-        input_tokens,
-        output_tokens,
-    })
+/// Returns the extracted `UsageData` if successful, `None` otherwise.
+pub fn record_if_available(tracker: &mut BudgetTracker, body: &str) -> Option<UsageData> {
+    let data = extract_usage(body)?;
+    let status = tracker.record_usage(&data);
+    tracing::info!(
+        provider = %data.provider,
+        model = %data.model,
+        input_tokens = data.input_tokens,
+        output_tokens = data.output_tokens,
+        session_spent = status.session_spent_cents,
+        daily_spent = status.daily_spent_cents,
+        "recorded usage"
+    );
+    Some(data)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use sanctum_budget::Provider;
+    use sanctum_types::config::{BudgetAmount, BudgetConfig};
+
+    fn test_config() -> BudgetConfig {
+        BudgetConfig {
+            default_session: Some(BudgetAmount { cents: 50_000 }),
+            default_daily: Some(BudgetAmount { cents: 200_000 }),
+            alert_at_percent: 75,
+            ..BudgetConfig::default()
+        }
+    }
 
     #[test]
-    fn parse_openai_response() {
+    fn extract_usage_from_openai_response() {
         let body = r#"{
             "id": "chatcmpl-abc123",
             "object": "chat.completion",
-            "model": "gpt-4o-2024-05-13",
+            "model": "gpt-4o",
             "usage": {
                 "prompt_tokens": 100,
                 "completion_tokens": 50,
@@ -141,147 +70,55 @@ mod tests {
             },
             "choices": []
         }"#;
-
-        let usage = extract_usage(&Provider::OpenAi, body).unwrap();
-        assert_eq!(usage.provider, "openai");
-        assert_eq!(usage.model, "gpt-4o-2024-05-13");
-        assert_eq!(usage.input_tokens, 100);
-        assert_eq!(usage.output_tokens, 50);
+        let data = extract_usage(body);
+        assert!(data.is_some());
+        let data = data.unwrap();
+        assert_eq!(data.provider, Provider::OpenAI);
+        assert_eq!(data.input_tokens, 100);
+        assert_eq!(data.output_tokens, 50);
     }
 
     #[test]
-    fn parse_anthropic_response() {
-        let body = r#"{
-            "id": "msg_abc123",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-sonnet-4-6-20260320",
-            "usage": {
-                "input_tokens": 200,
-                "output_tokens": 100
-            },
-            "content": []
-        }"#;
-
-        let usage = extract_usage(&Provider::Anthropic, body).unwrap();
-        assert_eq!(usage.provider, "anthropic");
-        assert_eq!(usage.model, "claude-sonnet-4-6-20260320");
-        assert_eq!(usage.input_tokens, 200);
-        assert_eq!(usage.output_tokens, 100);
+    fn extract_usage_from_invalid_json_returns_none() {
+        let data = extract_usage("not json");
+        assert!(data.is_none());
     }
 
     #[test]
-    fn parse_google_response() {
-        let body = r#"{
-            "candidates": [],
-            "usageMetadata": {
-                "promptTokenCount": 300,
-                "candidatesTokenCount": 150,
-                "totalTokenCount": 450
-            },
-            "modelVersion": "gemini-2.5-pro-preview-03-25"
-        }"#;
-
-        let usage = extract_usage(&Provider::Google, body).unwrap();
-        assert_eq!(usage.provider, "google");
-        assert_eq!(usage.model, "gemini-2.5-pro-preview-03-25");
-        assert_eq!(usage.input_tokens, 300);
-        assert_eq!(usage.output_tokens, 150);
+    fn extract_usage_from_non_llm_response_returns_none() {
+        let data = extract_usage(r#"{"status": "ok"}"#);
+        assert!(data.is_none());
     }
 
     #[test]
-    fn missing_usage_field_returns_none() {
+    fn record_if_available_updates_tracker() {
+        let mut tracker = BudgetTracker::new(&test_config());
         let body = r#"{
             "id": "chatcmpl-abc123",
-            "model": "gpt-4o",
-            "choices": []
-        }"#;
-
-        let usage = extract_usage(&Provider::OpenAi, body);
-        assert!(usage.is_none());
-    }
-
-    #[test]
-    fn malformed_json_returns_none() {
-        let body = "this is not valid json {{{";
-        let usage = extract_usage(&Provider::OpenAi, body);
-        assert!(usage.is_none());
-    }
-
-    #[test]
-    fn empty_body_returns_none() {
-        let usage = extract_usage(&Provider::OpenAi, "");
-        assert!(usage.is_none());
-    }
-
-    #[test]
-    fn streaming_final_chunk_with_usage() {
-        // OpenAI streaming responses include usage in the final chunk
-        let body = r#"{
-            "id": "chatcmpl-stream",
-            "object": "chat.completion.chunk",
+            "object": "chat.completion",
             "model": "gpt-4o",
             "usage": {
-                "prompt_tokens": 500,
-                "completion_tokens": 200,
-                "total_tokens": 700
+                "prompt_tokens": 1000000,
+                "completion_tokens": 500000,
+                "total_tokens": 1500000
             },
             "choices": []
         }"#;
 
-        let usage = extract_usage(&Provider::OpenAi, body).unwrap();
-        assert_eq!(usage.input_tokens, 500);
-        assert_eq!(usage.output_tokens, 200);
+        let before = tracker.status(Provider::OpenAI).session_spent_cents;
+        let result = record_if_available(&mut tracker, body);
+        assert!(result.is_some());
+        let after = tracker.status(Provider::OpenAI).session_spent_cents;
+        assert!(
+            after > before,
+            "spend should increase after recording usage"
+        );
     }
 
     #[test]
-    fn missing_completion_tokens_defaults_to_zero() {
-        // Some responses may omit completion_tokens if none were generated
-        let body = r#"{
-            "id": "chatcmpl-abc",
-            "model": "gpt-4o",
-            "usage": {
-                "prompt_tokens": 42
-            }
-        }"#;
-
-        let usage = extract_usage(&Provider::OpenAi, body).unwrap();
-        assert_eq!(usage.input_tokens, 42);
-        assert_eq!(usage.output_tokens, 0);
-    }
-
-    #[test]
-    fn missing_model_field_defaults_to_unknown() {
-        let body = r#"{
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 5
-            }
-        }"#;
-
-        let usage = extract_usage(&Provider::OpenAi, body).unwrap();
-        assert_eq!(usage.model, "unknown");
-    }
-
-    #[test]
-    fn json_array_returns_none() {
-        let body = "[1, 2, 3]";
-        let usage = extract_usage(&Provider::OpenAi, body);
-        assert!(usage.is_none());
-    }
-
-    #[test]
-    fn google_missing_candidates_token_count_defaults_to_zero() {
-        let body = r#"{
-            "candidates": [],
-            "usageMetadata": {
-                "promptTokenCount": 100
-            },
-            "modelVersion": "gemini-2.5-pro"
-        }"#;
-
-        let usage = extract_usage(&Provider::Google, body).unwrap();
-        assert_eq!(usage.input_tokens, 100);
-        assert_eq!(usage.output_tokens, 0);
+    fn record_if_available_with_bad_json_returns_none() {
+        let mut tracker = BudgetTracker::new(&test_config());
+        let result = record_if_available(&mut tracker, "garbage");
+        assert!(result.is_none());
     }
 }

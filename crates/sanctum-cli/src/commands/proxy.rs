@@ -1,82 +1,80 @@
-//! Proxy management commands.
+//! `sanctum proxy` -- HTTP budget proxy management (preview feature).
 //!
-//! Provides `start`, `stop`, and `status` subcommands for the HTTP
-//! gateway proxy. For now, these print configuration guidance.
-//! Actual daemon integration will be wired in a subsequent phase.
+//! The proxy crate has a working server implementation but it is not yet wired
+//! into any binary.  For v0.1.0, all proxy subcommands return informative error
+//! messages rather than pretending to work.
 
 use sanctum_types::errors::CliError;
 
-/// Proxy subcommand actions.
-pub enum ProxyAction {
-    /// Print environment setup and start the proxy.
-    Start {
-        /// Port to listen on.
-        port: u16,
-    },
-    /// Stop the running proxy.
-    Stop,
-    /// Show proxy status.
-    Status,
-}
+use crate::ProxyCliAction;
 
-/// Run a proxy subcommand.
+/// Run the proxy command.
 ///
-/// # Errors
-///
-/// Returns `CliError` on failure.
-pub fn run(action: &ProxyAction) -> Result<(), CliError> {
+/// All actions currently return errors because the proxy is a preview feature
+/// that requires shared budget state with the daemon, which is not yet wired.
+pub fn run(action: &ProxyCliAction) -> Result<(), CliError> {
     match action {
-        ProxyAction::Start { port } => run_start(*port),
-        ProxyAction::Stop => run_stop(),
-        ProxyAction::Status => run_status(),
+        ProxyCliAction::Start { .. } => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("sanctum proxy: preview feature (not yet wired into the daemon)");
+                eprintln!();
+                eprintln!("When complete, `sanctum proxy start` will:");
+                eprintln!(
+                    "  - Start a transparent HTTPS proxy on 127.0.0.1:{port}",
+                    port = sanctum_types::config::DEFAULT_PROXY_PORT
+                );
+                eprintln!("  - Intercept LLM API requests (OpenAI, Anthropic, Google)");
+                eprintln!("  - Enforce per-session and daily spend budgets");
+                eprintln!("  - Extract token usage from responses for budget tracking");
+                eprintln!();
+                eprintln!("Track progress: https://github.com/sanctum-dev/sanctum/issues/proxy");
+            }
+            Err(CliError::InvalidArgs(
+                "proxy management not yet available — preview feature".to_string(),
+            ))
+        }
+        ProxyCliAction::Stop | ProxyCliAction::Status => Err(CliError::InvalidArgs(
+            "proxy management not yet available — preview feature".to_string(),
+        )),
     }
 }
 
-/// Start the proxy (placeholder -- prints environment setup instructions).
-///
-/// Returns `Result` for consistency with the command interface; daemon
-/// integration will make the error path reachable in a future release.
-#[allow(clippy::unnecessary_wraps)]
-fn run_start(port: u16) -> Result<(), CliError> {
-    tracing::info!(port, "proxy start requested");
-    #[allow(clippy::print_stdout)]
-    {
-        println!("Sanctum HTTP Gateway Proxy");
-        println!();
-        println!("To use the proxy, set these environment variables for your AI tools:");
-        println!();
-        println!("  export OPENAI_BASE_URL=http://127.0.0.1:{port}/v1");
-        println!("  export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}");
-        println!();
-        println!("The proxy will forward requests to the upstream API providers");
-        println!("while tracking token usage for budget enforcement.");
-        println!();
-        println!("Note: Daemon integration is pending. The proxy will be started");
-        println!("automatically by `sanctum daemon start` in a future release.");
-    }
-    Ok(())
-}
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
 
-/// Stop the proxy (placeholder).
-#[allow(clippy::unnecessary_wraps)]
-fn run_stop() -> Result<(), CliError> {
-    tracing::info!("proxy stop requested");
-    #[allow(clippy::print_stdout)]
-    {
-        println!("Proxy stop is not yet implemented.");
-        println!("The proxy will be managed by the daemon in a future release.");
+    #[test]
+    fn test_proxy_start_returns_nonzero() {
+        let result = run(&ProxyCliAction::Start { port: 9847 });
+        assert!(result.is_err(), "proxy start should return an error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("preview feature"),
+            "error should mention preview: {err_msg}"
+        );
     }
-    Ok(())
-}
 
-/// Show proxy status (placeholder).
-#[allow(clippy::unnecessary_wraps)]
-fn run_status() -> Result<(), CliError> {
-    tracing::info!("proxy status requested");
-    #[allow(clippy::print_stdout)]
-    {
-        println!("Proxy status is not yet implemented.");
-        println!("The proxy will be managed by the daemon in a future release.");
+    #[test]
+    fn test_proxy_stop_returns_nonzero() {
+        let result = run(&ProxyCliAction::Stop);
+        assert!(result.is_err(), "proxy stop should return an error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("preview feature"),
+            "error should mention preview: {err_msg}"
+        );
     }
-    Ok(())
+
+    #[test]
+    fn test_proxy_status_returns_nonzero() {
+        let result = run(&ProxyCliAction::Status);
+        assert!(result.is_err(), "proxy status should return an error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("preview feature"),
+            "error should mention preview: {err_msg}"
+        );
+    }
 }

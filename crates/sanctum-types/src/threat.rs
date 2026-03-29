@@ -55,6 +55,17 @@ pub enum Action {
     Blocked,
 }
 
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Logged => f.write_str("logged"),
+            Self::Alerted => f.write_str("alerted"),
+            Self::Quarantined => f.write_str("quarantined"),
+            Self::Blocked => f.write_str("blocked"),
+        }
+    }
+}
+
 /// A complete threat event record, suitable for audit logging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatEvent {

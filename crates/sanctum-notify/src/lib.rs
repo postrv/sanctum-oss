@@ -62,6 +62,17 @@ fn sanitize_for_applescript(input: &str) -> String {
         .collect()
 }
 
+/// Truncate a path to at most the last 3 components for display.
+fn truncate_path(path: &std::path::Path) -> String {
+    let components: Vec<_> = path.components().collect();
+    if components.len() > 3 {
+        let tail: std::path::PathBuf = components[components.len() - 3..].iter().collect();
+        format!(".../{}", tail.display())
+    } else {
+        path.display().to_string()
+    }
+}
+
 /// Send a desktop notification for a threat event.
 ///
 /// Non-blocking — if the notification fails, it's logged but doesn't
@@ -91,9 +102,9 @@ pub fn notify_threat(event: &ThreatEvent) {
     };
 
     let body = format!(
-        "{} | Path: {} | Action: {:?}",
+        "{} | Path: {} | Action: {}",
         event.description,
-        event.source_path.display(),
+        truncate_path(&event.source_path),
         event.action_taken,
     );
 

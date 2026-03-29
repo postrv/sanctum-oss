@@ -31,7 +31,7 @@
   - **pre-write**: Blocks writing `.pth` files and `sitecustomize.py` (supply chain attack vectors). Scans file content (including Edit tool `old_string`/`new_string` fields) for credentials using the pattern registry and blocks writes containing detected secrets. Blocks writes to high-risk paths (`authorized_keys`, cron, systemd autostart). Warns on writes to persistence paths (`.bashrc`, `.zshrc`).
   - **pre-read**: Blocks reading files under `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, `~/.config/gcloud/`, `~/.config/gh/`, and `.env` files (including `.env.local`, `.env.production`, `.env.staging`, `.env.development`), shell history files, and other sensitive paths.
   - **pre-mcp**: Audits MCP tool calls against policy rules, blocks access to sensitive paths (`.ssh/`, `.aws/`, `.gnupg/`, `.env`, `.pth`, `sitecustomize.py`) regardless of user rules.
-  - **post-bash**: Warns (never blocks) on suspicious side effects observed after command execution: `.pth` file creation during package installs, crontab modifications, systemd user service creation, and network listener activity in command output.
+  - **post-bash**: Warns on suspicious side effects observed after command execution: `.pth` file creation during package installs, crontab modifications, systemd user service creation, network listener activity in command output, and credential values appearing in stdout/stderr. NOTE: post-bash runs AFTER command execution -- "warn" alerts Claude Code to the risk but cannot undo actions already taken.
 
 **Residual risk**: Novel credential formats not matching any of the 37 known patterns and falling below the entropy threshold may not be detected. Base64-encoded or split-across-multiple-writes credentials may evade pattern matching, though the entropy fallback partially mitigates this for sufficiently long encoded strings.
 
@@ -90,33 +90,7 @@
 
 **Residual risk**: The polling-based approach (default 30-second interval) cannot detect very short-lived connections. Detection is metadata-only (IP, port, process) -- packet contents are not inspected. An attacker using standard ports (80, 443) to known CDN endpoints would not be flagged.
 
-### 10. npm lifecycle hook attacks
-
-**Threat**: Malicious npm packages use `preinstall` or `postinstall` lifecycle scripts to execute arbitrary code during `npm install`, `yarn add`, `pnpm add`, or `bun add`. This is the JavaScript equivalent of Python `.pth` injection. The Shai-Hulud worm (which compromised packages with 2.6 billion weekly downloads) demonstrates the canonical attack pattern: a `postinstall` script spawns a detached child process via `child_process.spawn()` with `.unref()`, which outlives the install process and harvests credentials from `.npmrc`, `NPM_CONFIG_TOKEN`, and other sensitive paths. The detached process evades simple parent-process monitoring because it is no longer a child of `npm`.
-
-**Mitigation**: Sanctum detects npm lifecycle hook attacks through three complementary mechanisms:
-
-- **post_bash lifecycle script detection**: After any npm/yarn/pnpm/bun install command, `post_bash` scans command output for lifecycle script execution indicators (`postinstall`, `preinstall`, `node-gyp rebuild`, etc.). Unknown packages running lifecycle scripts trigger warnings. Scripts containing `eval()`, `child_process`, `.unref()`, `process.env`, credential path access, or network exfiltration patterns are escalated to critical threat events and written to the audit log.
-- **pre_bash `--ignore-scripts` suggestion**: When `pre_bash` detects an npm install command without `--ignore-scripts`, it emits a warning suggesting the safer invocation. This is informational (warn, not block) because many legitimate packages require lifecycle hooks.
-- **Credential path monitoring**: The existing credential file watcher and pre_read/pre_bash hooks block access to `.npmrc`, `~/.ssh/`, `~/.aws/`, and other sensitive paths. The `NPM_CONFIG_TOKEN` environment variable is included in the sensitive environment variable blocklist. This neutralises the exfiltration stage of lifecycle hook attacks even if the script executes.
-
-An allowlist of known-safe lifecycle packages (esbuild, puppeteer, sharp, node-gyp, etc.) suppresses warnings for packages that legitimately require build-time scripts. Unknown packages are warned; only verified-safe packages are exempted.
-
-**Residual risk**: Detection via `post_bash` is limited to install commands visible through Claude Code hooks. Direct terminal `npm install` commands run outside of an AI tool session are not caught until Phase 3 filesystem-level monitoring is active. Lifecycle scripts that avoid all suspicious content patterns may produce false negatives.
-
-### 11. Clinejection via poisoned project configurations
-
-**Threat**: An attacker crafts a project repository with malicious configuration files (e.g., `.clinerules`, `.cursorrules`, MCP server configs) that inject commands when an AI coding tool processes the repository. The AI tool reads the poisoned config, interprets embedded instructions, and executes attacker-controlled commands through its tool-calling interface. This is a prompt injection attack that uses project files as the injection vector.
-
-**Mitigation**: Sanctum mitigates Clinejection through three layers:
-
-- **MCP policy engine**: The `pre_mcp` hook audits all MCP tool calls against policy rules. Built-in path restrictions block MCP tools from accessing sensitive paths (`.ssh/`, `.aws/`, `.gnupg/`, `.env`, `.pth`) regardless of user-defined rules. Configurable `default_mcp_policy` allows users to set deny-by-default for MCP tools.
-- **pre_bash hook**: All commands suggested by the AI tool pass through `pre_bash`, which blocks credential access, environment variable exfiltration, and dangerous commands. A poisoned config that instructs the AI to `cat ~/.ssh/id_rsa` is blocked by the same rules that protect against any other credential access attempt.
-- **Security floor enforcement**: Project-local Sanctum configs cannot lower the security posture. `claude_hooks`, `redact_credentials`, and `mcp_audit` are pinned to global values and cannot be disabled by a malicious `.sanctum/config.toml` in the repository.
-
-**Residual risk**: If the AI tool executes a command that Sanctum does not recognise as dangerous (novel exfiltration technique, indirect data access), the injected command may succeed. Sanctum's blocklist-based approach cannot anticipate every possible injected command, though the credential path monitoring provides defense-in-depth.
-
-### 12. Unresolved threats accumulating without remediation
+### 10. Unresolved threats accumulating without remediation
 
 **Threat**: Threats are detected and logged but never reviewed, leading to alert fatigue and unaddressed security events.
 
@@ -147,10 +121,18 @@ An allowlist of known-safe lifecycle packages (esbuild, puppeteer, sharp, node-g
 +----------------------------------------------------------+
 
 +----------------------------------------------------------+
-| UNTRUSTED: Packages installed via pip/npm/yarn/pnpm/bun  |
-|  - May contain malicious .pth files (Python)             |
-|  - May execute lifecycle hooks (npm preinstall/           |
-|    postinstall) that spawn detached processes             |
+| TRUSTED: Sanctum CLI / hook processes                    |
+|  - Short-lived processes invoked per tool call            |
+|  - pre-bash makes HTTPS HEAD requests to npm/PyPI        |
+|    registries for slopsquatting detection (fail-open)     |
+|  - Communicate with daemon via local Unix socket          |
+|  - Write audit events directly to NDJSON log             |
+|  - Uses reqwest with rustls-tls (no system OpenSSL)      |
++----------------------------------------------------------+
+
++----------------------------------------------------------+
+| UNTRUSTED: Packages installed via pip/npm/etc            |
+|  - May contain malicious .pth files                      |
 |  - May attempt credential exfiltration                   |
 |  - May create persistent backdoors                       |
 +----------------------------------------------------------+
@@ -171,3 +153,7 @@ An allowlist of known-safe lifecycle packages (esbuild, puppeteer, sharp, node-g
 |  - Budget tracking monitors costs per provider           |
 +----------------------------------------------------------+
 ```
+
+### Residual risk: hook fail-open behavior
+
+The pre-bash hook makes HTTPS HEAD requests to npm and PyPI registries to verify package existence before install (slopsquatting detection). These checks are fail-open by design: if the registry is unreachable (DNS poisoning, network blocking, timeout), the install proceeds with a warning. An attacker who can influence DNS resolution or block outbound HTTPS to registry.npmjs.org/pypi.org can force all checks to fail open, effectively disabling slopsquatting protection. The reqwest dependency (with rustls-tls) adds to the supply chain attack surface — audited in DEPENDENCY_AUDIT.md.

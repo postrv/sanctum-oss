@@ -77,11 +77,33 @@ pub enum ProxyError {
         method: String,
     },
 
-    /// Connection to a private/reserved IP was blocked (SSRF prevention).
-    #[error("SSRF blocked: {reason}")]
+    /// SSRF blocked: host resolves to a private/reserved address.
+    ///
+    /// The error message intentionally omits the resolved IP address
+    /// to avoid leaking internal DNS topology.
+    #[error("SSRF blocked: '{host}' resolves to a private/reserved address")]
     SsrfBlocked {
-        /// Description of why the connection was blocked.
-        reason: String,
+        /// The hostname that resolved to a private IP (the IP itself is NOT
+        /// included to avoid leaking internal DNS topology).
+        host: String,
+    },
+
+    /// DNS resolution failed for the target host.
+    #[error("DNS resolution failed for '{host}'")]
+    DnsResolutionFailed {
+        /// The hostname that could not be resolved.
+        host: String,
+    },
+
+    /// Duplicate Content-Length headers with conflicting values.
+    #[error("conflicting Content-Length headers")]
+    ConflictingContentLength,
+
+    /// Failed to connect to all resolved addresses.
+    #[error("failed to connect to any resolved address for '{host}'")]
+    ConnectFailed {
+        /// The hostname we tried to connect to.
+        host: String,
     },
 
     /// Tunnel timeout expired.
@@ -107,10 +129,13 @@ impl ProxyError {
         match self {
             Self::PayloadTooLarge { .. } => 413,
             Self::BudgetBlocked { .. } => 429,
-            Self::ModelNotAllowed { .. } => 403,
-            Self::InvalidPath { .. } | Self::SsrfBlocked { .. } => 400,
+            Self::ModelNotAllowed { .. } | Self::SsrfBlocked { .. } => 403,
+            Self::InvalidPath { .. } | Self::ConflictingContentLength => 400,
             Self::MethodNotAllowed { .. } => 405,
-            Self::Upstream(_) | Self::TunnelTimeout { .. } => 502,
+            Self::DnsResolutionFailed { .. }
+            | Self::ConnectFailed { .. }
+            | Self::Upstream(_)
+            | Self::TunnelTimeout { .. } => 502,
             Self::Bind { .. }
             | Self::NonLocalhostBind { .. }
             | Self::CaGeneration { .. }

@@ -163,7 +163,9 @@ jobs:
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx@0.5.7 --locked
       - name: Generate SBOM
-        run: cargo cyclonedx --format json --output-file sanctum-sbom.cdx.json
+        run: |
+          cargo cyclonedx --format json --override-filename sanctum-sbom.cdx --top-level
+          cp crates/sanctum-cli/sanctum-sbom.cdx.json sanctum-sbom.cdx.json
       - name: Sign SBOM
         run: |
           cosign sign-blob --yes sanctum-sbom.cdx.json \

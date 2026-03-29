@@ -1687,6 +1687,7 @@ dependencies = [
  "predicates",
  "sanctum-budget",
  "sanctum-firewall",
+ "sanctum-sentinel",
  "sanctum-types",
  "serde",
  "serde_json",

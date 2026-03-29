@@ -17,6 +17,7 @@
 //! - `sanctum doctor`   — Diagnose and verify Sanctum installation
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod commands;
@@ -62,6 +63,15 @@ enum Commands {
         /// Output findings as NDJSON (one JSON object per line).
         #[arg(long)]
         json: bool,
+        /// Scan npm packages for supply chain risks.
+        #[arg(long)]
+        npm: bool,
+        /// Root directory to scan for npm packages (defaults to current directory).
+        #[arg(long, value_name = "PATH")]
+        npm_path: Option<PathBuf>,
+        /// Maximum depth for traversing into `node_modules` (default: 2).
+        #[arg(long, default_value = "2")]
+        npm_depth: usize,
     },
     /// Run a command under Sanctum monitoring (auto-starts daemon, enables file and credential watchers).
     Run {
@@ -253,7 +263,12 @@ fn main() -> ExitCode {
             approve,
             delete,
         } => commands::review::run(json, approve.as_deref(), delete.as_deref()),
-        Commands::Scan { json } => commands::scan::run(json),
+        Commands::Scan {
+            json,
+            npm,
+            npm_path,
+            npm_depth,
+        } => commands::scan::run(json, npm, npm_path, npm_depth),
         Commands::Run { sandbox, command } => commands::run::run(sandbox, &command),
         Commands::Config { edit, recommended } => commands::config::run(edit, recommended),
         Commands::Budget { action } => commands::budget::run(action.as_ref()),

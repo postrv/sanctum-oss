@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Dependency count updated from 282 to 295
+
+### Fixed
+- SBOM generation: use `--override-filename` and `--top-level` flags
+- Release `verify-ci` job: remove matrix/conditional jobs from required checks
+- Kani CI: reduce proof bound, consolidate per-crate, non-blocking release gate
+- Kani CI timeouts increased (core 30 to 60 min, full 60 to 120 min)
+- Test installer fixed: `sanctum-daemon` has no `--version` flag
+- Stale documentation counts, URLs, and changelog structure corrected
+- CDLA-Permissive-2.0 license allowed for `webpki-roots` v1.0.6
+- LiteLLM attack date and sanctum.dev references corrected
+
+### Security
+- Round 2 adversarial review: 36 fixes across 8 crates, 48 new tests
+- Crash prevention, data durability, and credential detection hardening
+- Internal planning documents removed from repository
+
 ## [0.1.0] - 2026-03-27
 
 ### Added

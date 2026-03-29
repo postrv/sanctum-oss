@@ -38,27 +38,27 @@ const fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
     }
 }
 
-/// Enforce a security floor on project-local AI firewall configs.
+/// Enforce a security floor on ALL AI firewall configs (global and local).
 ///
-/// Project-local configs must not disable `claude_hooks`,
+/// Global and local configs must not disable `claude_hooks`,
 /// `redact_credentials`, or `mcp_audit`. If they attempt to, the values
 /// are forced back to `true` and a warning is emitted.
-fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
+fn enforce_ai_firewall_security_floor_global(cfg: &mut AiFirewallConfig) {
     if !cfg.claude_hooks {
         tracing::warn!(
-            "Project-local config cannot disable claude_hooks \u{2014} using global default"
+            "Config cannot disable claude_hooks \u{2014} using secure default"
         );
         cfg.claude_hooks = true;
     }
     if !cfg.redact_credentials {
         tracing::warn!(
-            "Project-local config cannot disable redact_credentials \u{2014} using global default"
+            "Config cannot disable redact_credentials \u{2014} using secure default"
         );
         cfg.redact_credentials = true;
     }
     if !cfg.mcp_audit {
         tracing::warn!(
-            "Project-local config cannot disable mcp_audit \u{2014} using global default"
+            "Config cannot disable mcp_audit \u{2014} using secure default"
         );
         cfg.mcp_audit = true;
     }
@@ -76,6 +76,16 @@ fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
         );
         cfg.entropy_min_length = 16;
     }
+}
+
+/// Enforce a security floor on project-local AI firewall configs.
+///
+/// Applies all global floors plus local-only restrictions:
+/// - Prevents weakening MCP default policy to Allow.
+fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
+    // Apply global floors first
+    enforce_ai_firewall_security_floor_global(cfg);
+
     // Prevent local configs from weakening the MCP default policy to Allow.
     // A malicious repo could include .sanctum/config.toml with
     // `default_mcp_policy = "allow"` to bypass MCP restrictions.
@@ -115,6 +125,8 @@ fn load_ai_config_from_path(p: &std::path::Path, is_local: bool) -> AiFirewallCo
     };
     if is_local {
         enforce_ai_firewall_security_floor(&mut cfg);
+    } else {
+        enforce_ai_firewall_security_floor_global(&mut cfg);
     }
     cfg
 }
@@ -1119,5 +1131,74 @@ mod tests {
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!((cfg.entropy_threshold - 5.0).abs() < f64::EPSILON);
         assert_eq!(cfg.entropy_min_length, 20);
+    }
+
+    // ---- Global config security floor tests ----
+
+    #[test]
+    fn global_config_floor_enforces_claude_hooks() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: false,
+            ..AiFirewallConfig::default()
+        };
+        enforce_ai_firewall_security_floor_global(&mut cfg);
+        assert!(
+            cfg.claude_hooks,
+            "global floor should force claude_hooks to true"
+        );
+    }
+
+    #[test]
+    fn global_config_floor_enforces_redact_credentials() {
+        let mut cfg = AiFirewallConfig {
+            redact_credentials: false,
+            ..AiFirewallConfig::default()
+        };
+        enforce_ai_firewall_security_floor_global(&mut cfg);
+        assert!(
+            cfg.redact_credentials,
+            "global floor should force redact_credentials to true"
+        );
+    }
+
+    #[test]
+    fn global_config_floor_enforces_mcp_audit() {
+        let mut cfg = AiFirewallConfig {
+            mcp_audit: false,
+            ..AiFirewallConfig::default()
+        };
+        enforce_ai_firewall_security_floor_global(&mut cfg);
+        assert!(
+            cfg.mcp_audit,
+            "global floor should force mcp_audit to true"
+        );
+    }
+
+    #[test]
+    fn global_config_floor_allows_mcp_policy_allow() {
+        let mut cfg = AiFirewallConfig {
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            ..AiFirewallConfig::default()
+        };
+        enforce_ai_firewall_security_floor_global(&mut cfg);
+        assert_eq!(
+            cfg.default_mcp_policy,
+            sanctum_types::config::McpDefaultPolicy::Allow,
+            "global floor should NOT override MCP default policy"
+        );
+    }
+
+    #[test]
+    fn local_config_floor_overrides_mcp_policy_allow() {
+        let mut cfg = AiFirewallConfig {
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            ..AiFirewallConfig::default()
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert_eq!(
+            cfg.default_mcp_policy,
+            sanctum_types::config::McpDefaultPolicy::Deny,
+            "local floor SHOULD override MCP default policy to deny"
+        );
     }
 }

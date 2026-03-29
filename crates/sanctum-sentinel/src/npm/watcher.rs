@@ -12,6 +12,14 @@
 //! 2. Start a 2-second inactivity timer, reset on each new event.
 //! 3. After 2 seconds of silence, batch-scan all accumulated `package.json` files.
 //! 4. Hard cap: 120 seconds max wait before forcing a scan.
+//!
+//! # Capacity bound
+//!
+//! The pending-path set is bounded to [`MAX_PENDING_PATHS`].  If a burst
+//! of unique paths exceeds this limit during a single debounce window,
+//! new paths are silently dropped and a warning is logged.  This prevents
+//! unbounded memory growth from a malicious project generating millions
+//! of unique package.json events.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -22,6 +30,10 @@ const DEBOUNCE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Maximum wait time before forcing a scan of accumulated files.
 const MAX_WAIT: Duration = Duration::from_secs(120);
+
+/// Maximum number of unique paths the debouncer will hold in a single
+/// window before refusing new entries.
+const MAX_PENDING_PATHS: usize = 10_000;
 
 /// Check if a path is a file we should watch inside `node_modules`.
 ///
@@ -60,7 +72,7 @@ pub fn discover_node_modules(project_dirs: &[PathBuf]) -> Vec<PathBuf> {
 /// Tracks the debounce state for batching npm install events.
 ///
 /// This struct manages the two-phase debouncing logic:
-/// - Accumulates `package.json` paths as events arrive
+/// - Accumulates `package.json` paths as events arrive (bounded to [`MAX_PENDING_PATHS`])
 /// - Tracks the inactivity timer and hard cap deadline
 /// - Reports when it is time to scan
 #[derive(Debug)]
@@ -94,12 +106,23 @@ impl NpmDebouncer {
     ///
     /// The path should be the directory containing `package.json` (the package
     /// directory), not the `package.json` file itself.
+    ///
+    /// If the pending set has reached [`MAX_PENDING_PATHS`], the event is
+    /// silently dropped after logging a warning.
     pub fn record_event(&mut self, package_dir: PathBuf) {
         let now = Instant::now();
         if self.window_start.is_none() {
             self.window_start = Some(now);
         }
         self.last_event = Some(now);
+
+        if self.pending_paths.len() >= MAX_PENDING_PATHS {
+            tracing::warn!(
+                max = MAX_PENDING_PATHS,
+                "npm debouncer at capacity, dropping new path"
+            );
+            return;
+        }
         self.pending_paths.insert(package_dir);
     }
 
@@ -159,6 +182,12 @@ impl NpmDebouncer {
         } else {
             Some(DEBOUNCE_TIMEOUT.saturating_sub(elapsed))
         }
+    }
+
+    /// Return the maximum number of pending paths allowed.
+    #[must_use]
+    pub const fn capacity_limit() -> usize {
+        MAX_PENDING_PATHS
     }
 }
 
@@ -443,5 +472,41 @@ mod tests {
         debouncer.window_start = Some(Instant::now() - Duration::from_secs(3));
 
         assert!(debouncer.should_scan());
+    }
+
+    #[test]
+    fn capacity_limit_is_correct() {
+        assert_eq!(NpmDebouncer::capacity_limit(), MAX_PENDING_PATHS);
+    }
+
+    #[test]
+    fn debouncer_respects_capacity_bound() {
+        let mut debouncer = NpmDebouncer::new();
+        for i in 0..MAX_PENDING_PATHS {
+            debouncer.record_event(PathBuf::from(format!("/project/node_modules/pkg-{i}")));
+        }
+        // At capacity -- further events should be dropped
+        debouncer.record_event(PathBuf::from("/project/node_modules/overflow"));
+        let paths = debouncer.drain();
+        assert_eq!(
+            paths.len(),
+            MAX_PENDING_PATHS,
+            "should not exceed MAX_PENDING_PATHS"
+        );
+    }
+
+    #[test]
+    fn debouncer_drain_resets_capacity() {
+        let mut debouncer = NpmDebouncer::new();
+        for i in 0..MAX_PENDING_PATHS {
+            debouncer.record_event(PathBuf::from(format!("/p/{i}")));
+        }
+        let drained = debouncer.drain();
+        assert_eq!(drained.len(), MAX_PENDING_PATHS);
+        assert!(!debouncer.has_pending());
+
+        // After drain, new events should be accepted
+        debouncer.record_event(PathBuf::from("/fresh/path"));
+        assert!(debouncer.has_pending());
     }
 }

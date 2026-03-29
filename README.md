@@ -113,7 +113,7 @@ sanctum hooks remove claude  # Remove Claude Code hooks
 
 sanctum daemon start|stop|restart
 
-sanctum proxy start|stop|status  # (preview)
+sanctum proxy start|stop|status
 ```
 
 ## Configuration
@@ -216,7 +216,7 @@ Sanctum does **not** require nono. Each tool provides independent value.
 
 ## Architecture
 
-8 crates, ~37,000 lines of Rust:
+8 crates, ~36,000 lines of Rust:
 
 | Crate | Purpose |
 |-------|---------|
@@ -225,7 +225,7 @@ Sanctum does **not** require nono. Each tool provides independent value.
 | `sanctum-sentinel` | `.pth` monitoring, quarantine, credential watching, network anomaly detection |
 | `sanctum-firewall` | Credential redaction (37 patterns), Shannon entropy, MCP policy engine |
 | `sanctum-budget` | Spend tracking, 3 provider parsers (OpenAI, Anthropic, Google) |
-| `sanctum-proxy` | HTTP budget proxy with body limits, credential redaction, budget enforcement, SSRF prevention, and usage extraction (preview -- server wiring pending) |
+| `sanctum-proxy` | HTTP budget proxy with body limits, credential redaction, budget enforcement, SSRF prevention, and usage extraction |
 | `sanctum-types` | Shared types, config schema, threat model, platform paths |
 | `sanctum-notify` | Cross-platform desktop notifications (macOS + Linux) |
 
@@ -239,7 +239,7 @@ Sanctum is a security tool. It holds itself to a higher standard than the code i
 - No `print!()` / `println!()` / `eprint!()` -- all output goes through structured channels
 
 **Testing**:
-- 1,453 tests (unit, integration, end-to-end)
+- 1,426 tests (unit, integration, end-to-end)
 - 8 Kani bounded model checking proofs (panic-freedom, state machine correctness, overflow safety)
 - 2 fuzz targets on security-critical parsers (CI runs 30s per target on PRs, 2.5h nightly)
 - 9 property-based tests verifying core invariants across random inputs

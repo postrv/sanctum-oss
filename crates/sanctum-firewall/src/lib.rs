@@ -18,4 +18,3 @@ pub mod hooks;
 pub mod mcp;
 pub mod patterns;
 pub mod redaction;
-pub mod registry;

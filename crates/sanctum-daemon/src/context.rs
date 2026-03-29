@@ -12,8 +12,6 @@ use sanctum_sentinel::watcher::{PthWatcher, WatchEvent};
 use sanctum_types::config::SanctumConfig;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
-use crate::NpmLifecycleEvent;
-
 /// Bundles all state and channels needed by the main event loop.
 ///
 /// This replaces the 13-parameter `run_event_loop` function signature with
@@ -31,7 +29,6 @@ pub struct EventLoopContext<'a> {
     pub shared_quarantine: &'a Arc<Mutex<Quarantine>>,
     pub cred_rx: &'a mut tokio::sync::mpsc::Receiver<CredentialEvent>,
     pub net_rx: &'a mut tokio::sync::mpsc::Receiver<NetworkEvent>,
-    pub npm_rx: &'a mut tokio::sync::mpsc::Receiver<NpmLifecycleEvent>,
     pub sigterm: &'a mut tokio::signal::unix::Signal,
     pub sigint: &'a mut tokio::signal::unix::Signal,
     pub sighup: &'a mut tokio::signal::unix::Signal,

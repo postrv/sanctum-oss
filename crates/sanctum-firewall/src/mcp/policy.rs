@@ -1038,3 +1038,29 @@ mod kani_proofs {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod expanded_policy_tests {
+    use super::*;
+    use sanctum_types::config::McpDefaultPolicy;
+    use serde_json::json;
+
+    #[test]
+    fn path_traversal_blocked_by_builtin_ssh_restriction() {
+        let policy = McpPolicy::from_config(vec![PolicyRule {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["~/.ssh/**".to_owned()],
+        }]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/project/../../.ssh/id_rsa"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            "path traversal containing /.ssh/ should be blocked by built-in restriction"
+        );
+    }
+}

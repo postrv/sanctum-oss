@@ -118,12 +118,13 @@ pub fn read_token(data_dir: &Path) -> io::Result<String> {
     {
         use std::os::unix::fs::OpenOptionsExt;
 
-        let mut file = fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .read(true)
             .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
             .open(&token_path)?;
         let mut token = String::new();
-        file.read_to_string(&mut token)?;
+        file.take((TOKEN_HEX_LEN as u64) + 64)
+            .read_to_string(&mut token)?;
         Ok(token.trim().to_owned())
     }
     #[cfg(not(unix))]

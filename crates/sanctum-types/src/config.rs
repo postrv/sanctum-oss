@@ -169,8 +169,6 @@ pub struct NetworkConfig {
     /// Polling interval in seconds (clamped to 1..=3600).
     #[serde(deserialize_with = "deserialize_poll_interval")]
     pub poll_interval_secs: u64,
-    /// Baseline learning period in days.
-    pub learning_period_days: u32,
     /// Outbound transfer alert threshold in bytes per hour.
     pub transfer_threshold_bytes: u64,
     /// Processes to exclude from monitoring.
@@ -187,7 +185,6 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             poll_interval_secs: 30,
-            learning_period_days: 7,
             transfer_threshold_bytes: 100 * 1024 * 1024,
             process_allowlist: vec![
                 "Dropbox".to_owned(),
@@ -546,7 +543,6 @@ mod tests {
     fn network_config_defaults_are_correct() {
         let config = NetworkConfig::default();
         assert_eq!(config.poll_interval_secs, 30);
-        assert_eq!(config.learning_period_days, 7);
         assert_eq!(config.transfer_threshold_bytes, 100 * 1024 * 1024);
         assert_eq!(config.process_allowlist.len(), 5);
         assert!(config.process_allowlist.contains(&"Dropbox".to_owned()));
@@ -562,7 +558,6 @@ mod tests {
         let toml_str = r#"
             [sentinel.network]
             poll_interval_secs = 10
-            learning_period_days = 14
             transfer_threshold_bytes = 50000000
             process_allowlist = ["myapp"]
             destination_blocklist = ["10.0.0.1"]
@@ -570,7 +565,6 @@ mod tests {
         "#;
         let config: SanctumConfig = toml::from_str(toml_str).expect("network config should parse");
         assert_eq!(config.sentinel.network.poll_interval_secs, 10);
-        assert_eq!(config.sentinel.network.learning_period_days, 14);
         assert_eq!(config.sentinel.network.transfer_threshold_bytes, 50_000_000);
         assert_eq!(config.sentinel.network.process_allowlist, vec!["myapp"]);
         assert_eq!(

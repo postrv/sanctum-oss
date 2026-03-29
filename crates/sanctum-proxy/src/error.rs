@@ -70,6 +70,13 @@ pub enum ProxyError {
         reason: String,
     },
 
+    /// HTTP method not allowed.
+    #[error("method not allowed: {method}")]
+    MethodNotAllowed {
+        /// The HTTP method that was rejected.
+        method: String,
+    },
+
     /// HTTP client error (e.g., upstream request failed).
     #[error("upstream request failed: {0}")]
     Upstream(String),
@@ -88,6 +95,7 @@ impl ProxyError {
             Self::BudgetBlocked { .. } => 429,
             Self::ModelNotAllowed { .. } => 403,
             Self::InvalidPath { .. } => 400,
+            Self::MethodNotAllowed { .. } => 405,
             Self::Upstream(_) => 502,
             Self::Bind { .. }
             | Self::NonLocalhostBind { .. }

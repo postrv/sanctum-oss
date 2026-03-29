@@ -134,10 +134,35 @@ impl ProcessLineage {
     }
 
     /// Assess whether this lineage is legitimate for `.pth` creation.
+    ///
+    /// When a process has a name matching a known package manager, we also
+    /// verify the `exe` path (if available) contains the package manager
+    /// name. A mismatch indicates the process may be impersonating a
+    /// legitimate package manager.
     #[must_use]
     pub fn assess_pth_creation(&self) -> LineageAssessment {
-        // Check if any ancestor is a known package manager
-        if self.chain.iter().any(|p| is_known_package_manager(&p.name)) {
+        // Check if any ancestor is a known package manager, verifying
+        // the exe path when available to prevent name impersonation.
+        let has_legit_pm = self.chain.iter().any(|p| {
+            if !is_known_package_manager(&p.name) {
+                return false;
+            }
+            // If exe is available, verify it contains the package manager name
+            if let Some(ref exe_path) = p.exe {
+                let exe_str = exe_path.to_string_lossy();
+                if !exe_str.contains(&p.name) {
+                    tracing::warn!(
+                        pid = p.pid,
+                        name = %p.name,
+                        exe = %exe_str,
+                        "process name matches package manager but exe path does not — treating as unknown"
+                    );
+                    return false;
+                }
+            }
+            true
+        });
+        if has_legit_pm {
             return LineageAssessment::LegitimatePackageManager;
         }
 
@@ -184,6 +209,22 @@ impl MockProcFs {
                 pid,
                 name: name.to_string(),
                 exe: None,
+                ppid,
+            },
+        );
+        self
+    }
+
+    /// Add a process with an explicit exe path to the mock.
+    #[must_use]
+    #[allow(clippy::similar_names)]
+    pub fn process_with_exe(mut self, pid: u32, name: &str, ppid: Option<u32>, exe: &str) -> Self {
+        self.processes.insert(
+            pid,
+            ProcessInfo {
+                pid,
+                name: name.to_string(),
+                exe: Some(std::path::PathBuf::from(exe)),
                 ppid,
             },
         );
@@ -470,5 +511,50 @@ mod tests {
         // PID 0 or very large PIDs shouldn't resolve to a normal process
         let info = source.get_process_info(4_294_967_295);
         assert!(info.is_none());
+    }
+
+    #[test]
+    fn lineage_exe_mismatch_treated_as_unknown() {
+        // A process named "pip" but with an exe path that doesn't contain "pip"
+        // should be treated as UnknownCreator (potential name impersonation).
+        // The creator is "installer" (not python), avoiding SuspiciousPythonStartup.
+        let mock = MockProcFs::new()
+            .process_with_exe(100, "pip", None, "/tmp/malware")
+            .process(101, "installer", Some(100));
+
+        let lineage = ProcessLineage::trace(101, &mock).expect("lineage should succeed");
+        let assessment = lineage.assess_pth_creation();
+        assert_eq!(
+            assessment,
+            LineageAssessment::UnknownCreator,
+            "process named pip with mismatched exe should not be trusted"
+        );
+    }
+
+    #[test]
+    fn lineage_exe_match_treated_as_legitimate() {
+        // A process named "pip" with an exe path that contains "pip"
+        // should be treated as LegitimatePackageManager.
+        let mock = MockProcFs::new()
+            .process_with_exe(100, "pip", None, "/usr/bin/pip")
+            .process(101, "python3.12", Some(100));
+
+        let lineage = ProcessLineage::trace(101, &mock).expect("lineage should succeed");
+        let assessment = lineage.assess_pth_creation();
+        assert_eq!(assessment, LineageAssessment::LegitimatePackageManager);
+    }
+
+    #[test]
+    fn lineage_no_exe_still_trusted() {
+        // A process named "pip" with no exe path (None) should still be
+        // treated as LegitimatePackageManager (backwards compatibility).
+        let mock =
+            MockProcFs::new()
+                .process(100, "pip", None)
+                .process(101, "python3.12", Some(100));
+
+        let lineage = ProcessLineage::trace(101, &mock).expect("lineage should succeed");
+        let assessment = lineage.assess_pth_creation();
+        assert_eq!(assessment, LineageAssessment::LegitimatePackageManager);
     }
 }

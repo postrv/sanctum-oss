@@ -188,7 +188,11 @@ pub async fn handle_request(
                 .budget_tracker
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            check_budget(&tracker, request.provider.to_budget_provider())
+            check_budget(
+                &tracker,
+                request.provider.to_budget_provider(),
+                state.pending_cost.load(Ordering::SeqCst),
+            )
         };
         if let EnforcementResult::Blocked { message } = budget_result {
             // Guard will decrement on drop.
@@ -198,6 +202,17 @@ pub async fn handle_request(
 
     // H3: Redact credentials from request body.
     let request_body = redact_body_bytes(&request.body);
+
+    // Detect SSE streaming requests and warn about budget tracking limitations.
+    if request_body_has_stream_flag(&request.body) {
+        tracing::warn!(
+            provider = %request.provider.display_name(),
+            path = %request.path,
+            "streaming response requested (\"stream\": true); budget usage tracking \
+             will not work for this request because SSE streams do not contain a \
+             single JSON usage object"
+        );
+    }
 
     // Build and send the upstream request.
     // On error, cost_guard drops and decrements automatically.
@@ -233,6 +248,15 @@ pub async fn handle_request(
     cost_guard.defuse();
 
     // Record usage from response.
+    //
+    // KNOWN LIMITATION: SSE streaming responses (`"stream": true` in request).
+    // When streaming is enabled, the upstream returns an SSE event stream
+    // rather than a single JSON object. The usage data (token counts) is
+    // typically only included in the final `[DONE]` event or as a separate
+    // `usage` field in the last data chunk. This extraction logic expects a
+    // complete JSON response body and will fail to capture usage from SSE
+    // streams. As a result, budget tracking is not applied to streaming
+    // responses. This is tracked for future implementation.
     if let Ok(body_str) = std::str::from_utf8(&response_body) {
         let mut tracker = state
             .budget_tracker
@@ -303,10 +327,11 @@ async fn send_upstream(
         "DELETE" => state.client.delete(upstream_url),
         "PATCH" => state.client.patch(upstream_url),
         "HEAD" => state.client.head(upstream_url),
-        _ => state.client.request(
-            request.method.parse().unwrap_or(reqwest::Method::GET),
-            upstream_url,
-        ),
+        other => {
+            return Err(ProxyError::MethodNotAllowed {
+                method: other.to_owned(),
+            });
+        }
     };
 
     // Forward headers (skip hop-by-hop and host).
@@ -325,6 +350,24 @@ async fn send_upstream(
         .send()
         .await
         .map_err(|e| ProxyError::Upstream(format!("upstream request failed: {e}")))
+}
+
+/// Check whether a request body contains `"stream": true`, indicating
+/// that the client has requested an SSE streaming response.
+///
+/// This is a best-effort check using JSON parsing. If the body is not
+/// valid UTF-8 or not valid JSON, returns `false` (fail-open).
+fn request_body_has_stream_flag(body: &[u8]) -> bool {
+    if body.is_empty() {
+        return false;
+    }
+    let Ok(body_str) = std::str::from_utf8(body) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body_str) else {
+        return false;
+    };
+    json.get("stream").and_then(serde_json::Value::as_bool) == Some(true)
 }
 
 /// Check the request body size against the configured limit.
@@ -459,6 +502,7 @@ const fn error_type_str(error: &ProxyError) -> &'static str {
         ProxyError::BudgetBlocked { .. } => "budget_exceeded",
         ProxyError::ModelNotAllowed { .. } => "model_not_allowed",
         ProxyError::InvalidPath { .. } => "invalid_path",
+        ProxyError::MethodNotAllowed { .. } => "method_not_allowed",
         ProxyError::Upstream(_) => "upstream_error",
         _ => "internal_error",
     }
@@ -1056,6 +1100,72 @@ mod tests {
         assert!(
             redacted.contains("[REDACTED:"),
             "redacted header should contain redaction placeholder"
+        );
+    }
+
+    // ---------- Unknown HTTP method rejection ----------
+
+    #[test]
+    fn test_unknown_method_returns_405() {
+        let err = ProxyError::MethodNotAllowed {
+            method: "TRACE".to_owned(),
+        };
+        let resp = error_response(&err);
+        assert_eq!(resp.status, 405);
+        let body: serde_json::Value =
+            serde_json::from_slice(&resp.body).expect("should be valid JSON");
+        assert_eq!(body["error"]["type"].as_str(), Some("method_not_allowed"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("TRACE"),
+            "error message should contain the rejected method"
+        );
+    }
+
+    // ---------- SSE stream detection tests ----------
+
+    #[test]
+    fn test_stream_flag_detected_in_request_body() {
+        let body = br#"{"model": "gpt-4o", "stream": true, "messages": []}"#;
+        assert!(
+            request_body_has_stream_flag(body),
+            "should detect stream: true"
+        );
+    }
+
+    #[test]
+    fn test_stream_flag_false_not_detected() {
+        let body = br#"{"model": "gpt-4o", "stream": false, "messages": []}"#;
+        assert!(
+            !request_body_has_stream_flag(body),
+            "should not detect stream: false"
+        );
+    }
+
+    #[test]
+    fn test_stream_flag_missing_not_detected() {
+        let body = br#"{"model": "gpt-4o", "messages": []}"#;
+        assert!(
+            !request_body_has_stream_flag(body),
+            "should not detect when stream key is absent"
+        );
+    }
+
+    #[test]
+    fn test_stream_flag_empty_body() {
+        assert!(
+            !request_body_has_stream_flag(b""),
+            "empty body should return false"
+        );
+    }
+
+    #[test]
+    fn test_stream_flag_non_json_body() {
+        assert!(
+            !request_body_has_stream_flag(b"not json at all"),
+            "non-JSON body should return false"
         );
     }
 }

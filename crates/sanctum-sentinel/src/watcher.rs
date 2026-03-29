@@ -71,7 +71,16 @@ impl PthWatcher {
                     EventKind::Create(_) => WatchEventKind::Created,
                     EventKind::Modify(_) => WatchEventKind::Modified,
                     EventKind::Remove(_) => WatchEventKind::Deleted,
-                    _ => return,
+                    other => {
+                        // Treat unknown/other event types as potential modifications
+                        // rather than silently dropping them, since new event kinds
+                        // could represent file changes we should not ignore.
+                        tracing::warn!(
+                            ?other,
+                            "unknown filesystem event type, treating as modification"
+                        );
+                        WatchEventKind::Modified
+                    }
                 };
 
                 for path in event.paths {
@@ -92,7 +101,9 @@ impl PthWatcher {
 
         for path in watch_paths {
             if path.exists() {
-                if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
+                // Use Recursive mode because packages can install .pth files
+                // in subdirectories of site-packages (e.g. namespace packages).
+                if let Err(e) = watcher.watch(path, RecursiveMode::Recursive) {
                     tracing::warn!(
                         path = %path.display(),
                         %e,
@@ -128,8 +139,8 @@ pub fn is_watched_file(path: &Path) -> bool {
     std::path::Path::new(file_name)
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pth"))
-        || file_name == "sitecustomize.py"
-        || file_name == "usercustomize.py"
+        || file_name.eq_ignore_ascii_case("sitecustomize.py")
+        || file_name.eq_ignore_ascii_case("usercustomize.py")
 }
 
 /// Discover Python `site-packages` directories on the system.
@@ -189,6 +200,14 @@ mod tests {
         assert!(!is_watched_file(Path::new("module.py")));
         assert!(!is_watched_file(Path::new("data.json")));
         assert!(!is_watched_file(Path::new("README.md")));
+    }
+
+    #[test]
+    fn is_watched_file_case_insensitive_sitecustomize() {
+        assert!(is_watched_file(Path::new("SiteCustomize.py")));
+        assert!(is_watched_file(Path::new("SITECUSTOMIZE.PY")));
+        assert!(is_watched_file(Path::new("Usercustomize.py")));
+        assert!(is_watched_file(Path::new("USERCUSTOMIZE.PY")));
     }
 
     #[tokio::test]

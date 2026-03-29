@@ -416,7 +416,8 @@ pub fn check_patterns(content: &str, source: &str) -> Vec<Finding> {
 /// Some runners accept flags between the runner and the file, so we scan
 /// for the first non-flag argument.
 const SCRIPT_RUNNERS: &[&str] = &[
-    "node", "sh", "bash", "python", "python3", "python2", "ruby", "perl",
+    "node", "sh", "bash", "python", "python3", "python2", "ruby", "perl", "npx", "ts-node", "tsx",
+    "deno", "bun",
 ];
 
 /// Extract a script file path from a lifecycle script command.

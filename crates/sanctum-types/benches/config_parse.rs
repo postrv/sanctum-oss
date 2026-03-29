@@ -20,7 +20,6 @@ credential_allowlist = ["/usr/bin/git", "/usr/bin/ssh"]
 
 [sentinel.network]
 poll_interval_secs = 10
-learning_period_days = 14
 transfer_threshold_bytes = 50000000
 process_allowlist = ["Dropbox", "rsync", "rclone"]
 destination_blocklist = ["10.0.0.1"]

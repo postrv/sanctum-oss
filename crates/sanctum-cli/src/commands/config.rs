@@ -153,7 +153,6 @@ pth_response = "quarantine"
 
 [sentinel.network]
 poll_interval_secs = 30
-learning_period_days = 7
 transfer_threshold_bytes = 104857600  # 100 MB
 
 [ai_firewall]

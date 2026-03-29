@@ -28,29 +28,54 @@ pub enum EnforcementResult {
 
 /// Check whether a request to the given provider should be allowed.
 ///
+/// The `pending_cents` parameter accounts for in-flight requests whose cost
+/// has not yet been recorded. This prevents TOCTOU double-spend where
+/// multiple concurrent requests each pass the budget check before any of
+/// their costs are committed to the tracker.
+///
 /// Returns:
-/// - `Blocked` if either session or daily limit is exceeded
+/// - `Blocked` if either session or daily limit is exceeded (including pending cost)
 /// - `Warning` if the alert threshold has been crossed but limits not exceeded
 /// - `Allowed` otherwise
 #[must_use]
-pub fn check_budget(tracker: &BudgetTracker, provider: Provider) -> EnforcementResult {
+pub fn check_budget(
+    tracker: &BudgetTracker,
+    provider: Provider,
+    pending_cents: u64,
+) -> EnforcementResult {
     let status = tracker.status(provider);
 
-    if status.session_exceeded {
+    // Include pending cost in the effective spend for limit comparisons.
+    let effective_session = status.session_spent_cents.saturating_add(pending_cents);
+    let effective_daily = status.daily_spent_cents.saturating_add(pending_cents);
+
+    let session_exceeded_with_pending = status.session_exceeded
+        || status
+            .session_limit_cents
+            .is_some_and(|limit| effective_session >= limit);
+
+    let daily_exceeded_with_pending = status.daily_exceeded
+        || status
+            .daily_limit_cents
+            .is_some_and(|limit| effective_daily >= limit);
+
+    if session_exceeded_with_pending {
         let limit = status.session_limit_cents.unwrap_or(0);
         return EnforcementResult::Blocked {
             message: format!(
-                "Session budget exceeded for {provider}: spent {spent} cents of {limit} cent limit",
+                "Session budget exceeded for {provider}: spent {spent} cents \
+                 (pending {pending_cents}) of {limit} cent limit",
                 spent = status.session_spent_cents,
             ),
         };
     }
 
-    if status.daily_exceeded {
+    if daily_exceeded_with_pending {
         let limit = status.daily_limit_cents.unwrap_or(0);
         return EnforcementResult::Blocked {
             message: format!(
-                "Daily budget exceeded for {provider}: spent {spent} cents of {limit} cent limit",
+                "Daily budget exceeded for {provider}: spent {spent} cents \
+                 (pending {pending_cents}) of {limit} cent limit",
                 spent = status.daily_spent_cents,
             ),
         };
@@ -169,7 +194,7 @@ mod tests {
     #[test]
     fn allowed_under_limit() {
         let tracker = make_tracker_with_session_limit(10000);
-        let result = check_budget(&tracker, Provider::OpenAI);
+        let result = check_budget(&tracker, Provider::OpenAI, 0);
         assert_eq!(result, EnforcementResult::Allowed);
     }
 
@@ -186,7 +211,7 @@ mod tests {
         };
         tracker.record_usage(&usage);
 
-        let result = check_budget(&tracker, Provider::OpenAI);
+        let result = check_budget(&tracker, Provider::OpenAI, 0);
         match result {
             EnforcementResult::Warning { percent, .. } => {
                 assert!(percent >= 75);
@@ -208,7 +233,7 @@ mod tests {
         };
         tracker.record_usage(&usage);
 
-        let result = check_budget(&tracker, Provider::OpenAI);
+        let result = check_budget(&tracker, Provider::OpenAI, 0);
         match result {
             EnforcementResult::Blocked { message } => {
                 assert!(message.contains("exceeded"));
@@ -235,7 +260,7 @@ mod tests {
         };
         tracker.record_usage(&usage);
 
-        let result = check_budget(&tracker, Provider::Anthropic);
+        let result = check_budget(&tracker, Provider::Anthropic, 0);
         match result {
             EnforcementResult::Blocked { message } => {
                 assert!(message.contains("Daily"));
@@ -309,7 +334,7 @@ mod tests {
         };
         tracker.record_usage(&usage);
 
-        let result = check_budget(&tracker, Provider::OpenAI);
+        let result = check_budget(&tracker, Provider::OpenAI, 0);
         assert_eq!(result, EnforcementResult::Allowed);
     }
 
@@ -404,5 +429,48 @@ mod tests {
         assert!(is_model_allowed(&Provider::OpenAI, "gpt-4o", &config));
         assert!(is_model_allowed(&Provider::OpenAI, "GPT-4O", &config));
         assert!(is_model_allowed(&Provider::OpenAI, "Gpt-4o", &config));
+    }
+
+    #[test]
+    fn blocked_when_pending_cost_exceeds_limit() {
+        // $10 limit (1000 cents), $8 spent (800 cents), $3 pending (300 cents).
+        // Effective spend = 800 + 300 = 1100 > 1000 limit => Blocked.
+        let config = BudgetConfig {
+            default_session: Some(BudgetAmount { cents: 1000 }),
+            default_daily: None,
+            alert_at_percent: 75,
+            ..BudgetConfig::default()
+        };
+        let mut tracker = BudgetTracker::new(&config);
+
+        // Record 800 cents of spend. gpt-4o output is 1000c/M tokens.
+        // 800K output tokens = 800 cents.
+        let usage = UsageData {
+            provider: Provider::OpenAI,
+            model: "gpt-4o".to_string(),
+            input_tokens: 0,
+            output_tokens: 800_000,
+        };
+        tracker.record_usage(&usage);
+
+        // Without pending, 800 < 1000, so should not be blocked.
+        let result = check_budget(&tracker, Provider::OpenAI, 0);
+        assert!(
+            !matches!(result, EnforcementResult::Blocked { .. }),
+            "should not be blocked without pending cost"
+        );
+
+        // With 300 cents pending, effective = 1100 > 1000, should be blocked.
+        let result = check_budget(&tracker, Provider::OpenAI, 300);
+        match result {
+            EnforcementResult::Blocked { message } => {
+                assert!(message.contains("exceeded"), "message: {message}");
+                assert!(
+                    message.contains("pending"),
+                    "message should mention pending: {message}"
+                );
+            }
+            other => panic!("expected Blocked with pending cost, got {other:?}"),
+        }
     }
 }

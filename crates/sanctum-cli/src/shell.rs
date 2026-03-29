@@ -39,9 +39,6 @@ _sanctum_hook() {
 if [[ -z "$SANCTUM_ACTIVE" ]]; then
     _sanctum_hook
 fi
-
-# Starship integration
-export SANCTUM_ACTIVE=1
 "#
     .to_string()
 }
@@ -63,8 +60,6 @@ _sanctum_hook() {
 if [[ -z "$SANCTUM_ACTIVE" ]]; then
     _sanctum_hook
 fi
-
-export SANCTUM_ACTIVE=1
 "#
     .to_string()
 }

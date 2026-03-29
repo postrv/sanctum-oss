@@ -481,3 +481,139 @@ mod tests {
         assert!(output.ends_with(']'));
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod expanded_tests {
+    use super::*;
+
+    #[test]
+    fn redacts_vercel_token() {
+        let input = "key: vercel_aBcDeFgHiJkLmNoPqRsTuVwX";
+        let (output, events) = redact_credentials(input);
+        assert!(!output.contains("vercel_aBcDeFgHiJkLmNoPqRsTuVwX"));
+        assert!(output.contains("[REDACTED:"));
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn redacts_docker_hub_pat() {
+        let input = "key: dckr_pat_aBcDeFgHiJkLmNoPqRsTuVwX";
+        let (output, events) = redact_credentials(input);
+        assert!(!output.contains("dckr_pat_aBcDeFgHiJkLmNoPqRsTuVwX"));
+        assert!(output.contains("[REDACTED:"));
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn redacts_hashicorp_vault_token() {
+        let token = format!("hvs.{}", "a".repeat(24));
+        let input = format!("token: {token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(
+            !output.contains(&token),
+            "vault token should not appear in output, got: {output}"
+        );
+        assert!(
+            output.contains("[REDACTED:"),
+            "output should contain redaction placeholder, got: {output}"
+        );
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn redacts_hugging_face_token() {
+        let token = format!("hf_{}", "a".repeat(34));
+        let input = format!("token: {token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains(&token));
+        assert!(output.contains("[REDACTED:"));
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn redacts_shopify_token() {
+        let token = format!("shpat_{}", "a".repeat(32));
+        let input = format!("token: {token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains(&token));
+        assert!(output.contains("[REDACTED:"));
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn redacts_linear_api_key() {
+        let token = format!("lin_api_{}", "a".repeat(40));
+        let input = format!("key: {token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains(&token));
+        assert!(output.contains("[REDACTED:"));
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn redacts_supabase_key() {
+        let token = format!("sbp_{}", "a".repeat(40));
+        let input = format!("key: {token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains(&token));
+        assert!(output.contains("[REDACTED:"));
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn redacts_flyio_token() {
+        let token = format!("fo1_{}", "a".repeat(20));
+        let input = format!("token: {token}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains(&token));
+        assert!(output.contains("[REDACTED:"));
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn redacts_neon_db_connection_string() {
+        let input = "url: postgresql://user:password@ep-cool-darkness-123456.us-east-2.aws.neon.tech/neondb";
+        let (output, events) = redact_credentials(input);
+        assert!(!output.contains("password@"));
+        assert!(output.contains("[REDACTED:"));
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn redacts_generic_connection_string() {
+        let input = "url: postgresql://user:password@host:5432/db";
+        let (output, events) = redact_credentials(input);
+        assert!(!output.contains("password@"));
+        assert!(output.contains("[REDACTED:"));
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn ssh_fido_ecdsa_key_not_redacted() {
+        let input = "sk-ecdsa-sha2-nistp256@openssh.com AAAAfakedata";
+        let (output, events) = redact_credentials(input);
+        assert!(
+            output.contains("sk-ecdsa-sha2-nistp256@openssh.com"),
+            "sk-ecdsa FIDO key type should not be redacted, got: {output}"
+        );
+        assert!(
+            !events.iter().any(|e| e.credential_type == "OpenAI API Key"),
+            "should not produce OpenAI API Key event for sk-ecdsa FIDO key"
+        );
+    }
+
+    #[test]
+    fn ssh_fido_ed25519_key_not_redacted() {
+        let input = "sk-ed25519@openssh.com AAAAfakedata";
+        let (output, events) = redact_credentials(input);
+        assert!(
+            output.contains("sk-ed25519@openssh.com"),
+            "sk-ed25519 FIDO key type should not be redacted, got: {output}"
+        );
+        assert!(
+            !events.iter().any(|e| e.credential_type == "OpenAI API Key"),
+            "should not produce OpenAI API Key event for sk-ed25519 FIDO key"
+        );
+    }
+}

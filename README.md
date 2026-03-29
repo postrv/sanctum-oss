@@ -96,7 +96,7 @@ sanctum review               # Review quarantined threats
 sanctum run -- <cmd>         # Run a command with protections active
 
 sanctum config               # View config (--edit to modify, --recommended for defaults)
-sanctum audit                # Threat event log (--last 10, --level critical, --json)
+sanctum audit                # Threat event log (--last 24h, --level critical, --json)
 
 sanctum fix list             # Unresolved threats (--category, --level, --json)
 sanctum fix resolve <id>     # Remediate a threat (--action restore|delete|dismiss)

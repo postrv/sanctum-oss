@@ -91,6 +91,18 @@ pub fn validate_path(path: &str) -> Result<(), ProxyError> {
         });
     }
 
+    // Reject path traversal: `..` as a path segment (e.g., `/..`, `/../`, `/v1/../admin`).
+    // We split on `/` and check for any segment that is exactly `..`.
+    // This allows `..` within filenames (e.g., `/v1/path..name`).
+    if path.split('/').any(|segment| segment == "..") {
+        return Err(ProxyError::InvalidPath {
+            reason: format!(
+                "path contains directory traversal segment '..': '{}'",
+                truncate_for_log(path)
+            ),
+        });
+    }
+
     Ok(())
 }
 
@@ -327,5 +339,32 @@ mod tests {
     fn test_query_empty_accepted() {
         let result = resolve_upstream(&Provider::OpenAi, "/v1/chat", Some(""));
         assert!(result.is_ok());
+    }
+
+    // ---------- Path traversal tests ----------
+
+    #[test]
+    fn test_path_traversal_with_admin_rejected() {
+        let result = validate_path("/v1/../admin");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ProxyError::InvalidPath { .. }));
+        assert!(err.to_string().contains("traversal"));
+    }
+
+    #[test]
+    fn test_path_with_double_dot_in_filename_allowed() {
+        // `..` within a filename is fine; only exact `..` segments are rejected.
+        let result = validate_path("/v1/path..name");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_path_trailing_double_dot_rejected() {
+        let result = validate_path("/v1/..");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ProxyError::InvalidPath { .. }));
+        assert!(err.to_string().contains("traversal"));
     }
 }

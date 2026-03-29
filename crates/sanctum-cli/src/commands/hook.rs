@@ -362,6 +362,7 @@ pub fn run(action: &str, verbose: bool) -> Result<(), CliError> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
     use std::io::Read;
 
@@ -386,6 +387,19 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
     // Fail-closed: if a config file exists but cannot be read or parsed,
     // use restrictive defaults instead of silently disabling protections.
     let ai_config = load_ai_firewall_config();
+
+    // Warn when individual protections are disabled in the loaded config.
+    if let Some(ref cfg) = ai_config {
+        if !cfg.claude_hooks {
+            tracing::warn!("claude_hooks is disabled in config");
+        }
+        if !cfg.redact_credentials {
+            tracing::warn!("redact_credentials is disabled in config");
+        }
+        if !cfg.mcp_audit {
+            tracing::warn!("mcp_audit is disabled in config");
+        }
+    }
 
     input.config.clone_from(&ai_config);
     tracing::debug!(config_loaded = ai_config.is_some(), "firewall config");

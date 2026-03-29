@@ -389,8 +389,6 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                         };
                         let uptime = ctx.start_time.elapsed().as_secs();
                         let watchers_active = ctx.watcher.map_or(0, |w| u32::from(w.is_alive()));
-                        #[allow(clippy::cast_possible_truncation)] // quarantine entries are bounded well below u32::MAX
-                        let quarantine_count = ctx.shared_quarantine.lock().await.list().map_or(0, |l| l.len() as u32);
                         let shutdown_tx = ctx.shutdown_tx.clone();
                         let ipc_config = Arc::clone(ctx.shared_config);
                         let ipc_budget = Arc::clone(ctx.shared_budget);
@@ -399,8 +397,12 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
 
                         tokio::spawn(async move {
                             let _permit = permit;
+                            // Compute quarantine count inside the spawned task to
+                            // avoid holding the lock on the main event loop.
+                            #[allow(clippy::cast_possible_truncation)] // quarantine entries are bounded well below u32::MAX
+                            let quarantine_count = ipc_quarantine.lock().await.list().map_or(0, |l| l.len() as u32);
                             match tokio::time::timeout(
-                                Duration::from_secs(30),
+                                Duration::from_secs(5),
                                 handle_ipc_command(
                                     &mut conn,
                                     uptime,
@@ -418,7 +420,7 @@ async fn run_event_loop(ctx: &mut EventLoopContext<'_>) {
                                     tracing::warn!(%e, "IPC handler error");
                                 }
                                 Err(_) => {
-                                    tracing::warn!("IPC connection timed out after 30s");
+                                    tracing::warn!("IPC connection timed out after 5s");
                                 }
                             }
                         });

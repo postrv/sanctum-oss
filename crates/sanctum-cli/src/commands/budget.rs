@@ -43,6 +43,11 @@ pub fn run(action: Option<&BudgetAction>) -> Result<(), CliError> {
             }
         }
         Some(BudgetAction::Set { session, daily }) => {
+            if session.is_none() && daily.is_none() {
+                return Err(CliError::InvalidArgs(
+                    "specify at least one of --session or --daily".into(),
+                ));
+            }
             let session_cents = session.as_deref().map(parse_dollar_amount).transpose()?;
             let daily_cents = daily.as_deref().map(parse_dollar_amount).transpose()?;
             send_and_print(&IpcCommand::BudgetSet {

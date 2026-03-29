@@ -13,6 +13,7 @@
 //! - `sanctum hook`     — Claude Code hook handler (pre-bash, pre-write, etc.)
 //! - `sanctum hooks`    — Install/remove Claude Code hooks
 //! - `sanctum daemon`   — Daemon management (start/stop/restart)
+//! - `sanctum proxy`    -- HTTP budget proxy management (preview)
 //! - `sanctum doctor`   — Diagnose and verify Sanctum installation
 
 use clap::{Parser, Subcommand};
@@ -39,7 +40,7 @@ enum Commands {
         #[arg(long, default_value = ".")]
         dir: String,
         /// Output shell hook for the specified shell (bash, zsh, or fish).
-        #[arg(long)]
+        #[arg(long, value_parser = ["bash", "zsh", "fish"])]
         shell: Option<String>,
     },
     /// Show daemon status.
@@ -50,7 +51,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Approve and restore a quarantined file by ID.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "delete")]
         approve: Option<String>,
         /// Permanently delete a quarantined file by ID.
         #[arg(long)]
@@ -194,7 +195,7 @@ pub enum FixAction {
     /// Batch-remediate all unresolved threats.
     All {
         /// Only process threats of a specific category.
-        #[arg(long)]
+        #[arg(long, value_parser = ["pth", "credential", "mcp", "budget"])]
         category: Option<String>,
     },
 }

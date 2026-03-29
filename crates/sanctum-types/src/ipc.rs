@@ -611,3 +611,56 @@ mod tests {
         assert_eq!(roundtrip.auth_token.unwrap(), "token123");
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod expanded_ipc_tests {
+    use super::*;
+
+    #[test]
+    fn frame_of_exactly_max_message_size_is_accepted() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let payload = vec![b'x'; MAX_MESSAGE_SIZE];
+            let mut buf: Vec<u8> = Vec::new();
+            write_frame(&mut buf, &payload)
+                .await
+                .expect("write_frame should accept payload of exactly MAX_MESSAGE_SIZE");
+            let mut cursor = std::io::Cursor::new(buf);
+            let read_payload = read_frame(&mut cursor)
+                .await
+                .expect("read_frame should accept payload of exactly MAX_MESSAGE_SIZE");
+            assert_eq!(read_payload.len(), MAX_MESSAGE_SIZE);
+        });
+    }
+
+    #[test]
+    fn frame_exceeding_max_message_size_is_rejected() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let payload = vec![b'x'; MAX_MESSAGE_SIZE + 1];
+            let mut buf: Vec<u8> = Vec::new();
+            let result = write_frame(&mut buf, &payload).await;
+            assert!(
+                result.is_err(),
+                "write_frame should reject payload exceeding MAX_MESSAGE_SIZE"
+            );
+            #[allow(clippy::cast_possible_truncation)]
+            let len = (MAX_MESSAGE_SIZE + 1) as u32;
+            let mut frame_data = len.to_be_bytes().to_vec();
+            frame_data.extend(payload);
+            let mut cursor = std::io::Cursor::new(frame_data);
+            let result = read_frame(&mut cursor).await;
+            assert!(
+                result.is_err(),
+                "read_frame should reject payload exceeding MAX_MESSAGE_SIZE"
+            );
+        });
+    }
+}

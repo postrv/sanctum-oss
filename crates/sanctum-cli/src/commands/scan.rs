@@ -210,6 +210,13 @@ fn scan_env_files(dir: &Path, findings: &mut Vec<Finding>) {
             continue;
         }
 
+        // Skip .env files larger than 1MB
+        if let Ok(meta) = fs::metadata(&path) {
+            if meta.len() > 1024 * 1024 {
+                continue;
+            }
+        }
+
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
@@ -285,6 +292,13 @@ fn scan_source_files(dir: &Path, findings: &mut Vec<Finding>) {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if !extensions.contains(ext) {
                 return;
+            }
+
+            // Skip files larger than 2MB to avoid excessive memory use
+            if let Ok(meta) = fs::metadata(path) {
+                if meta.len() > 2 * 1024 * 1024 {
+                    return;
+                }
             }
 
             let Ok(content) = fs::read_to_string(path) else {

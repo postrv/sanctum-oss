@@ -63,7 +63,6 @@ pub fn run() -> Result<(), CliError> {
 ///
 /// All filesystem operations are best-effort — failures are silently handled
 /// with fallback display strings.
-#[allow(clippy::unnecessary_wraps)]
 fn offline_status() -> Result<(), CliError> {
     let paths = WellKnownPaths::default();
 
@@ -103,7 +102,7 @@ fn offline_status() -> Result<(), CliError> {
         println!("  Start with: sanctum daemon start");
     }
 
-    Ok(())
+    Err(CliError::DaemonError("daemon is not running".into()))
 }
 
 #[cfg(test)]
@@ -111,8 +110,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offline_status_returns_ok() {
+    fn offline_status_returns_error() {
         let result = offline_status();
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 }

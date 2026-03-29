@@ -197,7 +197,18 @@ fn is_valid_curl_package_name(name: &str) -> bool {
 /// This is a best-effort check with a short timeout. Returns `CheckFailed`
 /// on any network error rather than panicking. Uses `curl` as a subprocess
 /// because we don't have TLS libraries in our dependency tree.
+#[cfg(test)]
 fn check_package_exists(name: &str, registry: &Registry) -> PackageCheckResult {
+    check_package_exists_with_timeout(name, registry, 5)
+}
+
+/// Check whether a package exists on its registry using a synchronous HTTP
+/// HEAD request via `curl`, with a configurable timeout in seconds.
+fn check_package_exists_with_timeout(
+    name: &str,
+    registry: &Registry,
+    timeout_secs: u64,
+) -> PackageCheckResult {
     // Validate package name before URL construction to prevent injection
     if !is_valid_curl_package_name(name) {
         return PackageCheckResult::CheckFailed(format!("invalid package name: {name}"));
@@ -208,6 +219,7 @@ fn check_package_exists(name: &str, registry: &Registry) -> PackageCheckResult {
         Registry::PyPI => format!("https://pypi.org/pypi/{name}/json"),
     };
 
+    let timeout_str = timeout_secs.to_string();
     let result = std::process::Command::new("curl")
         .args([
             "-s",
@@ -217,7 +229,7 @@ fn check_package_exists(name: &str, registry: &Registry) -> PackageCheckResult {
             "%{http_code}",
             "--head",
             "--max-time",
-            "5",
+            &timeout_str,
             "--connect-timeout",
             "3",
             "--max-redirs",
@@ -391,6 +403,10 @@ const SENSITIVE_READ_FILES: &[&str] = &[
     ".env.production",
     ".env.staging",
     ".env.development",
+    ".env.backup",
+    ".env.bak",
+    ".env.old",
+    ".env.save",
     ".netrc",
     ".pgpass",
     ".npmrc",
@@ -1211,14 +1227,14 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
             if matches_credential_pattern(&normalised, pattern) {
                 return HookOutput::block(format!(
                     "Blocked: reading credential file matching '{pattern}' is not permitted\n\
-                     To proceed: add to credential_allowlist in config.toml"
+                     This path is protected by Sanctum. If this access is intentional, review your security policy."
                 ));
             }
         }
         // Fallback — should not be reached, but required for completeness.
         return HookOutput::block(
             "Blocked: credential file access is not permitted\n\
-             To proceed: add to credential_allowlist in config.toml"
+             This path is protected by Sanctum. If this access is intentional, review your security policy."
                 .to_owned(),
         );
     }
@@ -1279,7 +1295,7 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
                 if matches_credential_pattern(&normalised, pattern) {
                     return HookOutput::block(format!(
                         "Blocked: curl file upload targeting credential file matching '{pattern}'\n\
-                         To proceed: add to credential_allowlist in config.toml"
+                         This path is protected by Sanctum. If this access is intentional, review your security policy."
                     ));
                 }
             }
@@ -1316,6 +1332,16 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
     let is_npm_install = is_npm_install_command(&normalised);
     let is_pip_install = is_pip_install_command(&normalised);
 
+    // Read package existence check config: default to enabled with 5s timeout
+    let check_pkg_existence = input
+        .config
+        .as_ref()
+        .is_none_or(|cfg| cfg.check_package_existence);
+    let pkg_timeout_secs = input.config.as_ref().map_or(5, |cfg| {
+        // Convert ms to seconds, minimum 1 second
+        (cfg.package_check_timeout_ms / 1000).max(1)
+    });
+
     if is_npm_install || is_pip_install {
         let packages = extract_all_packages(command);
         let mut warnings: Vec<String> = Vec::new();
@@ -1326,7 +1352,12 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
                 continue;
             }
 
-            let result = check_package_exists(name, registry);
+            // Skip package existence check if disabled in config
+            if !check_pkg_existence {
+                continue;
+            }
+
+            let result = check_package_exists_with_timeout(name, registry, pkg_timeout_secs);
             match result {
                 PackageCheckResult::Exists => {
                     // Package verified — no action needed (M16: no extra warning)
@@ -1438,7 +1469,7 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
             if matches_d7_path(&normalised_lower, &path_lower) {
                 return HookOutput::block(format!(
                     "Blocked: command references sensitive credential path '{path}'\n\
-                     To proceed: add to credential_allowlist in config.toml"
+                     This path is protected by Sanctum. If this access is intentional, review your security policy."
                 ));
             }
         }
@@ -1611,7 +1642,7 @@ pub fn pre_read(input: &HookInput) -> HookOutput {
         if path_lower.contains(&stripped_lower) {
             return HookOutput::block(format!(
                 "Blocked: reading sensitive path '{file_path}' is not permitted\n\
-                 To proceed: add to credential_allowlist in config.toml"
+                 This path is protected by Sanctum. If this access is intentional, review your security policy."
             ));
         }
         // Also catch relative paths like ".ssh/id_rsa" (no leading /)
@@ -1619,7 +1650,7 @@ pub fn pre_read(input: &HookInput) -> HookOutput {
         if path_lower.starts_with(relative) {
             return HookOutput::block(format!(
                 "Blocked: reading sensitive path '{file_path}' is not permitted\n\
-                 To proceed: add to credential_allowlist in config.toml"
+                 This path is protected by Sanctum. If this access is intentional, review your security policy."
             ));
         }
     }
@@ -1633,7 +1664,7 @@ pub fn pre_read(input: &HookInput) -> HookOutput {
         {
             return HookOutput::block(format!(
                 "Blocked: reading '{file_path}' — credential files may contain secrets\n\
-                 To proceed: add to credential_allowlist in config.toml"
+                 This path is protected by Sanctum. If this access is intentional, review your security policy."
             ));
         }
     }
@@ -5195,8 +5226,8 @@ mod tests {
         assert_eq!(output.decision, HookDecision::Block);
         let msg = output.message.as_deref().unwrap_or("");
         assert!(
-            msg.contains("To proceed:"),
-            "block message should include bypass instruction, got: {msg}"
+            msg.contains("protected by Sanctum"),
+            "block message should include policy instruction, got: {msg}"
         );
 
         // Test echo env var block
@@ -5222,8 +5253,8 @@ mod tests {
         assert_eq!(output4.decision, HookDecision::Block);
         let msg4 = output4.message.as_deref().unwrap_or("");
         assert!(
-            msg4.contains("To proceed:"),
-            "D7 block should include bypass instruction"
+            msg4.contains("protected by Sanctum"),
+            "D7 block should include policy instruction"
         );
 
         // Test pre_read block
@@ -5232,8 +5263,8 @@ mod tests {
         assert_eq!(output5.decision, HookDecision::Block);
         let msg5 = output5.message.as_deref().unwrap_or("");
         assert!(
-            msg5.contains("To proceed:"),
-            "pre_read block should include bypass instruction"
+            msg5.contains("protected by Sanctum"),
+            "pre_read block should include policy instruction"
         );
 
         // Test pre_write block (supply chain)
@@ -5731,5 +5762,159 @@ mod tests {
             "curl args must include --max-redirs"
         );
         assert!(source.contains("\"0\""), "--max-redirs must be set to 0");
+    }
+
+    // ---- Fix 1: pre_read blocks .env.backup/.bak/.old/.save ----
+
+    #[test]
+    fn pre_read_blocks_env_backup() {
+        let input = make_input("read", json!({ "file_path": "/app/.env.backup" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_env_bak() {
+        let input = make_input("read", json!({ "file_path": "/app/.env.bak" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_env_old() {
+        let input = make_input("read", json!({ "file_path": "/app/.env.old" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_blocks_env_save() {
+        let input = make_input("read", json!({ "file_path": "/app/.env.save" }));
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- Fix 3: check_package_existence config wiring ----
+
+    #[test]
+    fn pre_bash_skips_package_check_when_disabled() {
+        let mut input = make_input(
+            "bash",
+            json!({ "command": "npm install totally-nonexistent-pkg-abc123xyz" }),
+        );
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            check_package_existence: false,
+            package_check_timeout_ms: 3000,
+            ..sanctum_types::config::AiFirewallConfig::default()
+        });
+        let output = pre_bash(&input);
+        assert_ne!(
+            output.decision,
+            HookDecision::Block,
+            "package check should be skipped when check_package_existence is false"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod expanded_claude_tests {
+    use super::*;
+    use crate::hooks::protocol::HookDecision;
+    use serde_json::json;
+
+    fn make_test_input(tool_name: &str, tool_input: serde_json::Value) -> HookInput {
+        HookInput {
+            tool_name: tool_name.to_owned(),
+            tool_input,
+            config: None,
+        }
+    }
+
+    #[test]
+    fn pre_write_blocks_tilde_ssh_authorized_keys() {
+        let input = make_test_input(
+            "write",
+            json!({"file_path": "~/.ssh/authorized_keys", "content": "ssh-rsa AAAAB3... user@host"}),
+        );
+        let output = pre_write(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "~/.ssh/authorized_keys should be blocked"
+        );
+    }
+
+    #[test]
+    fn pre_write_blocks_cron_spool_crontab() {
+        let input = make_test_input(
+            "write",
+            json!({"file_path": "/var/spool/cron/crontabs/user", "content": "* * * * * /tmp/evil.sh"}),
+        );
+        let output = pre_write(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "/var/spool/cron/crontabs/user should be blocked"
+        );
+    }
+
+    #[test]
+    fn pre_write_blocks_systemd_user_service_path() {
+        let input = make_test_input(
+            "write",
+            json!({"file_path": "/home/user/.config/systemd/user/evil.service", "content": "[Unit]\nDescription=Evil"}),
+        );
+        let output = pre_write(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "systemd user service should be blocked"
+        );
+    }
+
+    #[test]
+    fn post_bash_allows_with_openai_usage_and_extracts_budget() {
+        let input = make_test_input(
+            "bash",
+            json!({"command": "curl https://api.openai.com/v1/chat/completions", "stdout": "{\"id\":\"chatcmpl-xyz\",\"model\":\"gpt-4o\",\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"total_tokens\":150}}", "stderr": ""}),
+        );
+        let output = post_bash(&input);
+        assert_ne!(
+            output.decision,
+            HookDecision::Block,
+            "post_bash should never block"
+        );
+        if let Some(ref msg) = output.message {
+            assert!(msg.contains("100"), "should mention input tokens");
+            assert!(msg.contains("50"), "should mention output tokens");
+        }
+    }
+
+    #[test]
+    fn post_bash_allows_with_anthropic_usage_and_extracts_budget() {
+        let input = make_test_input(
+            "bash",
+            json!({"command": "curl https://api.anthropic.com/v1/messages", "stdout": "{\"type\":\"message\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":100,\"output_tokens\":50}}", "stderr": ""}),
+        );
+        let output = post_bash(&input);
+        assert_ne!(
+            output.decision,
+            HookDecision::Block,
+            "post_bash should never block"
+        );
+        if let Some(ref msg) = output.message {
+            assert!(msg.contains("100"), "should mention input tokens");
+            assert!(msg.contains("50"), "should mention output tokens");
+        }
+    }
+
+    #[test]
+    fn extract_all_packages_does_not_handle_npx() {
+        let packages = extract_all_packages("npx some-package-name");
+        assert!(
+            packages.is_empty(),
+            "extract_all_packages does not yet handle npx"
+        );
     }
 }

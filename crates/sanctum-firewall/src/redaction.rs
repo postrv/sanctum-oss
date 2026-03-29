@@ -8,12 +8,15 @@
 //! output. Overlapping matches are resolved by preferring the most specific
 //! pattern (patterns are ordered by specificity in [`crate::patterns::PATTERNS`]).
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
+use regex::Regex;
 use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
 
 use crate::entropy::is_high_entropy_secret;
-use crate::patterns::PATTERNS;
+use crate::patterns::{CredentialPattern, PATTERNS};
 
 /// A record of a single credential redaction.
 #[derive(Debug, Clone)]
@@ -37,6 +40,131 @@ struct RawMatch {
     matched_text: String,
 }
 
+/// Default entropy threshold (bits per character).
+pub const DEFAULT_ENTROPY_THRESHOLD: f64 = 5.0;
+
+/// Default minimum length for entropy-based secret detection.
+pub const DEFAULT_ENTROPY_MIN_LENGTH: usize = 20;
+
+// --- Known non-secret format patterns ---
+
+/// Hex-only string of exactly 40 characters (e.g., Git SHA-1).
+static RE_HEX_40: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-fA-F]{40}$").unwrap_or_else(|_| {
+        std::process::abort();
+    }));
+
+/// Hex-only string of exactly 64 characters (e.g., Git SHA-256, file hash).
+static RE_HEX_64: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-fA-F]{64}$").unwrap_or_else(|_| {
+        std::process::abort();
+    }));
+
+/// UUID format (with or without hyphens).
+static RE_UUID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$").unwrap_or_else(|_| {
+        std::process::abort();
+    }));
+
+/// Docker image digest format.
+static RE_DOCKER_DIGEST: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^sha256:[0-9a-fA-F]{64}$").unwrap_or_else(|_| {
+        std::process::abort();
+    }));
+
+/// Base64-like string pattern for decode-and-rescan.
+static RE_BASE64_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9+/]{20,}={0,2}$").unwrap_or_else(|_| {
+        std::process::abort();
+    }));
+
+/// Check whether a string matches a known non-secret format.
+#[must_use]
+pub fn is_known_non_secret_format(s: &str) -> bool {
+    if s.starts_with("data:") {
+        return true;
+    }
+    if RE_DOCKER_DIGEST.is_match(s) {
+        return true;
+    }
+    if RE_HEX_40.is_match(s) {
+        return true;
+    }
+    if RE_HEX_64.is_match(s) {
+        return true;
+    }
+    if RE_UUID.is_match(s) {
+        return true;
+    }
+    false
+}
+
+/// Maximum decoded size for base64 decode-and-rescan (1 MB).
+const MAX_BASE64_DECODED_SIZE: usize = 1_048_576;
+
+/// Maximum recursion depth for base64 decode-and-rescan.
+const MAX_BASE64_DECODE_DEPTH: usize = 2;
+
+/// Attempt to base64-decode a token and scan the decoded content for
+/// credential patterns.
+fn try_base64_decode_and_rescan(
+    token: &str,
+    patterns: &[CredentialPattern],
+    depth: usize,
+) -> Option<RedactionEvent> {
+    if depth >= MAX_BASE64_DECODE_DEPTH {
+        return None;
+    }
+    if !RE_BASE64_TOKEN.is_match(token) {
+        return None;
+    }
+    let estimated_decoded_size = (token.len() * 3) / 4;
+    if estimated_decoded_size > MAX_BASE64_DECODED_SIZE {
+        return None;
+    }
+
+    let decoded_bytes = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(token)
+            .ok()?
+    };
+    if decoded_bytes.len() > MAX_BASE64_DECODED_SIZE {
+        return None;
+    }
+    let decoded = String::from_utf8(decoded_bytes).ok()?;
+
+    for pattern in patterns {
+        if pattern.regex.is_match(&decoded) {
+            let hash = Sha256::digest(token.as_bytes());
+            let full_hex = hex::encode(hash);
+            let hash_prefix = if full_hex.len() >= 4 {
+                full_hex[..4].to_owned()
+            } else {
+                full_hex
+            };
+            return Some(RedactionEvent {
+                credential_type: format!("Base64-Encoded {}", pattern.name),
+                hash_prefix,
+                start: 0,
+                end: 0,
+            });
+        }
+    }
+
+    try_base64_decode_and_rescan(&decoded, patterns, depth + 1)
+}
+
+/// Check whether a value's SHA-256 hash is in the entropy allowlist.
+fn is_allowlisted(allowlist: &HashSet<String>, value: &str) -> bool {
+    if allowlist.is_empty() {
+        return false;
+    }
+    let hash = Sha256::digest(value.as_bytes());
+    let hex_hash = hex::encode(hash);
+    allowlist.contains(&hex_hash)
+}
+
 /// Scan text for credentials and replace them with redaction placeholders.
 ///
 /// Returns a tuple of `(redacted_text, events)` where `redacted_text` has all
@@ -52,6 +180,23 @@ struct RawMatch {
 /// secret values.
 #[must_use]
 pub fn redact_credentials(text: &str) -> (String, Vec<RedactionEvent>) {
+    redact_credentials_with_config(
+        text,
+        DEFAULT_ENTROPY_THRESHOLD,
+        DEFAULT_ENTROPY_MIN_LENGTH,
+        &HashSet::new(),
+    )
+}
+
+/// Scan text for credentials with configurable entropy threshold and allowlist.
+#[must_use]
+#[allow(clippy::implicit_hasher)]
+pub fn redact_credentials_with_config(
+    text: &str,
+    threshold: f64,
+    min_length: usize,
+    entropy_allowlist: &HashSet<String>,
+) -> (String, Vec<RedactionEvent>) {
     // Collect all matches across all patterns.
     let mut raw_matches: Vec<RawMatch> = Vec::new();
 
@@ -124,15 +269,39 @@ pub fn redact_credentials(text: &str) -> (String, Vec<RedactionEvent>) {
         result.push_str(&text[pos..]);
     }
 
+    // Base64 decode-and-rescan pass
+    let mut b64_pass = String::with_capacity(result.len());
+    for token in result.split_inclusive(|c: char| c.is_whitespace()) {
+        let trimmed = token.trim_end();
+        if !trimmed.starts_with("[REDACTED:") {
+            if let Some(evt) = try_base64_decode_and_rescan(trimmed, PATTERNS, 0) {
+                let _ = write!(
+                    b64_pass,
+                    "[REDACTED:{}:{}]",
+                    evt.credential_type, evt.hash_prefix
+                );
+                let trailing = &token[trimmed.len()..];
+                b64_pass.push_str(trailing);
+                events.push(evt);
+                continue;
+            }
+        }
+        b64_pass.push_str(token);
+    }
+
     // Entropy-based fallback: scan for high-entropy tokens that were not caught
     // by any regex pattern. Split on whitespace and check each token, skipping
     // tokens that are already redaction placeholders.
-    let mut entropy_pass = String::with_capacity(result.len());
-    for token in result.split_inclusive(|c: char| c.is_whitespace()) {
+    let mut entropy_pass = String::with_capacity(b64_pass.len());
+    for token in b64_pass.split_inclusive(|c: char| c.is_whitespace()) {
         // split_inclusive keeps the delimiter attached to the token, so strip
         // trailing whitespace for the entropy check but preserve it in output.
         let trimmed = token.trim_end();
-        if !trimmed.starts_with("[REDACTED:") && is_high_entropy_secret(trimmed, 4.5, 20) {
+        if !trimmed.starts_with("[REDACTED:")
+            && !is_known_non_secret_format(trimmed)
+            && !is_allowlisted(entropy_allowlist, trimmed)
+            && is_high_entropy_secret(trimmed, threshold, min_length)
+        {
             let hash = Sha256::digest(trimmed.as_bytes());
             let full_hex = hex::encode(hash);
             let hash_prefix = &full_hex[..4];
@@ -449,8 +618,8 @@ mod tests {
     #[test]
     fn high_entropy_string_redacted_by_fallback() {
         // This string does not match any known credential pattern but is
-        // high-entropy and long enough to be flagged by the entropy fallback.
-        let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
+        // high-entropy (> 5.0 bits/char) and long enough to be flagged by the entropy fallback.
+        let secret = "Kj7mPq2Xz9LwN5vR4Ts8BfCdGhYa6Ue1Wo";
         let input = format!("config: {secret}");
         let (output, events) = redact_credentials(&input);
         assert!(
@@ -479,6 +648,171 @@ mod tests {
         assert_eq!(events.len(), 1);
         // The output should consist solely of the redaction placeholder (no leftover text)
         assert!(output.ends_with(']'));
+    }
+
+
+    // ---- Task 2: Known-format exclusion tests ----
+
+    #[test]
+    fn git_sha1_not_flagged() {
+        let sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let input = format!("commit: {sha1}");
+        let (output, events) = redact_credentials(&input);
+        assert!(output.contains(sha1));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn git_sha256_not_flagged() {
+        let sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let input = format!("hash: {sha256}");
+        let (output, events) = redact_credentials(&input);
+        assert!(output.contains(sha256));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn uuid_with_hyphens_not_flagged() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let input = format!("id: {uuid}");
+        let (output, events) = redact_credentials(&input);
+        assert!(output.contains(uuid));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn uuid_without_hyphens_not_flagged() {
+        let uuid = "550e8400e29b41d4a716446655440000";
+        let input = format!("id: {uuid}");
+        let (output, events) = redact_credentials(&input);
+        assert!(output.contains(uuid));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn data_uri_not_flagged() {
+        let data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg";
+        let input = format!("src: {data_uri}");
+        let (output, _events) = redact_credentials(&input);
+        assert!(output.contains("data:image/png"));
+    }
+
+    #[test]
+    fn docker_digest_not_flagged() {
+        let d = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let input = format!("image: {d}");
+        let (output, events) = redact_credentials(&input);
+        assert!(output.contains(d));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn is_known_non_secret_format_unit_tests() {
+        assert!(is_known_non_secret_format("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
+        assert!(is_known_non_secret_format("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+        assert!(is_known_non_secret_format("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_known_non_secret_format("550e8400e29b41d4a716446655440000"));
+        assert!(is_known_non_secret_format("data:image/png;base64,abc"));
+        assert!(is_known_non_secret_format("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+        assert!(!is_known_non_secret_format("some_random_string_here"));
+        assert!(!is_known_non_secret_format("abcdef"));
+    }
+
+    // ---- Task 3: Base64 decode-and-rescan tests ----
+
+    #[test]
+    fn base64_encoded_aws_key_caught() {
+        use base64::Engine;
+        let aws_key = format!("{}IOSFODNN7EXAMPLE", "AKIA");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&aws_key);
+        let input = format!("token: {encoded}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains(&encoded));
+        assert!(events.iter().any(|e| e.credential_type.contains("AWS")));
+    }
+
+    #[test]
+    fn double_base64_encoded_credential_caught() {
+        use base64::Engine;
+        let aws_key = format!("{}IOSFODNN7EXAMPLE", "AKIA");
+        let single = base64::engine::general_purpose::STANDARD.encode(&aws_key);
+        let double = base64::engine::general_purpose::STANDARD.encode(&single);
+        let input = format!("token: {double}");
+        let (output, events) = redact_credentials(&input);
+        assert!(!output.contains(&double));
+        assert!(events.iter().any(|e| e.credential_type.contains("AWS")));
+    }
+
+    #[test]
+    fn triple_base64_not_caught() {
+        use base64::Engine;
+        let aws_key = format!("{}IOSFODNN7EXAMPLE", "AKIA");
+        let single = base64::engine::general_purpose::STANDARD.encode(&aws_key);
+        let double = base64::engine::general_purpose::STANDARD.encode(&single);
+        let triple = base64::engine::general_purpose::STANDARD.encode(&double);
+        let input = format!("token: {triple}");
+        let (_output, events) = redact_credentials(&input);
+        assert!(!events.iter().any(|e| e.credential_type.contains("AWS")));
+    }
+
+    #[test]
+    fn non_base64_string_ignored() {
+        let input = "normal text without any base64 content";
+        let (output, events) = redact_credentials(input);
+        assert_eq!(output, input);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn normal_base64_not_flagged() {
+        use base64::Engine;
+        let data = "Hello, world! This is just normal text.";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        let input = format!("data: {encoded}");
+        let (_, events) = redact_credentials(&input);
+        assert!(!events.iter().any(|e| e.credential_type.contains("Base64")));
+    }
+
+    // ---- Task 4: Configurable entropy threshold tests ----
+
+    #[test]
+    fn redact_with_config_custom_threshold() {
+        let moderate = "abcdefghijklmnopqrstu";
+        let input = format!("val: {moderate}");
+        let (_output, events) = redact_credentials_with_config(&input, 2.0, 20, &HashSet::new());
+        assert!(events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+    }
+
+    #[test]
+    fn redact_with_config_custom_min_length() {
+        let short = "Kj7mPq2Xz9LwN5vR4T";
+        let input = format!("val: {short}");
+        let (_, events) = redact_credentials_with_config(&input, 3.0, 25, &HashSet::new());
+        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+    }
+
+    // ---- Task 5: Entropy allowlist tests ----
+
+    #[test]
+    fn allowlisted_value_not_flagged() {
+        let secret = "Kj7mPq2Xz9LwN5vR4Ts8BfCdGhYa6Ue1Wo";
+        let hash = Sha256::digest(secret.as_bytes());
+        let hex_hash = hex::encode(hash);
+        let mut allowlist = HashSet::new();
+        allowlist.insert(hex_hash);
+        let input = format!("config: {secret}");
+        let (output, events) = redact_credentials_with_config(&input, 5.0, 20, &allowlist);
+        assert!(output.contains(secret));
+        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+    }
+
+    #[test]
+    fn non_allowlisted_value_still_flagged() {
+        let secret = "Kj7mPq2Xz9LwN5vR4Ts8BfCdGhYa6Ue1Wo";
+        let input = format!("config: {secret}");
+        let (output, events) = redact_credentials_with_config(&input, 5.0, 20, &HashSet::new());
+        assert!(!output.contains(secret));
+        assert!(events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Computes the information entropy of strings to identify potential secrets
 //! that do not match any known credential pattern. High-entropy strings
-//! (typically > 4.5 bits/char) that are mostly alphanumeric are likely
+//! (typically > 5.0 bits/char) that are mostly alphanumeric are likely
 //! randomly-generated secrets.
 
 use std::collections::HashMap;

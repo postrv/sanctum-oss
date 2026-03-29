@@ -133,6 +133,11 @@ enum Commands {
         #[command(subcommand)]
         action: ProxyCliAction,
     },
+    /// Manage entropy-based secret detection.
+    Entropy {
+        #[command(subcommand)]
+        action: EntropyAction,
+    },
     /// Check installation health.
     Doctor,
 }
@@ -231,6 +236,17 @@ enum ProxyCliAction {
 }
 
 #[derive(Subcommand)]
+enum EntropyAction {
+    /// Add a string to the entropy allowlist (stores only its hash).
+    Allow {
+        /// The string value to allowlist.
+        value: String,
+    },
+    /// Review recently flagged high-entropy strings from the audit log.
+    Review,
+}
+
+#[derive(Subcommand)]
 enum DaemonAction {
     /// Start the daemon.
     Start,
@@ -263,6 +279,10 @@ fn main() -> ExitCode {
         Commands::Fix { action, json, yes } => commands::fix::run(action.as_ref(), json, yes),
         Commands::Hook { action, verbose } => commands::hook::run(&action, verbose),
         Commands::Hooks { action } => commands::hooks::run(&action),
+        Commands::Entropy { action } => match action {
+            EntropyAction::Allow { value } => commands::entropy::run_allow(&value),
+            EntropyAction::Review => commands::entropy::run_review(),
+        },
         Commands::Proxy { action } => commands::proxy::run(&action),
         Commands::Daemon { action } => commands::daemon::run(&action),
         Commands::Doctor => commands::doctor::run(),

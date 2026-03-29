@@ -11,10 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **NpmDebouncer bounded capacity**: Pending-path set capped at 10,000 entries to prevent OOM from malicious event floods; callers receive `AtCapacity` signal to trigger immediate drain
 - **Dead code removal**: Removed unused `NpmLifecycleEvent` channel, struct, and handler from daemon (real npm events flow through the file watcher/debouncer path)
 - **Dead code removal**: Removed unused `sanctum_firewall::registry` module (hooks use their own `check_package_exists_with_timeout` in claude.rs)
-- **Documentation freshness**: Updated test counts, LOC counts, and proxy status to reflect actual codebase state
+- **Documentation freshness**: Updated test counts, LOC counts, dependency count (282→295), and proxy status to reflect actual codebase state
 
 ### Fixed
 - **RUSTSEC-2025-0134**: Added `rustls-pemfile` advisory ignore in `deny.toml` (unmaintained, not vulnerable; migration to `rustls-pki-types` tracked separately)
+- SBOM generation: use `--override-filename` and `--top-level` flags
+- Release `verify-ci` job: remove matrix/conditional jobs from required checks
+- Kani CI: reduce proof bound, consolidate per-crate, non-blocking release gate
+- Kani CI timeouts increased (core 30 to 60 min, full 60 to 120 min)
+- Test installer fixed: `sanctum-daemon` has no `--version` flag
+- Stale documentation counts, URLs, and changelog structure corrected
+- CDLA-Permissive-2.0 license allowed for `webpki-roots` v1.0.6
+- LiteLLM attack date and sanctum.dev references corrected
+
+### Security
+- Round 2 adversarial review: 36 fixes across 8 crates, 48 new tests
+- Crash prevention, data durability, and credential detection hardening
+- Internal planning documents removed from repository
 
 ## [0.1.0] - 2026-03-27
 

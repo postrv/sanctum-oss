@@ -154,6 +154,55 @@ pub fn redact_credentials(text: &str) -> (String, Vec<RedactionEvent>) {
     (entropy_pass, events)
 }
 
+/// Attempt to base64-decode `input` and scan the decoded bytes for credentials.
+///
+/// Tries four standard base64 encodings in order:
+/// 1. `STANDARD` (with padding)
+/// 2. `STANDARD_NO_PAD` (standard alphabet, no padding)
+/// 3. `URL_SAFE` (with padding)
+/// 4. `URL_SAFE_NO_PAD`
+///
+/// If any decode succeeds and the decoded text contains credentials,
+/// returns `Some((redacted_text, events))`. Returns `None` if the input
+/// is not valid base64 under any engine, or if the decoded text contains
+/// no credentials.
+#[must_use]
+pub fn try_base64_decode_and_rescan(input: &str) -> Option<(String, Vec<RedactionEvent>)> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+
+    // Try each engine in order. We cannot use a trait-object slice because
+    // `base64::Engine` has generic methods and is not dyn-compatible.
+    if let Some(result) = try_decode_with_engine(&STANDARD, input) {
+        return Some(result);
+    }
+    if let Some(result) = try_decode_with_engine(&STANDARD_NO_PAD, input) {
+        return Some(result);
+    }
+    if let Some(result) = try_decode_with_engine(&URL_SAFE, input) {
+        return Some(result);
+    }
+    if let Some(result) = try_decode_with_engine(&URL_SAFE_NO_PAD, input) {
+        return Some(result);
+    }
+
+    None
+}
+
+/// Attempt to decode `input` with a specific base64 engine and scan for credentials.
+fn try_decode_with_engine<E: base64::Engine>(
+    engine: &E,
+    input: &str,
+) -> Option<(String, Vec<RedactionEvent>)> {
+    let decoded_bytes = engine.decode(input).ok()?;
+    let decoded_str = String::from_utf8(decoded_bytes).ok()?;
+    let (redacted, events) = redact_credentials(&decoded_str);
+    if events.is_empty() {
+        None
+    } else {
+        Some((redacted, events))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +663,94 @@ mod expanded_tests {
         assert!(
             !events.iter().any(|e| e.credential_type == "OpenAI API Key"),
             "should not produce OpenAI API Key event for sk-ed25519 FIDO key"
+        );
+    }
+}
+
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod base64_rescan_tests {
+    use super::*;
+
+    fn make_test_secret() -> String {
+        // Build a credential string at runtime to avoid static detection
+        let prefix = "my key is ";
+        let key_prefix = "sk-";
+        let key_body = "abcdefghijklmnopqrstuvwxyz";
+        format!("{prefix}{key_prefix}{key_body}")
+    }
+
+    #[test]
+    fn detects_credential_in_standard_base64() {
+        use base64::Engine as _;
+        let secret = make_test_secret();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&secret);
+        let result = try_base64_decode_and_rescan(&encoded);
+        assert!(
+            result.is_some(),
+            "should detect credential in standard base64"
+        );
+        let (redacted, events) = result.unwrap();
+        assert!(!events.is_empty());
+        assert!(redacted.contains("[REDACTED:"));
+    }
+
+    #[test]
+    fn detects_credential_in_standard_no_pad_base64() {
+        use base64::Engine as _;
+        let secret = make_test_secret();
+        let encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&secret);
+        assert!(!encoded.ends_with('='), "STANDARD_NO_PAD should not produce padding");
+        let result = try_base64_decode_and_rescan(&encoded);
+        assert!(
+            result.is_some(),
+            "should detect credential in STANDARD_NO_PAD base64"
+        );
+        let (redacted, events) = result.unwrap();
+        assert!(!events.is_empty());
+        assert!(redacted.contains("[REDACTED:"));
+    }
+
+    #[test]
+    fn detects_credential_in_url_safe_base64() {
+        use base64::Engine as _;
+        let secret = make_test_secret();
+        let encoded = base64::engine::general_purpose::URL_SAFE.encode(&secret);
+        let result = try_base64_decode_and_rescan(&encoded);
+        assert!(
+            result.is_some(),
+            "should detect credential in URL_SAFE base64"
+        );
+    }
+
+    #[test]
+    fn detects_credential_in_url_safe_no_pad_base64() {
+        use base64::Engine as _;
+        let secret = make_test_secret();
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&secret);
+        let result = try_base64_decode_and_rescan(&encoded);
+        assert!(
+            result.is_some(),
+            "should detect credential in URL_SAFE_NO_PAD base64"
+        );
+    }
+
+    #[test]
+    fn returns_none_for_non_base64() {
+        let result = try_base64_decode_and_rescan("not valid base64 !!!");
+        assert!(result.is_none(), "non-base64 input should return None");
+    }
+
+    #[test]
+    fn returns_none_for_base64_without_credentials() {
+        use base64::Engine as _;
+        let safe_text = "Hello, this is perfectly normal text.";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(safe_text);
+        let result = try_base64_decode_and_rescan(&encoded);
+        assert!(
+            result.is_none(),
+            "base64 without credentials should return None"
         );
     }
 }

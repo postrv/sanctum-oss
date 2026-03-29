@@ -155,6 +155,12 @@ const BUILTIN_SENSITIVE_FILENAMES: &[&str] = &[
     "/.my.cnf",
     "/.vault-token",
     "/.terraform.d/credentials.tfrc.json",
+    // AI assistant config dotfiles (prompt injection / MCP config poisoning)
+    "/.claude.json",
+    "/.claude/settings.json",
+    "/.cursor/mcp.json",
+    "/.continue/config.json",
+    "/.windsurf/mcp.json",
 ];
 
 /// Check whether a path matches any built-in sensitive restriction.
@@ -1045,6 +1051,48 @@ mod expanded_policy_tests {
     use super::*;
     use sanctum_types::config::McpDefaultPolicy;
     use serde_json::json;
+
+    // ---- AI config dotfile builtin restriction tests ----
+
+    #[test]
+    fn builtin_blocks_claude_json() {
+        assert!(
+            matches_builtin_restriction("/home/user/.claude.json"),
+            "/.claude.json should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_claude_settings_json() {
+        assert!(
+            matches_builtin_restriction("/home/user/.claude/settings.json"),
+            "/.claude/settings.json should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_cursor_mcp_json() {
+        assert!(
+            matches_builtin_restriction("/home/user/.cursor/mcp.json"),
+            "/.cursor/mcp.json should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_continue_config_json() {
+        assert!(
+            matches_builtin_restriction("/home/user/.continue/config.json"),
+            "/.continue/config.json should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_windsurf_mcp_json() {
+        assert!(
+            matches_builtin_restriction("/home/user/.windsurf/mcp.json"),
+            "/.windsurf/mcp.json should be blocked"
+        );
+    }
 
     #[test]
     fn path_traversal_blocked_by_builtin_ssh_restriction() {

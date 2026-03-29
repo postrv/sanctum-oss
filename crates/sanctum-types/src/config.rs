@@ -94,6 +94,10 @@ pub struct NpmConfig {
     #[serde(default = "default_true")]
     pub ignore_scripts_warning: bool,
 
+    /// Block npm install commands that do not include `--ignore-scripts`.
+    #[serde(default)]
+    pub ignore_scripts_required: bool,
+
     /// Packages whose lifecycle scripts should be allowed without alerts.
     #[serde(default = "default_npm_allowlist")]
     pub allowlist: Vec<String>,
@@ -108,6 +112,7 @@ impl Default for NpmConfig {
         Self {
             watch_lifecycle: true,
             ignore_scripts_warning: true,
+            ignore_scripts_required: false,
             allowlist: default_npm_allowlist(),
             project_dirs: Vec::new(),
         }

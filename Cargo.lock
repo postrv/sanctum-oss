@@ -1727,6 +1727,7 @@ dependencies = [
  "proptest",
  "regex",
  "reqwest",
+ "sanctum-sentinel",
  "sanctum-types",
  "serde",
  "serde_json",

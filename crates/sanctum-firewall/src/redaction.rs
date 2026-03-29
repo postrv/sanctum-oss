@@ -154,6 +154,75 @@ pub fn redact_credentials(text: &str) -> (String, Vec<RedactionEvent>) {
     (entropy_pass, events)
 }
 
+/// Like [`redact_credentials`] but skips the entropy-based fallback pass.
+///
+/// This is used when the caller knows the context makes entropy detection
+/// unreliable (e.g., the value is under a key like `sha256`, `digest`, `nonce`,
+/// etc. where high-entropy strings are expected and benign).
+#[must_use]
+pub fn redact_credentials_no_entropy(text: &str) -> (String, Vec<RedactionEvent>) {
+    // Collect all matches across all patterns (same as redact_credentials).
+    let mut raw_matches: Vec<RawMatch> = Vec::new();
+
+    for pattern in PATTERNS {
+        for mat in pattern.regex.find_iter(text) {
+            let matched = mat.as_str();
+            if pattern.name == "OpenAI API Key"
+                && (matched.starts_with("sk-ecdsa-") || matched.starts_with("sk-ed25519-"))
+            {
+                continue;
+            }
+            raw_matches.push(RawMatch {
+                credential_type: pattern.name,
+                start: mat.start(),
+                end: mat.end(),
+                matched_text: matched.to_owned(),
+            });
+        }
+    }
+
+    raw_matches.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+
+    let mut selected: Vec<RawMatch> = Vec::new();
+    let mut last_end: usize = 0;
+
+    for m in raw_matches {
+        if m.start >= last_end {
+            last_end = m.end;
+            selected.push(m);
+        }
+    }
+
+    let mut result = String::with_capacity(text.len());
+    let mut events = Vec::with_capacity(selected.len());
+    let mut pos: usize = 0;
+
+    for m in &selected {
+        if m.start > pos {
+            result.push_str(&text[pos..m.start]);
+        }
+        let hash = Sha256::digest(m.matched_text.as_bytes());
+        let full_hex = hex::encode(hash);
+        let hash_prefix = &full_hex[..4];
+        let _ = write!(result, "[REDACTED:{}:{}]", m.credential_type, hash_prefix);
+        events.push(RedactionEvent {
+            credential_type: m.credential_type.to_owned(),
+            hash_prefix: hash_prefix.to_owned(),
+            start: m.start,
+            end: m.end,
+        });
+        pos = m.end;
+    }
+
+    if pos < text.len() {
+        result.push_str(&text[pos..]);
+    }
+
+    // NOTE: No entropy fallback pass -- that is the whole point of this variant.
+
+    (result, events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

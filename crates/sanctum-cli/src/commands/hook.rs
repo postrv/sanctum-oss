@@ -161,6 +161,7 @@ fn load_npm_config() -> NpmConfig {
         Ok(cfg) => NpmConfig {
             watch_lifecycle: cfg.sentinel.npm.watch_lifecycle,
             ignore_scripts_warning: cfg.sentinel.npm.ignore_scripts_warning,
+            ignore_scripts_required: cfg.sentinel.npm.ignore_scripts_required,
             allowlist: cfg.sentinel.npm.allowlist,
         },
         Err(_) => NpmConfig::default(),
@@ -1022,6 +1023,7 @@ mod tests {
         let npm_config = NpmConfig {
             watch_lifecycle: false,
             ignore_scripts_warning: false,
+            ignore_scripts_required: false,
             allowlist: vec!["react".to_owned()],
         };
         let input = make_input("bash", json!({"command": "ls -la"}));

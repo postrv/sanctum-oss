@@ -216,7 +216,7 @@ Sanctum does **not** require nono. Each tool provides independent value.
 
 ## Architecture
 
-8 crates, ~35,500 lines of Rust:
+8 crates, ~37,000 lines of Rust:
 
 | Crate | Purpose |
 |-------|---------|
@@ -239,7 +239,7 @@ Sanctum is a security tool. It holds itself to a higher standard than the code i
 - No `print!()` / `println!()` / `eprint!()` -- all output goes through structured channels
 
 **Testing**:
-- 1,405 tests (unit, integration, end-to-end)
+- 1,453 tests (unit, integration, end-to-end)
 - 8 Kani bounded model checking proofs (panic-freedom, state machine correctness, overflow safety)
 - 2 fuzz targets on security-critical parsers (CI runs 30s per target on PRs, 2.5h nightly)
 - 9 property-based tests verifying core invariants across random inputs

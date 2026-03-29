@@ -28,7 +28,7 @@ pub fn run(action: &ProxyCliAction) -> Result<(), CliError> {
                 eprintln!("  - Enforce per-session and daily spend budgets");
                 eprintln!("  - Extract token usage from responses for budget tracking");
                 eprintln!();
-                eprintln!("Track progress: https://github.com/sanctum-dev/sanctum/issues/proxy");
+                eprintln!("Track progress: https://github.com/postrv/sanctum/issues");
             }
             Err(CliError::PreviewFeature(
                 "proxy management not yet available".to_string(),
@@ -43,7 +43,7 @@ pub fn run(action: &ProxyCliAction) -> Result<(), CliError> {
                 eprintln!("  - Gracefully shut down the running HTTPS proxy");
                 eprintln!("  - Drain in-flight requests before stopping");
                 eprintln!();
-                eprintln!("Track progress: https://github.com/sanctum-dev/sanctum/issues/proxy");
+                eprintln!("Track progress: https://github.com/postrv/sanctum/issues");
             }
             Err(CliError::PreviewFeature(
                 "proxy management not yet available".to_string(),
@@ -58,7 +58,7 @@ pub fn run(action: &ProxyCliAction) -> Result<(), CliError> {
                 eprintln!("  - Show whether the proxy is running and its listen address");
                 eprintln!("  - Display current budget usage and remaining allowance");
                 eprintln!();
-                eprintln!("Track progress: https://github.com/sanctum-dev/sanctum/issues/proxy");
+                eprintln!("Track progress: https://github.com/postrv/sanctum/issues");
             }
             Err(CliError::PreviewFeature(
                 "proxy management not yet available".to_string(),

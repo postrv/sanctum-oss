@@ -13,6 +13,18 @@ pub enum Provider {
     Anthropic,
     /// Google Generative AI (`generativelanguage.googleapis.com`)
     Google,
+    /// Mistral AI API (`api.mistral.ai`)
+    Mistral,
+    /// Groq API (`api.groq.com`)
+    Groq,
+    /// Cohere API (`api.cohere.com`)
+    Cohere,
+    /// `DeepSeek` API (`api.deepseek.com`)
+    DeepSeek,
+    /// xAI / Grok API (`api.x.ai`)
+    XAi,
+    /// Google Vertex AI (`aiplatform.googleapis.com`)
+    GoogleVertex,
 }
 
 impl Provider {
@@ -23,6 +35,12 @@ impl Provider {
             Self::OpenAi => "api.openai.com",
             Self::Anthropic => "api.anthropic.com",
             Self::Google => "generativelanguage.googleapis.com",
+            Self::Mistral => "api.mistral.ai",
+            Self::Groq => "api.groq.com",
+            Self::Cohere => "api.cohere.com",
+            Self::DeepSeek => "api.deepseek.com",
+            Self::XAi => "api.x.ai",
+            Self::GoogleVertex => "aiplatform.googleapis.com",
         }
     }
 
@@ -33,16 +51,31 @@ impl Provider {
             Self::OpenAi => "OpenAI",
             Self::Anthropic => "Anthropic",
             Self::Google => "Google",
+            Self::Mistral => "Mistral",
+            Self::Groq => "Groq",
+            Self::Cohere => "Cohere",
+            Self::DeepSeek => "DeepSeek",
+            Self::XAi => "xAI",
+            Self::GoogleVertex => "Google Vertex AI",
         }
     }
 
     /// Convert to the budget system's provider type.
+    ///
+    /// Providers without a dedicated budget category are mapped to the
+    /// closest existing one. Additional providers use `OpenAI` as a
+    /// fallback for budget tracking until the budget system is extended.
     #[must_use]
     pub const fn to_budget_provider(&self) -> sanctum_budget::Provider {
         match self {
             Self::OpenAi => sanctum_budget::Provider::OpenAI,
             Self::Anthropic => sanctum_budget::Provider::Anthropic,
-            Self::Google => sanctum_budget::Provider::Google,
+            Self::Google | Self::GoogleVertex => sanctum_budget::Provider::Google,
+            // New providers mapped to OpenAI for budget tracking until
+            // the budget system has dedicated variants.
+            Self::Mistral | Self::Groq | Self::Cohere | Self::DeepSeek | Self::XAi => {
+                sanctum_budget::Provider::OpenAI
+            }
         }
     }
 }
@@ -52,6 +85,12 @@ pub const INTERCEPT_HOSTS: &[&str] = &[
     "api.openai.com",
     "api.anthropic.com",
     "generativelanguage.googleapis.com",
+    "api.mistral.ai",
+    "api.groq.com",
+    "api.cohere.com",
+    "api.deepseek.com",
+    "api.x.ai",
+    "aiplatform.googleapis.com",
 ];
 
 /// Identify an LLM API provider from a hostname.
@@ -64,6 +103,12 @@ pub fn identify_provider(hostname: &str) -> Option<Provider> {
         "api.openai.com" => Some(Provider::OpenAi),
         "api.anthropic.com" => Some(Provider::Anthropic),
         "generativelanguage.googleapis.com" => Some(Provider::Google),
+        "api.mistral.ai" => Some(Provider::Mistral),
+        "api.groq.com" => Some(Provider::Groq),
+        "api.cohere.com" => Some(Provider::Cohere),
+        "api.deepseek.com" => Some(Provider::DeepSeek),
+        "api.x.ai" => Some(Provider::XAi),
+        "aiplatform.googleapis.com" => Some(Provider::GoogleVertex),
         _ => None,
     }
 }
@@ -90,6 +135,24 @@ mod tests {
             identify_provider("generativelanguage.googleapis.com"),
             Some(Provider::Google)
         );
+        assert_eq!(
+            identify_provider("api.mistral.ai"),
+            Some(Provider::Mistral)
+        );
+        assert_eq!(identify_provider("api.groq.com"), Some(Provider::Groq));
+        assert_eq!(
+            identify_provider("api.cohere.com"),
+            Some(Provider::Cohere)
+        );
+        assert_eq!(
+            identify_provider("api.deepseek.com"),
+            Some(Provider::DeepSeek)
+        );
+        assert_eq!(identify_provider("api.x.ai"), Some(Provider::XAi));
+        assert_eq!(
+            identify_provider("aiplatform.googleapis.com"),
+            Some(Provider::GoogleVertex)
+        );
     }
 
     #[test]
@@ -102,6 +165,12 @@ mod tests {
         assert!(should_intercept("api.openai.com"));
         assert!(should_intercept("api.anthropic.com"));
         assert!(should_intercept("generativelanguage.googleapis.com"));
+        assert!(should_intercept("api.mistral.ai"));
+        assert!(should_intercept("api.groq.com"));
+        assert!(should_intercept("api.cohere.com"));
+        assert!(should_intercept("api.deepseek.com"));
+        assert!(should_intercept("api.x.ai"));
+        assert!(should_intercept("aiplatform.googleapis.com"));
     }
 
     #[test]
@@ -113,7 +182,17 @@ mod tests {
 
     #[test]
     fn provider_hostname_roundtrip() {
-        let providers = [Provider::OpenAi, Provider::Anthropic, Provider::Google];
+        let providers = [
+            Provider::OpenAi,
+            Provider::Anthropic,
+            Provider::Google,
+            Provider::Mistral,
+            Provider::Groq,
+            Provider::Cohere,
+            Provider::DeepSeek,
+            Provider::XAi,
+            Provider::GoogleVertex,
+        ];
         for p in providers {
             assert_eq!(
                 identify_provider(p.hostname()),
@@ -125,7 +204,17 @@ mod tests {
 
     #[test]
     fn provider_display_names() {
-        let providers = [Provider::OpenAi, Provider::Anthropic, Provider::Google];
+        let providers = [
+            Provider::OpenAi,
+            Provider::Anthropic,
+            Provider::Google,
+            Provider::Mistral,
+            Provider::Groq,
+            Provider::Cohere,
+            Provider::DeepSeek,
+            Provider::XAi,
+            Provider::GoogleVertex,
+        ];
         for p in providers {
             assert!(!p.display_name().is_empty(), "empty display name for {p:?}");
         }
@@ -145,5 +234,19 @@ mod tests {
             Provider::Google.to_budget_provider(),
             sanctum_budget::Provider::Google
         );
+        assert_eq!(
+            Provider::GoogleVertex.to_budget_provider(),
+            sanctum_budget::Provider::Google
+        );
+    }
+
+    #[test]
+    fn all_intercept_hosts_have_providers() {
+        for host in INTERCEPT_HOSTS {
+            assert!(
+                identify_provider(host).is_some(),
+                "INTERCEPT_HOSTS entry '{host}' has no matching provider"
+            );
+        }
     }
 }

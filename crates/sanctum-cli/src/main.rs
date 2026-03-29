@@ -239,7 +239,8 @@ enum ProxyCliAction {
         #[arg(long, default_value = "9847")]
         port: u16,
     },
-    /// Stop the running proxy.
+    /// Stop the running proxy (not yet implemented).
+    #[command(hide = true)]
     Stop,
     /// Show proxy status.
     Status,

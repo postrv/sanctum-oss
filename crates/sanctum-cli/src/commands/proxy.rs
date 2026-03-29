@@ -7,11 +7,18 @@
 //! - `install-ca`  — Generate and save the CA certificate
 //! - `trust`       — Add the CA to the system trust store
 
-use sanctum_proxy::ca::CertificateAuthority;
+use std::io::Write;
+
+use sanctum_proxy::ca;
 use sanctum_types::errors::CliError;
 use sanctum_types::paths::WellKnownPaths;
 
 use crate::ProxyCliAction;
+
+/// Write informational output to stderr (for non-primary output).
+fn write_info(msg: &str) -> Result<(), CliError> {
+    writeln!(std::io::stderr(), "{msg}").map_err(CliError::Io)
+}
 
 /// Run the proxy command.
 pub fn run(action: &ProxyCliAction) -> Result<(), CliError> {
@@ -27,26 +34,20 @@ pub fn run(action: &ProxyCliAction) -> Result<(), CliError> {
 /// Start the proxy server.
 fn cmd_start(port: u16) -> Result<(), CliError> {
     let paths = WellKnownPaths::require().map_err(CliError::InvalidArgs)?;
-    let key_path = CertificateAuthority::default_key_path(&paths.data_dir);
-    let cert_path = CertificateAuthority::default_cert_path(&paths.data_dir);
+    let key_path = ca::default_key_path(&paths.data_dir);
+    let cert_path = ca::default_cert_path(&paths.data_dir);
 
     // Ensure CA exists.
     if !key_path.exists() || !cert_path.exists() {
-        #[allow(clippy::print_stderr)]
-        {
-            eprintln!("CA certificate not found. Run `sanctum proxy install-ca` first.");
-        }
+        write_info("CA certificate not found. Run `sanctum proxy install-ca` first.")?;
         return Err(CliError::InvalidArgs(
             "CA not installed -- run `sanctum proxy install-ca`".to_string(),
         ));
     }
 
     let addr = format!("127.0.0.1:{port}");
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("Starting proxy on {addr}...");
-        eprintln!("Set HTTPS_PROXY=http://{addr} in your tools to route through Sanctum.");
-    }
+    write_info(&format!("Starting proxy on {addr}..."))?;
+    write_info(&format!("Set HTTPS_PROXY=http://{addr} in your tools to route through Sanctum."))?;
 
     let rt = tokio::runtime::Runtime::new().map_err(CliError::Io)?;
     rt.block_on(async {
@@ -60,7 +61,7 @@ async fn run_proxy_server(
     key_path: &std::path::Path,
     cert_path: &std::path::Path,
 ) -> Result<(), CliError> {
-    let ca = CertificateAuthority::load(key_path, cert_path)
+    let ca = ca::load_ca(cert_path, key_path)
         .map_err(|e| CliError::CommandFailed(format!("failed to load CA: {e}")))?;
 
     let config = sanctum_types::config::SanctumConfig::default();
@@ -87,11 +88,8 @@ async fn run_proxy_server(
 
 /// Stop the running proxy.
 fn cmd_stop() -> Result<(), CliError> {
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("sanctum proxy stop: not yet implemented");
-        eprintln!("To stop the proxy, terminate the `sanctum proxy start` process.");
-    }
+    write_info("sanctum proxy stop: not yet implemented")?;
+    write_info("To stop the proxy, terminate the `sanctum proxy start` process.")?;
     Err(CliError::PreviewFeature(
         "proxy stop not yet implemented".to_string(),
     ))
@@ -100,23 +98,20 @@ fn cmd_stop() -> Result<(), CliError> {
 /// Show proxy status.
 fn cmd_status() -> Result<(), CliError> {
     let paths = WellKnownPaths::require().map_err(CliError::InvalidArgs)?;
-    let key_path = CertificateAuthority::default_key_path(&paths.data_dir);
-    let cert_path = CertificateAuthority::default_cert_path(&paths.data_dir);
+    let key_path = ca::default_key_path(&paths.data_dir);
+    let cert_path = ca::default_cert_path(&paths.data_dir);
 
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("Sanctum Proxy Status");
-        eprintln!("====================");
-        if key_path.exists() && cert_path.exists() {
-            eprintln!("CA certificate: installed");
-            eprintln!("  Key:  {}", key_path.display());
-            eprintln!("  Cert: {}", cert_path.display());
-        } else {
-            eprintln!("CA certificate: not installed");
-            eprintln!("  Run `sanctum proxy install-ca` to generate.");
-        }
-        eprintln!("Default port: {}", sanctum_types::config::DEFAULT_PROXY_PORT);
+    write_info("Sanctum Proxy Status")?;
+    write_info("====================")?;
+    if key_path.exists() && cert_path.exists() {
+        write_info("CA certificate: installed")?;
+        write_info(&format!("  Key:  {}", key_path.display()))?;
+        write_info(&format!("  Cert: {}", cert_path.display()))?;
+    } else {
+        write_info("CA certificate: not installed")?;
+        write_info("  Run `sanctum proxy install-ca` to generate.")?;
     }
+    write_info(&format!("Default port: {}", sanctum_types::config::DEFAULT_PROXY_PORT))?;
 
     Ok(())
 }
@@ -124,27 +119,24 @@ fn cmd_status() -> Result<(), CliError> {
 /// Generate and install the CA certificate.
 fn cmd_install_ca() -> Result<(), CliError> {
     let paths = WellKnownPaths::require().map_err(CliError::InvalidArgs)?;
-    let key_path = CertificateAuthority::default_key_path(&paths.data_dir);
-    let cert_path = CertificateAuthority::default_cert_path(&paths.data_dir);
+    let key_path = ca::default_key_path(&paths.data_dir);
+    let cert_path = ca::default_cert_path(&paths.data_dir);
 
     let config = sanctum_types::config::ProxyConfig::default();
-    let ca = CertificateAuthority::generate(config.ca_validity_days)
+    let ca_identity = ca::generate_ca(config.ca_validity_days)
         .map_err(|e| CliError::CommandFailed(format!("failed to generate CA: {e}")))?;
 
-    ca.save(&key_path, &cert_path)
+    ca::write_ca_files(&ca_identity, &cert_path, &key_path)
         .map_err(|e| CliError::CommandFailed(format!("failed to save CA: {e}")))?;
 
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("CA certificate generated successfully.");
-        eprintln!("  Key:  {}", key_path.display());
-        eprintln!("  Cert: {}", cert_path.display());
-        eprintln!();
-        eprintln!("Next steps:");
-        eprintln!("  1. Trust the CA: `sanctum proxy trust`");
-        eprintln!("  2. Start the proxy: `sanctum proxy start`");
-        eprintln!("  3. Set HTTPS_PROXY=http://127.0.0.1:{} in your tools", config.listen_port);
-    }
+    write_info("CA certificate generated successfully.")?;
+    write_info(&format!("  Key:  {}", key_path.display()))?;
+    write_info(&format!("  Cert: {}", cert_path.display()))?;
+    write_info("")?;
+    write_info("Next steps:")?;
+    write_info("  1. Trust the CA: `sanctum proxy trust`")?;
+    write_info("  2. Start the proxy: `sanctum proxy start`")?;
+    write_info(&format!("  3. Set HTTPS_PROXY=http://127.0.0.1:{} in your tools", config.listen_port))?;
 
     Ok(())
 }
@@ -152,13 +144,10 @@ fn cmd_install_ca() -> Result<(), CliError> {
 /// Add the CA certificate to the system trust store.
 fn cmd_trust() -> Result<(), CliError> {
     let paths = WellKnownPaths::require().map_err(CliError::InvalidArgs)?;
-    let cert_path = CertificateAuthority::default_cert_path(&paths.data_dir);
+    let cert_path = ca::default_cert_path(&paths.data_dir);
 
     if !cert_path.exists() {
-        #[allow(clippy::print_stderr)]
-        {
-            eprintln!("CA certificate not found. Run `sanctum proxy install-ca` first.");
-        }
+        write_info("CA certificate not found. Run `sanctum proxy install-ca` first.")?;
         return Err(CliError::InvalidArgs(
             "CA not installed -- run `sanctum proxy install-ca`".to_string(),
         ));
@@ -182,11 +171,8 @@ fn trust_platform(cert_path: &std::path::Path) -> Result<(), CliError> {
 /// Platform-specific trust store installation.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn trust_platform(cert_path: &std::path::Path) -> Result<(), CliError> {
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("Automatic trust store installation is not supported on this platform.");
-        eprintln!("Manually add {} to your system trust store.", cert_path.display());
-    }
+    write_info("Automatic trust store installation is not supported on this platform.")?;
+    write_info(&format!("Manually add {} to your system trust store.", cert_path.display()))?;
     Err(CliError::PreviewFeature(
         "trust store installation not supported on this platform".to_string(),
     ))
@@ -195,11 +181,8 @@ fn trust_platform(cert_path: &std::path::Path) -> Result<(), CliError> {
 /// Trust the CA on macOS using the security command.
 #[cfg(target_os = "macos")]
 fn trust_macos(cert_path: &std::path::Path) -> Result<(), CliError> {
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("Adding CA to macOS trust store...");
-        eprintln!("This may prompt for your password.");
-    }
+    write_info("Adding CA to macOS trust store...")?;
+    write_info("This may prompt for your password.")?;
 
     let output = std::process::Command::new("security")
         .args([
@@ -213,10 +196,7 @@ fn trust_macos(cert_path: &std::path::Path) -> Result<(), CliError> {
         .map_err(CliError::Io)?;
 
     if output.status.success() {
-        #[allow(clippy::print_stderr)]
-        {
-            eprintln!("CA certificate added to macOS system trust store.");
-        }
+        write_info("CA certificate added to macOS system trust store.")?;
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -231,10 +211,7 @@ fn trust_macos(cert_path: &std::path::Path) -> Result<(), CliError> {
 fn trust_linux(cert_path: &std::path::Path) -> Result<(), CliError> {
     let dest = std::path::Path::new("/usr/local/share/ca-certificates/sanctum-ca.crt");
 
-    #[allow(clippy::print_stderr)]
-    {
-        eprintln!("Copying CA to {} (may require sudo)...", dest.display());
-    }
+    write_info(&format!("Copying CA to {} (may require sudo)...", dest.display()))?;
 
     // Copy the cert to the system CA directory.
     std::fs::copy(cert_path, dest)
@@ -249,10 +226,7 @@ fn trust_linux(cert_path: &std::path::Path) -> Result<(), CliError> {
         .map_err(CliError::Io)?;
 
     if output.status.success() {
-        #[allow(clippy::print_stderr)]
-        {
-            eprintln!("CA certificate added to Linux trust store.");
-        }
+        write_info("CA certificate added to Linux trust store.")?;
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -288,8 +262,8 @@ mod tests {
 
         // Verify CA files were created.
         let paths = WellKnownPaths::require().unwrap();
-        let key_path = CertificateAuthority::default_key_path(&paths.data_dir);
-        let cert_path = CertificateAuthority::default_cert_path(&paths.data_dir);
+        let key_path = ca::default_key_path(&paths.data_dir);
+        let cert_path = ca::default_cert_path(&paths.data_dir);
         assert!(key_path.exists(), "CA key should exist after install-ca");
         assert!(cert_path.exists(), "CA cert should exist after install-ca");
 

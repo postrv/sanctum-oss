@@ -32,7 +32,7 @@ pub mod routing;
 pub mod server;
 pub mod usage;
 
-pub use ca::CertificateAuthority;
+pub use ca::CaIdentity;
 pub use connect::{ConnectAction, ConnectState};
 pub use error::ProxyError;
 pub use handler::{HandlerState, ProxyRequest, ProxyResponse};

@@ -77,6 +77,20 @@ pub enum ProxyError {
         method: String,
     },
 
+    /// Connection to a private/reserved IP was blocked (SSRF prevention).
+    #[error("SSRF blocked: {reason}")]
+    SsrfBlocked {
+        /// Description of why the connection was blocked.
+        reason: String,
+    },
+
+    /// Tunnel timeout expired.
+    #[error("tunnel timed out after {seconds}s")]
+    TunnelTimeout {
+        /// The timeout duration in seconds.
+        seconds: u64,
+    },
+
     /// HTTP client error (e.g., upstream request failed).
     #[error("upstream request failed: {0}")]
     Upstream(String),
@@ -94,9 +108,9 @@ impl ProxyError {
             Self::PayloadTooLarge { .. } => 413,
             Self::BudgetBlocked { .. } => 429,
             Self::ModelNotAllowed { .. } => 403,
-            Self::InvalidPath { .. } => 400,
+            Self::InvalidPath { .. } | Self::SsrfBlocked { .. } => 400,
             Self::MethodNotAllowed { .. } => 405,
-            Self::Upstream(_) => 502,
+            Self::Upstream(_) | Self::TunnelTimeout { .. } => 502,
             Self::Bind { .. }
             | Self::NonLocalhostBind { .. }
             | Self::CaGeneration { .. }

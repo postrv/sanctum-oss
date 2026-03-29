@@ -23,10 +23,11 @@ bytes = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
+chrono = { workspace = true }
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 tokio-rustls = "0.26"
 rustls = "0.23"
-rustls-pemfile = "2"
+dashmap = "6"
 url = "2"
 
 [dev-dependencies]

@@ -94,7 +94,14 @@ impl McpPolicy {
         default_policy: McpDefaultPolicy,
     ) -> HookDecision {
         // Extract any path-like string values from the arguments.
-        let paths = extract_path_values(args);
+        let raw_paths = extract_path_values(args);
+
+        // Normalize paths: collapse `.`, `..` segments and lowercase for
+        // case-insensitive matching (macOS APFS is case-preserving).
+        let paths: Vec<String> = raw_paths
+            .iter()
+            .map(|p| normalize_mcp_path(p))
+            .collect();
 
         // Phase 1: Check built-in sensitive path restrictions.
         // These apply to ALL MCP tools regardless of user rules.
@@ -155,7 +162,33 @@ const BUILTIN_SENSITIVE_FILENAMES: &[&str] = &[
     "/.my.cnf",
     "/.vault-token",
     "/.terraform.d/credentials.tfrc.json",
+    // AI tool configuration files that could be used for prompt injection
+    "/.claude/settings.local.json",
+    "/.claude/commands/",
+    "/.github/copilot-instructions.md",
+    "/.cursor/rules/",
 ];
+
+/// Normalize an MCP tool path argument by collapsing `.`, `..` segments and
+/// lowercasing for case-insensitive matching on macOS APFS.
+fn normalize_mcp_path(path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            ".." => {
+                components.pop();
+            }
+            "." | "" => {}
+            _ => components.push(component),
+        }
+    }
+    let normalized = if path.starts_with('/') {
+        format!("/{}", components.join("/"))
+    } else {
+        components.join("/")
+    };
+    normalized.to_lowercase()
+}
 
 /// Check whether a path matches any built-in sensitive restriction.
 ///
@@ -178,9 +211,15 @@ fn matches_builtin_restriction(path: &str) -> bool {
         }
     }
 
-    // Check exact filename matches (case-insensitive)
+    // Check exact filename matches (case-insensitive).
+    // For entries ending with '/' (directory patterns), use `contains` to match
+    // any file within the directory. For all others, use `ends_with`.
     for name in BUILTIN_SENSITIVE_FILENAMES {
-        if path_lower.ends_with(name) {
+        if name.ends_with('/') {
+            if path_lower.contains(name) {
+                return true;
+            }
+        } else if path_lower.ends_with(name) {
             return true;
         }
     }
@@ -1061,6 +1100,99 @@ mod expanded_policy_tests {
             decision,
             HookDecision::Block,
             "path traversal containing /.ssh/ should be blocked by built-in restriction"
+        );
+    }
+
+    #[test]
+    fn path_normalization_collapses_traversal() {
+        let normalized = normalize_mcp_path("/home/user/project/../../.ssh/id_rsa");
+        assert_eq!(normalized, "/home/.ssh/id_rsa");
+    }
+
+    #[test]
+    fn path_normalization_lowercases() {
+        let normalized = normalize_mcp_path("/home/user/.SSH/id_rsa");
+        assert_eq!(normalized, "/home/user/.ssh/id_rsa");
+    }
+
+    #[test]
+    fn path_normalization_collapses_dot() {
+        let normalized = normalize_mcp_path("/home/user/./project/./../.ssh/id_rsa");
+        assert_eq!(normalized, "/home/user/.ssh/id_rsa");
+    }
+
+    #[test]
+    fn builtin_blocks_claude_settings() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/home/user/.claude/settings.local.json"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".claude/settings.local.json should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_claude_commands() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/home/user/.claude/commands/evil.md"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".claude/commands/ should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_copilot_instructions() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/project/.github/copilot-instructions.md"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".github/copilot-instructions.md should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_cursor_rules() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/project/.cursor/rules/evil.mdc"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".cursor/rules/ should be blocked"
+        );
+    }
+
+    #[test]
+    fn case_insensitive_builtin_blocks_uppercase_ssh() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.SSH/id_rsa"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            "case-insensitive .SSH should be blocked"
         );
     }
 }

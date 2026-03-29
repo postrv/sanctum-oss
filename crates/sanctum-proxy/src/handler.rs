@@ -503,6 +503,9 @@ const fn error_type_str(error: &ProxyError) -> &'static str {
         ProxyError::ModelNotAllowed { .. } => "model_not_allowed",
         ProxyError::InvalidPath { .. } => "invalid_path",
         ProxyError::MethodNotAllowed { .. } => "method_not_allowed",
+        ProxyError::SsrfBlocked { .. } => "ssrf_blocked",
+        ProxyError::ConflictingContentLength => "conflicting_content_length",
+        ProxyError::DnsResolutionFailed { .. } | ProxyError::ConnectFailed { .. } => "connect_error",
         ProxyError::Upstream(_) => "upstream_error",
         _ => "internal_error",
     }

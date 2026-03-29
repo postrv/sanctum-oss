@@ -23,6 +23,7 @@
 //! - Hop-by-hop headers are stripped from forwarded responses
 //! - Body sizes are limited to prevent memory exhaustion
 
+pub mod connect;
 pub mod error;
 pub mod handler;
 pub mod provider;

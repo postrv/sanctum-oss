@@ -77,6 +77,32 @@ pub enum ProxyError {
         method: String,
     },
 
+    /// SSRF blocked: host resolves to a private/reserved address.
+    #[error("SSRF blocked: '{host}' resolves to a private/reserved address")]
+    SsrfBlocked {
+        /// The hostname that resolved to a private IP (the IP itself is NOT
+        /// included to avoid leaking internal DNS topology).
+        host: String,
+    },
+
+    /// DNS resolution failed for the target host.
+    #[error("DNS resolution failed for '{host}'")]
+    DnsResolutionFailed {
+        /// The hostname that could not be resolved.
+        host: String,
+    },
+
+    /// Duplicate Content-Length headers with conflicting values.
+    #[error("conflicting Content-Length headers")]
+    ConflictingContentLength,
+
+    /// Failed to connect to all resolved addresses.
+    #[error("failed to connect to any resolved address for '{host}'")]
+    ConnectFailed {
+        /// The hostname we tried to connect to.
+        host: String,
+    },
+
     /// HTTP client error (e.g., upstream request failed).
     #[error("upstream request failed: {0}")]
     Upstream(String),
@@ -93,10 +119,12 @@ impl ProxyError {
         match self {
             Self::PayloadTooLarge { .. } => 413,
             Self::BudgetBlocked { .. } => 429,
-            Self::ModelNotAllowed { .. } => 403,
-            Self::InvalidPath { .. } => 400,
+            Self::ModelNotAllowed { .. } | Self::SsrfBlocked { .. } => 403,
+            Self::InvalidPath { .. } | Self::ConflictingContentLength => 400,
             Self::MethodNotAllowed { .. } => 405,
-            Self::Upstream(_) => 502,
+            Self::DnsResolutionFailed { .. }
+            | Self::ConnectFailed { .. }
+            | Self::Upstream(_) => 502,
             Self::Bind { .. }
             | Self::NonLocalhostBind { .. }
             | Self::CaGeneration { .. }

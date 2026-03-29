@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 reqwest = { workspace = true }
 bytes = { workspace = true }
 url = "2"
+dashmap = "6"
 
 [dev-dependencies]
 tempfile = { workspace = true }

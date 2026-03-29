@@ -45,6 +45,10 @@ pub enum SentinelError {
     /// Invalid quarantine ID (path traversal or malformed).
     #[error("invalid quarantine ID: {id}: {reason}")]
     InvalidQuarantineId { id: String, reason: String },
+
+    /// Failed to read or parse a package.json file.
+    #[error("failed to read package.json at {path}: {reason}")]
+    NpmPackageRead { path: PathBuf, reason: String },
 }
 
 /// Errors from the daemon.

@@ -38,6 +38,8 @@ pub enum ThreatCategory {
     McpViolation,
     /// LLM spend budget exceeded.
     BudgetOverrun,
+    /// Malicious npm lifecycle script detected (preinstall/postinstall/install).
+    NpmLifecycleAttack,
 }
 
 /// Action taken in response to a detected threat.
@@ -227,5 +229,13 @@ mod tests {
         let roundtripped: ThreatCategory =
             serde_json::from_str(&json).expect("deserialise BudgetOverrun");
         assert_eq!(roundtripped, ThreatCategory::BudgetOverrun);
+
+        // NpmLifecycleAttack
+        let json = serde_json::to_string(&ThreatCategory::NpmLifecycleAttack)
+            .expect("serialise NpmLifecycleAttack");
+        assert_eq!(json, "\"NpmLifecycleAttack\"");
+        let roundtripped: ThreatCategory =
+            serde_json::from_str(&json).expect("deserialise NpmLifecycleAttack");
+        assert_eq!(roundtripped, ThreatCategory::NpmLifecycleAttack);
     }
 }

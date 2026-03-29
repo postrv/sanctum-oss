@@ -7,6 +7,7 @@ pub mod fix;
 pub mod hook;
 pub mod hooks;
 pub mod init;
+pub mod proxy;
 pub mod review;
 pub mod run;
 pub mod scan;

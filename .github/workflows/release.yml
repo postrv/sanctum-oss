@@ -71,6 +71,9 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -85,7 +88,15 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo test --all --all-features
       - run: cargo clippy --all-targets --all-features
-      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Install cross (ARM Linux)
+        if: matrix.use_cross
+        run: cargo install cross --locked
+      - name: Build (native)
+        if: "!matrix.use_cross"
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanctum-${{ matrix.target }}
@@ -104,7 +115,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       - name: Generate SHA256 checksums
         run: |
-          for target in x86_64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
             dir="sanctum-${target}"
             if [ -d "$dir" ]; then
               sha256sum "$dir/sanctum" | sed "s|  ${dir}/sanctum|  sanctum-${target}|" >> SHA256SUMS
@@ -150,7 +161,7 @@ jobs:
           toolchain: 1.94.0
       - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
       - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx@0.5.5
+        run: cargo install cargo-cyclonedx@0.5.7 --locked
       - name: Generate SBOM
         run: cargo cyclonedx --format json --output-file sanctum-sbom.cdx.json
       - name: Sign SBOM
@@ -180,7 +191,7 @@ jobs:
         run: |
           mkdir -p release-assets
           # Flatten binaries and signatures into release-assets/
-          for target in x86_64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
             dir="sanctum-${target}"
             if [ -d "$dir" ]; then
               for file in "$dir"/sanctum "$dir"/sanctum-daemon; do
@@ -193,7 +204,7 @@ jobs:
           done
           # Copy signatures (from the signatures artifact)
           if [ -d "signatures" ]; then
-            for target in x86_64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
               dir="signatures/sanctum-${target}"
               if [ -d "$dir" ]; then
                 for sigfile in "$dir"/*.sig "$dir"/*.cert; do
@@ -221,11 +232,18 @@ jobs:
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.94.0
+      - name: Install git-cliff
+        run: cargo install git-cliff@2.8.0 --locked
+      - name: Generate changelog
+        run: git-cliff --latest --strip header --output RELEASE_NOTES.md
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ steps.version.outputs.version }}" \
             --title "Sanctum ${{ steps.version.outputs.version }}" \
-            --generate-notes \
+            --notes-file RELEASE_NOTES.md \
             release-assets/*

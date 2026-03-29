@@ -56,6 +56,24 @@ pub enum ProxyError {
         provider: String,
     },
 
+    /// Upstream HTTP request failed.
+    #[error("upstream request failed: {reason}")]
+    UpstreamRequest {
+        /// Description of the failure.
+        reason: String,
+    },
+
+    /// Failed to read request body.
+    #[error("failed to read request body: {reason}")]
+    BodyRead {
+        /// Description of the failure.
+        reason: String,
+    },
+
+    /// Hyper HTTP error.
+    #[error("HTTP error: {0}")]
+    Http(#[from] hyper::http::Error),
+
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

@@ -38,6 +38,7 @@ pub enum PthResponse {
 /// Sentinel module configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SentinelConfig {
     /// Whether to watch for `.pth` file modifications.
     pub watch_pth: bool,
@@ -45,6 +46,8 @@ pub struct SentinelConfig {
     pub watch_credentials: bool,
     /// Whether to monitor for network anomalies (opt-in).
     pub watch_network: bool,
+    /// Whether to monitor npm `node_modules` for malicious lifecycle scripts.
+    pub watch_npm: bool,
     /// How to respond to suspicious `.pth` files.
     pub pth_response: PthResponse,
     /// Known-safe `.pth` files by package name and content hash.
@@ -53,6 +56,9 @@ pub struct SentinelConfig {
     pub credential_allowlist: Vec<String>,
     /// Network monitoring configuration.
     pub network: NetworkConfig,
+    /// npm ecosystem monitoring settings.
+    #[serde(default)]
+    pub npm: NpmConfig,
 }
 
 impl Default for SentinelConfig {
@@ -61,12 +67,79 @@ impl Default for SentinelConfig {
             watch_pth: true,
             watch_credentials: true,
             watch_network: false,
+            watch_npm: false,
             pth_response: PthResponse::Quarantine,
             pth_allowlist: Vec::new(),
             credential_allowlist: Vec::new(),
             network: NetworkConfig::default(),
+            npm: NpmConfig::default(),
         }
     }
+}
+
+/// Serde default helper that returns `true`.
+const fn default_true() -> bool {
+    true
+}
+
+/// Configuration for npm ecosystem monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NpmConfig {
+    /// Monitor npm lifecycle scripts during install.
+    #[serde(default = "default_true")]
+    pub watch_lifecycle: bool,
+
+    /// Warn when npm install is used without `--ignore-scripts`.
+    #[serde(default = "default_true")]
+    pub ignore_scripts_warning: bool,
+
+    /// Packages whose lifecycle scripts should be allowed without alerts.
+    #[serde(default = "default_npm_allowlist")]
+    pub allowlist: Vec<String>,
+
+    /// Project directories containing `node_modules` to monitor.
+    #[serde(default)]
+    pub project_dirs: Vec<String>,
+}
+
+impl Default for NpmConfig {
+    fn default() -> Self {
+        Self {
+            watch_lifecycle: true,
+            ignore_scripts_warning: true,
+            allowlist: default_npm_allowlist(),
+            project_dirs: Vec::new(),
+        }
+    }
+}
+
+/// Default allowlist of npm packages whose lifecycle scripts are considered safe.
+#[must_use]
+pub fn default_npm_allowlist() -> Vec<String> {
+    vec![
+        "esbuild".to_owned(),
+        "electron".to_owned(),
+        "sharp".to_owned(),
+        "node-sass".to_owned(),
+        "fsevents".to_owned(),
+        "grpc-tools".to_owned(),
+        "sqlite3".to_owned(),
+        "better-sqlite3".to_owned(),
+        "bcrypt".to_owned(),
+        "canvas".to_owned(),
+        "cpu-features".to_owned(),
+        "sodium-native".to_owned(),
+        "swc".to_owned(),
+        "@swc/core".to_owned(),
+        "puppeteer".to_owned(),
+        "playwright".to_owned(),
+        "turbo".to_owned(),
+        "prisma".to_owned(),
+        "@prisma/client".to_owned(),
+        "@prisma/engines".to_owned(),
+        "protobufjs".to_owned(),
+    ]
 }
 
 /// Deserialise `alert_at_percent`, clamping to a maximum of 100.
@@ -185,6 +258,7 @@ pub struct McpPolicyRuleConfig {
 /// AI Firewall configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct AiFirewallConfig {
     /// Whether to redact credentials from outbound prompts.
     pub redact_credentials: bool,
@@ -192,11 +266,22 @@ pub struct AiFirewallConfig {
     pub claude_hooks: bool,
     /// Whether to audit MCP tool calls.
     pub mcp_audit: bool,
+    /// Enable slopsquatting detection (registry existence check before install).
+    #[serde(default = "default_true")]
+    pub check_package_existence: bool,
+    /// Timeout in milliseconds for package registry lookups (fail-open).
+    #[serde(default = "default_package_check_timeout")]
+    pub package_check_timeout_ms: u64,
     /// MCP tool policy rules. Each rule restricts specific tools from accessing certain paths.
     pub mcp_rules: Vec<McpPolicyRuleConfig>,
     /// Default policy for MCP tools that do not match any explicit rule.
     #[serde(default)]
     pub default_mcp_policy: McpDefaultPolicy,
+}
+
+/// Default timeout for package registry lookups (3 seconds).
+const fn default_package_check_timeout() -> u64 {
+    3000
 }
 
 impl Default for AiFirewallConfig {
@@ -205,6 +290,8 @@ impl Default for AiFirewallConfig {
             redact_credentials: true,
             claude_hooks: true,
             mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: default_package_check_timeout(),
             mcp_rules: Vec::new(),
             default_mcp_policy: McpDefaultPolicy::Allow,
         }
@@ -707,5 +794,54 @@ mod tests {
             config.sentinel.network.poll_interval_secs, 3600,
             "poll_interval_secs above 3600 should be clamped to 3600"
         );
+    }
+
+    #[test]
+    fn npm_config_default() {
+        let npm = NpmConfig::default();
+        assert!(npm.watch_lifecycle);
+        assert!(npm.ignore_scripts_warning);
+        assert!(!npm.allowlist.is_empty());
+        assert!(npm.project_dirs.is_empty());
+    }
+
+    #[test]
+    fn config_without_npm_section_deserializes() {
+        let toml_str = r"
+            [sentinel]
+            watch_pth = true
+        ";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("config without npm should parse");
+        // npm should have defaults when section is absent
+        assert!(config.sentinel.npm.watch_lifecycle);
+    }
+
+    #[test]
+    fn config_with_npm_section_deserializes() {
+        let toml_str = r"
+            [sentinel.npm]
+            watch_lifecycle = false
+            ignore_scripts_warning = true
+        ";
+        let config: SanctumConfig = toml::from_str(toml_str).expect("config with npm should parse");
+        assert!(!config.sentinel.npm.watch_lifecycle);
+        assert!(config.sentinel.npm.ignore_scripts_warning);
+    }
+
+    #[test]
+    fn npm_config_serializes_correctly() {
+        let npm = NpmConfig::default();
+        let toml_str = toml::to_string(&npm).expect("should serialize");
+        assert!(toml_str.contains("watch_lifecycle = true"));
+        assert!(toml_str.contains("ignore_scripts_warning = true"));
+    }
+
+    #[test]
+    fn npm_allowlist_has_expected_packages() {
+        let allowlist = default_npm_allowlist();
+        assert!(allowlist.contains(&"esbuild".to_owned()));
+        assert!(allowlist.contains(&"puppeteer".to_owned()));
+        assert!(allowlist.contains(&"sharp".to_owned()));
     }
 }

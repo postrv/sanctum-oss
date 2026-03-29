@@ -16,10 +16,20 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+criterion = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "credential_redaction"
+harness = false
+
+[[bench]]
+name = "hook_dispatch"
+harness = false

@@ -90,19 +90,23 @@ Note: `notify-rust` is commented out due to upstream zbus/Rust edition incompati
 | `chrono` | 0.4.x | Timestamp handling | RustSec clean. Well-established. |
 | `thiserror` | 2.x | Derive macro for error types | RustSec clean. Zero runtime cost (proc macro only). |
 
-## Proxy foundation: sanctum-proxy
+## HTTP gateway proxy: sanctum-proxy
 
 | Crate | Version | Purpose | Audit notes |
 |---|---|---|---|
 | `sanctum-types` | workspace | Shared IPC/config types | Internal crate. |
 | `sanctum-budget` | workspace | Budget enforcement logic | Internal crate. |
+| `sanctum-firewall` | workspace | Credential redaction for outbound request bodies | Internal crate. |
 | `serde` | 1.x | Serialisation for proxy config | RustSec clean. Ubiquitous. |
-| `serde_json` | 1.x | JSON serialisation for API payloads | RustSec clean. Ubiquitous. |
+| `serde_json` | 1.x | JSON serialisation for API payloads and usage extraction | RustSec clean. Ubiquitous. |
 | `tracing` | 0.1.x | Structured logging | RustSec clean. Tokio project. |
 | `tokio` | 1.x | Async runtime for proxy server | RustSec clean. Industry standard. |
 | `thiserror` | 2.x | Derive macro for error types | RustSec clean. Zero runtime cost. |
-
-Note: This crate currently implements provider identification and config schema only. TLS MITM dependencies (hyper, rustls, rcgen) will be added and audited when the proxy intercept phase begins.
+| `hyper` | 1.6.x | HTTP/1.1 server for accepting local proxy connections | RustSec clean. Tokio project. Industry-standard HTTP implementation. |
+| `hyper-util` | 0.1.x | Connection serving utilities for hyper (server-auto, TokioIo) | RustSec clean. Tokio project companion to hyper. |
+| `http-body-util` | 0.1.x | Body adapters (Full, Empty, BodyExt) for hyper request/response bodies | RustSec clean. Tokio project. Minimal crate. |
+| `reqwest` | 0.12.x | HTTPS client for forwarding requests to upstream LLM API providers | RustSec clean. Uses rustls-tls (no OpenSSL). Well-established HTTP client. |
+| `bytes` | 1.x | Efficient byte buffer for request/response body handling | RustSec clean. Tokio project. Zero-copy buffer primitive. |
 
 ## Dev/test only
 
@@ -112,6 +116,15 @@ Note: This crate currently implements provider identification and config schema 
 | `proptest` | 1.x | Property-based testing | sanctum-types, sanctum-sentinel, sanctum-firewall, sanctum-budget |
 | `assert_cmd` | 2.x | CLI integration testing | sanctum-cli |
 | `predicates` | 3.x | Assertion predicates for CLI output | sanctum-cli |
+
+## CI-only tools (not shipped in binaries)
+
+| Tool | Version | Purpose | Notes |
+|---|---|---|---|
+| `cargo-llvm-cov` | 0.6.x | Code coverage via LLVM instrumentation | Not compiled into any binary |
+| `cargo-cyclonedx` | 0.5.x | CycloneDX SBOM from Cargo.lock | Not compiled into any binary |
+| `git-cliff` | 2.8.x | Changelog from conventional commits | Not compiled into any binary |
+| `criterion` | 0.5.x | Benchmarking (dev-dependency) | Not compiled into release binaries |
 
 ## Banned crates (enforced by cargo-deny)
 

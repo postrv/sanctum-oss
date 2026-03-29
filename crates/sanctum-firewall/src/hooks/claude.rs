@@ -21,6 +21,7 @@ use crate::hooks::protocol::{HookInput, HookOutput};
 use crate::mcp::audit::McpAuditLog;
 use crate::mcp::policy::McpPolicy;
 use crate::redaction::redact_credentials;
+use crate::registry::{self, PackageCheckResult};
 
 /// Check whether a command contains a reference to `$VAR_NAME` with a
 /// word boundary after it (so `$API_KEY` does NOT match `$API_KEY_FILE`).
@@ -190,6 +191,7 @@ const SENSITIVE_ENV_VARS: &[&str] = &[
     "DOCKER_PASSWORD",
     "DOCKER_AUTH_CONFIG",
     "NPM_TOKEN",
+    "NPM_CONFIG_TOKEN",
     "PYPI_TOKEN",
     "CARGO_REGISTRY_TOKEN",
     // Generic
@@ -964,11 +966,81 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
         }
     }
 
-    // Warn on pip install (potential supply chain risk)
-    if command.contains("pip install") || command.contains("pip3 install") {
-        return HookOutput::warn(
-            "Warning: pip install detected — verify package names for typosquatting".to_owned(),
+    // Slopsquatting defence: verify package existence on the registry before install.
+    if let Some((pkg_name, pkg_registry)) = registry::extract_package_name(command) {
+        let check_enabled = input
+            .config
+            .as_ref()
+            .is_none_or(|cfg| cfg.check_package_existence);
+
+        if check_enabled {
+            let timeout_ms = input
+                .config
+                .as_ref()
+                .map_or(3000, |cfg| cfg.package_check_timeout_ms);
+            let timeout = std::time::Duration::from_millis(timeout_ms);
+
+            match registry::check_package_exists(&pkg_name, pkg_registry, timeout) {
+                PackageCheckResult::NotFound => {
+                    return HookOutput::block(format!(
+                        "Package '{}' does not exist on {}. \
+                         This may be an AI hallucination (slopsquatting risk). \
+                         Verify the package name before installing.",
+                        pkg_name,
+                        pkg_registry.name()
+                    ));
+                }
+                PackageCheckResult::CheckFailed(_)
+                | PackageCheckResult::Exists
+                | PackageCheckResult::Disabled => {
+                    // Fail-open: allow install to proceed.
+                }
+            }
+        }
+
+        // Still warn on pip install for general supply chain awareness.
+        if command.contains("pip install") || command.contains("pip3 install") {
+            return HookOutput::warn(
+                "Warning: pip install detected — verify package names and consider pinning versions".to_owned(),
+            );
+        }
+    }
+
+    // Block npm credential-revealing commands
+    if normalised.contains("npm whoami")
+        || normalised.contains("npm token list")
+        || normalised.contains("npm token create")
+    {
+        return HookOutput::block(
+            "Blocked: npm credential command may reveal registry authentication state".to_owned(),
         );
+    }
+
+    // Warn on npm/yarn/pnpm/bun install without --ignore-scripts
+    {
+        let js_install_patterns: &[&str] = &[
+            "npm install",
+            "npm i ",
+            "npm ci",
+            "yarn add",
+            "yarn install",
+            "pnpm add",
+            "pnpm install",
+            "pnpm i ",
+            "bun add",
+            "bun install",
+            "bun i ",
+        ];
+        let is_js_install = js_install_patterns
+            .iter()
+            .any(|pat| normalised.contains(pat));
+        if is_js_install && !normalised.contains("--ignore-scripts") {
+            return HookOutput::warn(
+                "npm install without --ignore-scripts may execute lifecycle hooks from \
+                 untrusted packages. Consider: npm install --ignore-scripts <package>"
+                    .to_owned(),
+            );
+        }
     }
 
     // Warn on curl POST (potential data exfiltration)
@@ -1427,13 +1499,89 @@ fn extract_token_counts(obj: &serde_json::Map<String, serde_json::Value>) -> (u6
     (0, 0)
 }
 
-/// Package manager install commands that may create `.pth` files.
+/// Package manager install commands that may create `.pth` files or execute
+/// lifecycle scripts.
 const INSTALL_COMMANDS: &[&str] = &[
+    // Python
     "pip install",
     "pip3 install",
     "uv pip install",
     "poetry add",
     "pdm add",
+    // JavaScript
+    "npm install",
+    "npm i ",
+    "npm ci",
+    "yarn add",
+    "yarn install",
+    "pnpm add",
+    "pnpm install",
+    "pnpm i ",
+    "bun add",
+    "bun install",
+    "bun i ",
+    "npx ",
+];
+
+/// JavaScript package manager install commands (subset of `INSTALL_COMMANDS`)
+/// used for npm lifecycle script detection in `post_bash`.
+const JS_INSTALL_COMMANDS: &[&str] = &[
+    "npm install",
+    "npm i ",
+    "npm ci",
+    "yarn add",
+    "yarn install",
+    "pnpm add",
+    "pnpm install",
+    "pnpm i ",
+    "bun add",
+    "bun install",
+    "bun i ",
+    "npx ",
+];
+
+/// Indicators in stdout/stderr that an npm lifecycle script executed during install.
+const NPM_LIFECYCLE_INDICATORS: &[&str] = &[
+    "postinstall",
+    "preinstall",
+    "install script",
+    "> node ",
+    "lifecycle script",
+    "node-gyp rebuild",
+    "node-pre-gyp",
+    "prebuild-install",
+];
+
+/// Packages known to legitimately require lifecycle scripts.
+const SAFE_LIFECYCLE_PACKAGES: &[&str] = &[
+    "esbuild",
+    "puppeteer",
+    "node-gyp",
+    "sharp",
+    "canvas",
+    "sqlite3",
+    "bcrypt",
+    "grpc",
+    "fsevents",
+    "electron",
+    "@swc/core",
+    "better-sqlite3",
+    "libsql",
+];
+
+/// Patterns in lifecycle script output that escalate from warn to critical.
+const SUSPICIOUS_LIFECYCLE_CONTENT: &[&str] = &[
+    "base64",
+    "eval(",
+    "child_process",
+    ".unref()",
+    "process.env",
+    "fs.readFile",
+    ".ssh",
+    ".aws",
+    ".npmrc",
+    "curl ",
+    "wget ",
 ];
 
 /// Patterns in command output that suggest a network listener was started.
@@ -1453,14 +1601,17 @@ const LISTENER_PATTERNS: &[&str] = &[
 
 /// Evaluate a post-bash hook.
 ///
-/// Post-hooks are informational only and never block. They warn the user about
-/// potentially suspicious side effects that were observed after a command ran:
+/// Post-hooks warn the user about potentially suspicious side effects that were
+/// observed after a command ran. In extreme cases (npm lifecycle scripts
+/// executing suspicious code) they **block**.
 ///
 /// - **`.pth` files**: If a package-install command produced output mentioning `.pth`.
+/// - **npm lifecycle scripts**: If a JS install produced lifecycle indicators.
 /// - **crontab**: If the command involved `crontab`.
 /// - **systemd services**: If the command created files under `~/.config/systemd/user/`.
 /// - **Network listeners**: If the output mentions binding to a port or starting a server.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn post_bash(input: &HookInput) -> HookOutput {
     if let Some(ref cfg) = input.config {
         if !cfg.claude_hooks {
@@ -1498,6 +1649,39 @@ pub fn post_bash(input: &HookInput) -> HookOutput {
              These files execute arbitrary Python code at startup — verify they are legitimate."
                 .to_owned(),
         );
+    }
+
+    // 1b. Check for npm lifecycle scripts after JS package install commands
+    let lower_command = command.to_lowercase();
+    let is_js_install = JS_INSTALL_COMMANDS
+        .iter()
+        .any(|cmd| lower_command.contains(cmd));
+    if is_js_install {
+        let has_lifecycle = NPM_LIFECYCLE_INDICATORS
+            .iter()
+            .any(|ind| combined_output.contains(ind));
+        if has_lifecycle {
+            let is_safe = SAFE_LIFECYCLE_PACKAGES
+                .iter()
+                .any(|pkg| lower_command.contains(pkg));
+            if !is_safe {
+                let has_suspicious = SUSPICIOUS_LIFECYCLE_CONTENT
+                    .iter()
+                    .any(|s| combined_output.contains(s));
+                if has_suspicious {
+                    return HookOutput::block(
+                        "Critical: npm lifecycle script executed suspicious code during install. \
+                         Review package for supply chain attack indicators."
+                            .to_owned(),
+                    );
+                }
+                warnings.push(
+                    "npm lifecycle script executed during install. \
+                     Consider using --ignore-scripts for untrusted packages."
+                        .to_owned(),
+                );
+            }
+        }
     }
 
     // 2. Check for crontab usage
@@ -4558,5 +4742,246 @@ mod tests {
     #[test]
     fn infer_provider_o4_with_suffix() {
         assert_eq!(infer_provider("o4-mini"), "openai");
+    }
+
+    // ---- npm ecosystem: INSTALL_COMMANDS recognition ----
+
+    #[test]
+    fn post_bash_recognizes_npm_install() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "npm install some-package",
+                "stdout": "added 1 package\nsetuptools.pth",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output.message.as_deref().unwrap_or("").contains(".pth"));
+    }
+
+    #[test]
+    fn post_bash_recognizes_yarn_add() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "yarn add some-package",
+                "stdout": "added 1 package\nsetuptools.pth",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output.message.as_deref().unwrap_or("").contains(".pth"));
+    }
+
+    #[test]
+    fn post_bash_recognizes_pnpm_install() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "pnpm install",
+                "stdout": "Lockfile is up to date\nsetuptools.pth",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output.message.as_deref().unwrap_or("").contains(".pth"));
+    }
+
+    #[test]
+    fn post_bash_recognizes_bun_add() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "bun add some-package",
+                "stdout": "installed some-package\nsetuptools.pth",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output.message.as_deref().unwrap_or("").contains(".pth"));
+    }
+
+    // ---- npm ecosystem: lifecycle script detection ----
+
+    #[test]
+    fn post_bash_warns_npm_lifecycle_unknown_package() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "npm install evil-package",
+                "stdout": "postinstall: running setup script",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("lifecycle script"));
+    }
+
+    #[test]
+    fn post_bash_allows_safe_lifecycle_package() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "npm install esbuild",
+                "stdout": "postinstall: downloading binary",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        // esbuild is in SAFE_LIFECYCLE_PACKAGES — no lifecycle warning
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(
+            !msg.contains("lifecycle script"),
+            "safe lifecycle package should not produce lifecycle warning, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn post_bash_blocks_suspicious_lifecycle_eval() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "npm install malicious-pkg",
+                "stdout": "postinstall: eval(Buffer.from('...'))",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("suspicious code"));
+    }
+
+    #[test]
+    fn post_bash_blocks_suspicious_lifecycle_child_process() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "npm install malicious-pkg",
+                "stdout": "preinstall: require('child_process').exec('...')",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("suspicious code"));
+    }
+
+    #[test]
+    fn post_bash_blocks_suspicious_lifecycle_unref() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "npm install malicious-pkg",
+                "stdout": "postinstall: spawned.unref()",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn post_bash_allows_npm_install_no_lifecycle() {
+        let input = make_input(
+            "bash",
+            json!({
+                "command": "npm install lodash",
+                "stdout": "added 1 package in 0.5s",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- npm ecosystem: --ignore-scripts warning ----
+
+    #[test]
+    fn pre_bash_warns_npm_install_without_ignore_scripts() {
+        let output = pre_bash(&bash_input("npm install some-package"));
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("--ignore-scripts"));
+    }
+
+    #[test]
+    fn pre_bash_no_ignore_scripts_warning_when_flag_present() {
+        let output = pre_bash(&bash_input("npm install --ignore-scripts some-package"));
+        // Should not produce the --ignore-scripts warning (Allow, or a different
+        // warn from another check — but NOT the ignore-scripts one)
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(
+            !msg.contains("--ignore-scripts"),
+            "should not warn about --ignore-scripts when flag is present, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn pre_bash_warns_yarn_add_without_ignore_scripts() {
+        let output = pre_bash(&bash_input("yarn add some-package"));
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("--ignore-scripts"));
+    }
+
+    #[test]
+    fn pre_bash_warns_pnpm_add_without_ignore_scripts() {
+        let output = pre_bash(&bash_input("pnpm add some-package"));
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("--ignore-scripts"));
+    }
+
+    // ---- npm ecosystem: credential commands ----
+
+    #[test]
+    fn pre_bash_blocks_npm_whoami() {
+        let output = pre_bash(&bash_input("npm whoami"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_npm_token_list() {
+        let output = pre_bash(&bash_input("npm token list"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_blocks_echo_npm_config_token() {
+        let output = pre_bash(&bash_input("echo $NPM_CONFIG_TOKEN"));
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_bash_allows_npm_version() {
+        let output = pre_bash(&bash_input("npm --version"));
+        assert_eq!(output.decision, HookDecision::Allow);
     }
 }

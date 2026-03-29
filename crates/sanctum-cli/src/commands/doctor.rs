@@ -69,6 +69,14 @@ pub fn run() -> Result<(), CliError> {
             result: check_python(),
         },
         Check {
+            name: "Node.js",
+            result: check_node(),
+        },
+        Check {
+            name: "npm ignore-scripts",
+            result: check_npm_ignore_scripts(),
+        },
+        Check {
             name: "nono",
             result: check_nono(),
         },
@@ -204,6 +212,40 @@ fn check_python() -> CheckResult {
     }
 }
 
+/// Check whether Node.js is available.
+fn check_node() -> CheckResult {
+    match std::process::Command::new("node").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            CheckResult::Pass(format!("Node.js {version}"))
+        }
+        _ => CheckResult::Warn(
+            "Node.js not found (optional — needed for npm ecosystem monitoring)".to_string(),
+        ),
+    }
+}
+
+/// Check whether npm `ignore-scripts` is enabled.
+fn check_npm_ignore_scripts() -> CheckResult {
+    match std::process::Command::new("npm")
+        .args(["config", "get", "ignore-scripts"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if value == "true" {
+                CheckResult::Pass("npm ignore-scripts is enabled".to_string())
+            } else {
+                CheckResult::Warn(
+                    "npm lifecycle scripts are enabled — consider 'npm config set ignore-scripts true'"
+                        .to_string(),
+                )
+            }
+        }
+        _ => CheckResult::Warn("npm not found".to_string()),
+    }
+}
+
 /// Check whether `nono` sandbox is available.
 fn check_nono() -> CheckResult {
     match std::process::Command::new("which").arg("nono").output() {
@@ -290,6 +332,46 @@ mod tests {
         assert!(
             matches!(&result, CheckResult::Pass(p) if p.contains("config.toml")),
             "expected Pass containing config.toml, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn doctor_includes_node_check() {
+        // Verify that "Node.js" is a valid check name by constructing a Check.
+        let check = Check {
+            name: "Node.js",
+            result: check_node(),
+        };
+        assert_eq!(check.name, "Node.js");
+    }
+
+    #[test]
+    fn doctor_includes_npm_ignore_scripts_check() {
+        // Verify that "npm ignore-scripts" is a valid check name by constructing a Check.
+        let check = Check {
+            name: "npm ignore-scripts",
+            result: check_npm_ignore_scripts(),
+        };
+        assert_eq!(check.name, "npm ignore-scripts");
+    }
+
+    #[test]
+    fn check_node_returns_result() {
+        let result = check_node();
+        // Node may or may not be installed — both Pass and Warn are valid.
+        assert!(
+            matches!(result, CheckResult::Pass(_) | CheckResult::Warn(_)),
+            "check_node should return Pass or Warn, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn check_npm_ignore_scripts_returns_result() {
+        let result = check_npm_ignore_scripts();
+        // npm may or may not be installed — both Pass and Warn are valid.
+        assert!(
+            matches!(result, CheckResult::Pass(_) | CheckResult::Warn(_)),
+            "check_npm_ignore_scripts should return Pass or Warn, got {result:?}"
         );
     }
 

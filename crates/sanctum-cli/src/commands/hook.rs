@@ -30,6 +30,8 @@ const fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
         // Fail-closed: when config parsing fails, block unmatched MCP tools
         // rather than silently allowing them.
         default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+        check_package_existence: true,
+        package_check_timeout_ms: 3000,
     }
 }
 
@@ -755,6 +757,7 @@ mod tests {
             mcp_audit: true,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.claude_hooks);
@@ -768,6 +771,7 @@ mod tests {
             mcp_audit: true,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.redact_credentials);
@@ -781,6 +785,7 @@ mod tests {
             mcp_audit: false,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // mcp_audit is enforced by the floor, so it is forced to true.
@@ -797,6 +802,7 @@ mod tests {
             mcp_audit: true,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // Local config cannot weaken MCP policy to Allow — forced to Deny
@@ -814,6 +820,7 @@ mod tests {
             mcp_audit: true,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Warn,
+            ..AiFirewallConfig::default()
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // Warn is acceptable — not weakened

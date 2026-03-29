@@ -73,6 +73,25 @@ jobs:
         env:
           PROPTEST_CASES: 10000
 
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.94.0
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov@0.6.16 --locked
+      - name: Generate coverage
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-report
+          path: lcov.info
+
   audit:
     runs-on: ubuntu-latest
     permissions:
@@ -168,8 +187,9 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          # aarch64-unknown-linux-gnu removed: cross-compilation requires `cross` or a
-          # linker toolchain (gcc-aarch64-linux-gnu). Re-add when cross setup is in place.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -182,13 +202,48 @@ jobs:
           toolchain: 1.94.0
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
-      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Install cross (ARM Linux)
+        if: matrix.use_cross
+        run: cargo install cross --locked
+      - name: Build (native)
+        if: "!matrix.use_cross"
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sanctum-${{ matrix.target }}
           path: |
             target/${{ matrix.target }}/release/sanctum
             target/${{ matrix.target }}/release/sanctum-daemon
+
+  test-installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [build-release]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sanctum-x86_64-unknown-linux-gnu
+          path: /tmp/sanctum-release
+      - name: Prepare mock release structure
+        run: |
+          chmod +x /tmp/sanctum-release/sanctum /tmp/sanctum-release/sanctum-daemon
+          /tmp/sanctum-release/sanctum --version
+          /tmp/sanctum-release/sanctum-daemon --version
+
+  bench-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - run: cargo bench --workspace --no-run
 
   # Binary signing is handled by .github/workflows/release.yml (tag-triggered).
   # It uses keyless Sigstore OIDC signing — no COSIGN_KEY secret needed.

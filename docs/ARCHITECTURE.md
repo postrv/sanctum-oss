@@ -240,3 +240,30 @@ Separately, `redact_credentials` gates credential scanning in `pre_write` but `p
 - Removing them would waste existing work (notify display strings, resolution actions) and create unnecessary churn when they're re-added later.
 - Keeping them as dead code erodes trust in the type system and creates confusion about what the audit log records.
 - Credential scanning should always be on (defense-in-depth). The config hardening that forces `redact_credentials = true` already signals this is the intended posture. Removing the gate eliminates the asymmetry between `pre_bash` (always scans) and `pre_write` (conditionally scans).
+
+### ADR-021: npm lifecycle hook detection strategy
+
+**Context**: npm lifecycle scripts (`preinstall`, `postinstall`) are the primary attack vector for JavaScript supply chain compromises. The Shai-Hulud worm used `postinstall` to spawn detached credential-harvesting processes. Sanctum needs to detect these attacks for AI-tool-initiated installs.
+
+**Decision**: Detect npm lifecycle script execution through `post_bash` output analysis, not filesystem monitoring. Filesystem-level `node_modules` monitoring is deferred to Phase 3.
+
+**Rationale**:
+- Hook-based detection covers AI-tool-initiated installs immediately with no new infrastructure
+- `post_bash` already analyses command output for `.pth` creation; adding lifecycle script detection is a natural extension
+- Filesystem monitoring of `node_modules` requires solving debouncing (a single `npm install` generates thousands of events), allowlist management by version, and `package.json` parsing -- significant engineering that should not block initial npm coverage
+- The two approaches are complementary: hooks catch AI-tool installs (Phase 1), filesystem monitoring catches direct terminal installs (Phase 3)
+
+**Consequences**: Detection is limited to commands visible through Claude Code hooks. Direct terminal `npm install` commands, CI/CD installs, and IDE-integrated package manager invocations are not caught until Phase 3 filesystem monitoring is implemented.
+
+### ADR-022: INSTALL_COMMANDS expansion and allowlist design
+
+**Context**: The `INSTALL_COMMANDS` constant (in `sanctum-firewall/src/hooks/claude.rs`) originally covered only Python package managers. Extending Sanctum to the npm ecosystem requires recognising npm, yarn, pnpm, and bun install commands. When lifecycle scripts are detected during these installs, the system must distinguish legitimate lifecycle usage (native addon compilation, binary downloads) from malicious usage (credential harvesting, C2 beaconing).
+
+**Decision**: Extend `INSTALL_COMMANDS` to cover `npm install`, `npm i`, `npm ci`, `yarn add`, `yarn install`, `pnpm add`, `pnpm install`, `pnpm i`, `bun add`, `bun install`, `bun i`, and `npx`. Use an allowlist of known-safe lifecycle packages (esbuild, puppeteer, sharp, node-gyp, canvas, sqlite3, bcrypt, grpc, fsevents, electron) rather than a blocklist of known-malicious packages.
+
+**Rationale**:
+- An allowlist is the safer design for a security tool: unknown packages trigger warnings, and only verified-safe packages are exempted. A blocklist would miss newly published attack packages (which is the common case -- attackers create new packages, not reuse known-bad ones)
+- The allowlist is intentionally short. Most npm packages do not need lifecycle scripts. The few that do are well-known native addon packages with established trust
+- Allowlist maintenance is a lower burden than blocklist maintenance: new safe packages are added infrequently and upon user report, while new malicious packages appear continuously
+
+**Consequences**: Users may see warnings for legitimate packages not yet on the allowlist. This is the intended trade-off -- false positives on unknown lifecycle packages are preferable to false negatives on malicious ones. Users can report legitimate packages for inclusion in the allowlist.

@@ -55,7 +55,7 @@ fn full_init(dir: &str) -> Result<(), CliError> {
     let config_path = config_dir.join("config.toml");
 
     // Create config if it doesn't exist
-    let config_created = create_config(&config_dir, &config_path)?;
+    let config_created = create_config(dir, &config_dir, &config_path)?;
 
     #[allow(clippy::print_stdout)]
     {
@@ -72,6 +72,7 @@ fn full_init(dir: &str) -> Result<(), CliError> {
 
     // Detect environment
     detect_python();
+    detect_npm(dir);
     detect_nono();
     detect_claude_code();
 
@@ -87,9 +88,27 @@ fn full_init(dir: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Detect whether the given directory is an npm/Node.js project.
+///
+/// Returns `true` if any common Node.js project indicator file exists.
+fn detect_npm_project(project_dir: &Path) -> bool {
+    let indicators = [
+        "package.json",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lockb",
+    ];
+    indicators.iter().any(|f| project_dir.join(f).exists())
+}
+
 /// Create the `.sanctum/config.toml` file if it doesn't exist.
 /// Returns `true` if the config was created, `false` if it already existed.
-fn create_config(config_dir: &Path, config_path: &Path) -> Result<bool, CliError> {
+fn create_config(
+    project_dir: &Path,
+    config_dir: &Path,
+    config_path: &Path,
+) -> Result<bool, CliError> {
     if config_path.exists() {
         return Ok(false);
     }
@@ -108,7 +127,8 @@ fn create_config(config_dir: &Path, config_path: &Path) -> Result<bool, CliError
         fs::create_dir_all(config_dir)?;
     }
 
-    let default_config = r#"# Sanctum configuration
+    let mut default_config = String::from(
+        r#"# Sanctum configuration
 # https://sanctum.dev/docs/config
 
 config_version = 1
@@ -128,7 +148,18 @@ mcp_audit = true
 # default_session = "$50"
 # default_daily = "$200"
 alert_at_percent = 75
-"#;
+"#,
+    );
+
+    if detect_npm_project(project_dir) {
+        default_config.push_str(
+            r"
+[sentinel.npm]
+watch_lifecycle = true
+ignore_scripts_warning = true
+",
+        );
+    }
 
     // Atomic write: write to temp file, sync, then rename into place
     let tmp_path = config_path.with_extension("tmp");
@@ -174,6 +205,19 @@ fn detect_python() {
             _ => {
                 println!("Python: not found (python3 not in PATH)");
             }
+        }
+        println!();
+    }
+}
+
+/// Detect npm/Node.js project and display status.
+fn detect_npm(dir: &Path) {
+    #[allow(clippy::print_stdout)]
+    {
+        if detect_npm_project(dir) {
+            println!("Node.js/npm: project detected (npm ecosystem monitoring enabled)");
+        } else {
+            println!("Node.js/npm: no project indicators found");
         }
         println!();
     }
@@ -427,7 +471,8 @@ mod tests {
         let config_dir = dir.path().join(".sanctum");
         let config_path = config_dir.join("config.toml");
 
-        let created = create_config(&config_dir, &config_path).expect("should create config");
+        let created =
+            create_config(dir.path(), &config_dir, &config_path).expect("should create config");
         assert!(created);
         assert!(config_path.exists());
 
@@ -444,13 +489,13 @@ mod tests {
         let config_path = config_dir.join("config.toml");
 
         // Create first
-        let _ = create_config(&config_dir, &config_path);
+        let _ = create_config(dir.path(), &config_dir, &config_path);
 
         // Write custom content
         fs::write(&config_path, "custom content").expect("should write custom");
 
         // Should not overwrite
-        let created = create_config(&config_dir, &config_path).expect("should succeed");
+        let created = create_config(dir.path(), &config_dir, &config_path).expect("should succeed");
         assert!(!created);
 
         let content = fs::read_to_string(&config_path).expect("should read");
@@ -472,5 +517,60 @@ mod tests {
 
         let count = count_credential_issues(dir.path());
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn detect_npm_project_with_package_json() {
+        let dir = tempfile::tempdir().expect("should create tempdir");
+        fs::write(dir.path().join("package.json"), "{}").expect("should write");
+        assert!(detect_npm_project(dir.path()));
+    }
+
+    #[test]
+    fn detect_npm_project_with_yarn_lock() {
+        let dir = tempfile::tempdir().expect("should create tempdir");
+        fs::write(dir.path().join("yarn.lock"), "").expect("should write");
+        assert!(detect_npm_project(dir.path()));
+    }
+
+    #[test]
+    fn detect_npm_project_without_indicators() {
+        let dir = tempfile::tempdir().expect("should create tempdir");
+        assert!(!detect_npm_project(dir.path()));
+    }
+
+    #[test]
+    fn init_generates_npm_config_when_detected() {
+        let dir = tempfile::tempdir().expect("should create tempdir");
+        // Create a package.json to trigger npm detection
+        fs::write(dir.path().join("package.json"), "{}").expect("should write package.json");
+
+        let config_dir = dir.path().join(".sanctum");
+        let config_path = config_dir.join("config.toml");
+
+        let created =
+            create_config(dir.path(), &config_dir, &config_path).expect("should create config");
+        assert!(created);
+
+        let content = fs::read_to_string(&config_path).expect("should read config");
+        assert!(content.contains("[sentinel.npm]"));
+        assert!(content.contains("watch_lifecycle = true"));
+        assert!(content.contains("ignore_scripts_warning = true"));
+    }
+
+    #[test]
+    fn init_omits_npm_config_when_not_detected() {
+        let dir = tempfile::tempdir().expect("should create tempdir");
+        // No npm indicators
+
+        let config_dir = dir.path().join(".sanctum");
+        let config_path = config_dir.join("config.toml");
+
+        let created =
+            create_config(dir.path(), &config_dir, &config_path).expect("should create config");
+        assert!(created);
+
+        let content = fs::read_to_string(&config_path).expect("should read config");
+        assert!(!content.contains("[sentinel.npm]"));
     }
 }

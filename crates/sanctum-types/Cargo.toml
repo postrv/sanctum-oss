@@ -25,3 +25,8 @@ nix = { version = "0.29", features = ["fs"] }
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "config_parse"
+harness = false

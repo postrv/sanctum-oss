@@ -110,6 +110,9 @@ const fn category_display(event: &ThreatEvent) -> &'static str {
         sanctum_types::threat::ThreatCategory::NetworkAnomaly => "Network anomaly detected",
         sanctum_types::threat::ThreatCategory::McpViolation => "MCP tool policy violation",
         sanctum_types::threat::ThreatCategory::BudgetOverrun => "LLM budget exceeded",
+        sanctum_types::threat::ThreatCategory::NpmLifecycleAttack => {
+            "Malicious npm lifecycle script"
+        }
     }
 }
 
@@ -289,6 +292,9 @@ mod tests {
             ThreatCategory::SiteCustomize,
             ThreatCategory::CredentialAccess,
             ThreatCategory::NetworkAnomaly,
+            ThreatCategory::McpViolation,
+            ThreatCategory::BudgetOverrun,
+            ThreatCategory::NpmLifecycleAttack,
         ];
         for cat in &categories {
             let event = make_event(ThreatLevel::Info, *cat, "test", "/tmp/test");
@@ -307,6 +313,9 @@ mod tests {
             ThreatCategory::SiteCustomize,
             ThreatCategory::CredentialAccess,
             ThreatCategory::NetworkAnomaly,
+            ThreatCategory::McpViolation,
+            ThreatCategory::BudgetOverrun,
+            ThreatCategory::NpmLifecycleAttack,
         ];
         let displays: Vec<&str> = categories
             .iter()
@@ -405,6 +414,9 @@ mod tests {
             ThreatCategory::SiteCustomize,
             ThreatCategory::CredentialAccess,
             ThreatCategory::NetworkAnomaly,
+            ThreatCategory::McpViolation,
+            ThreatCategory::BudgetOverrun,
+            ThreatCategory::NpmLifecycleAttack,
         ];
         let actions = [
             Action::Logged,

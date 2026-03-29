@@ -108,7 +108,10 @@ pub struct WarningLine {
 /// Keywords that indicate executable code in a `.pth` line.
 /// Presence of any of these in a line that also has executable
 /// markers (exec, eval, etc.) raises the level to Critical.
-const CRITICAL_KEYWORDS: &[&str] = &[
+///
+/// Also used by the `sitecustomize.py` / `usercustomize.py` scanner
+/// in the daemon event handler.
+pub const CRITICAL_KEYWORDS: &[&str] = &[
     "exec(",
     "eval(",
     "base64",

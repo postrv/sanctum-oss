@@ -6,7 +6,7 @@
 
 use sanctum_types::errors::SentinelError;
 
-/// Known package manager process names.
+/// Known package manager process names (Python ecosystem).
 const KNOWN_PACKAGE_MANAGERS: &[&str] = &[
     "pip",
     "pip3",
@@ -22,11 +22,17 @@ const KNOWN_PACKAGE_MANAGERS: &[&str] = &[
     "micromamba",
     "hatch",
     "flit",
+    // npm ecosystem managers
+    "npm",
+    "node",
+    "yarn",
+    "pnpm",
+    "bun",
 ];
 
 /// Check if a process name is a known package manager.
 #[must_use]
-pub(crate) fn is_known_package_manager(name: &str) -> bool {
+pub fn is_known_package_manager(name: &str) -> bool {
     KNOWN_PACKAGE_MANAGERS.contains(&name)
 }
 
@@ -114,6 +120,15 @@ impl ProcessLineage {
     #[must_use]
     pub(crate) fn has_ancestor_named(&self, name: &str) -> bool {
         self.chain.iter().any(|p| p.name == name)
+    }
+
+    /// Check if any process in the lineage chain is a known package manager.
+    ///
+    /// This is used by the npm lockfile change detector to determine if a
+    /// lockfile modification was initiated by a legitimate package manager.
+    #[must_use]
+    pub fn has_known_package_manager(&self) -> bool {
+        self.chain.iter().any(|p| is_known_package_manager(&p.name))
     }
 
     /// Get the root ancestor (furthest from the target process).
@@ -445,12 +460,46 @@ mod tests {
             "micromamba",
             "hatch",
             "flit",
+            // npm ecosystem
+            "npm",
+            "node",
+            "yarn",
+            "pnpm",
+            "bun",
         ] {
             assert!(
                 is_known_package_manager(name),
                 "{name} should be recognised as a package manager"
             );
         }
+    }
+
+    #[test]
+    fn has_known_package_manager_finds_npm() {
+        let mock = MockProcFs::new()
+            .process(1, "init", None)
+            .process(50, "npm", Some(1))
+            .process(100, "node", Some(50));
+
+        let lineage = ProcessLineage::trace(100, &mock).expect("lineage should succeed");
+        assert!(
+            lineage.has_known_package_manager(),
+            "npm in lineage should be detected"
+        );
+    }
+
+    #[test]
+    fn has_known_package_manager_false_for_unknown() {
+        let mock = MockProcFs::new()
+            .process(1, "init", None)
+            .process(50, "bash", Some(1))
+            .process(100, "curl", Some(50));
+
+        let lineage = ProcessLineage::trace(100, &mock).expect("lineage should succeed");
+        assert!(
+            !lineage.has_known_package_manager(),
+            "unknown processes should not be detected as package managers"
+        );
     }
 
     #[test]

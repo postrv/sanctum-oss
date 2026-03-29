@@ -12,6 +12,7 @@
 //!   operations like credential exfiltration and supply chain writes.
 //! - **MCP audit and policy**: Logs and enforces policy on MCP tool invocations.
 
+pub mod allowlist;
 pub mod entropy;
 pub mod hooks;
 pub mod mcp;

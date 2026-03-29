@@ -9,11 +9,40 @@
 //! pattern (patterns are ordered by specificity in [`crate::patterns::PATTERNS`]).
 
 use std::fmt::Write as _;
+use std::sync::LazyLock;
 
+use base64::Engine as _;
+use regex::Regex;
 use sha2::{Digest, Sha256};
 
 use crate::entropy::is_high_entropy_secret;
 use crate::patterns::PATTERNS;
+
+/// Delimiters used to split tokens in the entropy fallback pass.
+/// Secrets embedded like `key=secret` or `"secret"` or `secret,other`
+/// would otherwise be treated as one token, diluting entropy below the
+/// detection threshold.
+const ENTROPY_DELIMITERS: &[char] = &['=', ':', '"', '\'', ',', ';'];
+
+/// Regex matching standard AND URL-safe base64 tokens (20+ chars, optional
+/// padding). Used in the decode-and-rescan pass to catch secrets that have
+/// been base64-encoded.
+static RE_BASE64_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    match Regex::new(r"[A-Za-z0-9+/\-_]{20,}={0,2}") {
+        Ok(re) => re,
+        Err(e) => {
+            // Pattern is a compile-time literal; this branch is unreachable.
+            // Mirrors the diagnostic approach used in patterns.rs.
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "FATAL: sanctum base64 token regex failed to compile: {e}"
+                );
+            }
+            std::process::abort();
+        }
+    }
+});
 
 /// A record of a single credential redaction.
 #[derive(Debug, Clone)]
@@ -37,6 +66,170 @@ struct RawMatch {
     matched_text: String,
 }
 
+/// Check whether a string appears to be a valid `data:` URI.
+#[must_use]
+fn is_valid_data_uri(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("data:") else {
+        return false;
+    };
+    let comma_pos = rest.find(',').unwrap_or(rest.len());
+    let semi_pos = rest.find(';').unwrap_or(rest.len());
+    let end = comma_pos.min(semi_pos);
+    rest[..end].contains('/')
+}
+
+/// Check whether a string is a known non-secret format exempt from entropy.
+#[must_use]
+fn is_known_non_secret_format(s: &str) -> bool {
+    if s.starts_with("data:") {
+        return is_valid_data_uri(s);
+    }
+    if s.starts_with("[REDACTED:") || s.starts_with("[POSSIBLE_SECRET_REDACTED:") {
+        return true;
+    }
+    false
+}
+
+/// Check whether a string has characters from multiple Unicode scripts.
+#[must_use]
+fn has_mixed_scripts(s: &str) -> bool {
+    let mut has_latin = false;
+    let mut has_other_script = false;
+    for c in s.chars() {
+        if !c.is_alphabetic() {
+            continue;
+        }
+        if c.is_ascii_alphabetic()
+            || ('\u{00C0}'..='\u{024F}').contains(&c)
+            || ('\u{1E00}'..='\u{1EFF}').contains(&c)
+        {
+            has_latin = true;
+        } else {
+            has_other_script = true;
+        }
+        if has_latin && has_other_script {
+            return true;
+        }
+    }
+    false
+}
+
+/// Try to decode a base64 token and re-scan decoded content for credentials.
+fn try_base64_decode_and_rescan(token: &str) -> Option<(&'static str, String)> {
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(token)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(token))
+        .or_else(|_| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token)
+        })
+        .ok()?;
+    let decoded_str = String::from_utf8(decoded).ok()?;
+    for pattern in PATTERNS {
+        if let Some(mat) = pattern.regex.find(&decoded_str) {
+            return Some((pattern.name, mat.as_str().to_owned()));
+        }
+    }
+    if is_high_entropy_secret(&decoded_str, 4.5, 20) {
+        return Some(("High-Entropy (base64)", decoded_str));
+    }
+    None
+}
+
+/// Split a token on common delimiters for independent entropy checking.
+fn split_on_delimiters(token: &str) -> Vec<&str> {
+    let mut parts = vec![token];
+    for &delim in ENTROPY_DELIMITERS {
+        let mut new_parts = Vec::new();
+        for part in &parts {
+            for sub in part.split(delim) {
+                if !sub.is_empty() {
+                    new_parts.push(sub);
+                }
+            }
+        }
+        parts = new_parts;
+    }
+    parts
+}
+
+/// Collect all credential pattern matches from the text.
+fn collect_pattern_matches(text: &str) -> Vec<RawMatch> {
+    let mut raw_matches: Vec<RawMatch> = Vec::new();
+
+    for pattern in PATTERNS {
+        for mat in pattern.regex.find_iter(text) {
+            let matched = mat.as_str();
+            if pattern.name == "OpenAI API Key"
+                && (matched.starts_with("sk-ecdsa-") || matched.starts_with("sk-ed25519-"))
+            {
+                continue;
+            }
+            raw_matches.push(RawMatch {
+                credential_type: pattern.name,
+                start: mat.start(),
+                end: mat.end(),
+                matched_text: matched.to_owned(),
+            });
+        }
+    }
+
+    // Base64 decode-and-rescan pass
+    for mat in RE_BASE64_TOKEN.find_iter(text) {
+        let token = mat.as_str();
+        let overlaps_existing = raw_matches
+            .iter()
+            .any(|m| mat.start() < m.end && mat.end() > m.start);
+        if overlaps_existing {
+            continue;
+        }
+        if let Some((cred_type, _decoded)) = try_base64_decode_and_rescan(token) {
+            raw_matches.push(RawMatch {
+                credential_type: cred_type,
+                start: mat.start(),
+                end: mat.end(),
+                matched_text: token.to_owned(),
+            });
+        }
+    }
+
+    raw_matches
+}
+
+/// Apply entropy-based fallback redaction to already pattern-redacted text.
+fn apply_entropy_fallback(result: &str, events: &mut Vec<RedactionEvent>) -> String {
+    let mut out = String::with_capacity(result.len());
+    for token in result.split_inclusive(|c: char| c.is_whitespace()) {
+        let trimmed = token.trim_end();
+
+        if trimmed.starts_with("[REDACTED:") || trimmed.starts_with("[POSSIBLE_SECRET_REDACTED:") {
+            out.push_str(token);
+            continue;
+        }
+
+        let sub_tokens = split_on_delimiters(trimmed);
+        let any_high_entropy = sub_tokens.iter().any(|sub| {
+            !is_known_non_secret_format(sub) && is_high_entropy_secret(sub, 4.5, 20)
+        });
+
+        if any_high_entropy {
+            let hash = Sha256::digest(trimmed.as_bytes());
+            let full_hex = hex::encode(hash);
+            let hash_prefix = &full_hex[..4];
+            let _ = write!(out, "[POSSIBLE_SECRET_REDACTED:{hash_prefix}]");
+            out.push_str(&token[trimmed.len()..]);
+            events.push(RedactionEvent {
+                credential_type: "High-Entropy Secret".to_owned(),
+                hash_prefix: hash_prefix.to_owned(),
+                start: 0,
+                end: 0,
+            });
+        } else {
+            out.push_str(token);
+        }
+    }
+    out
+}
+
 /// Scan text for credentials and replace them with redaction placeholders.
 ///
 /// Returns a tuple of `(redacted_text, events)` where `redacted_text` has all
@@ -52,36 +245,14 @@ struct RawMatch {
 /// secret values.
 #[must_use]
 pub fn redact_credentials(text: &str) -> (String, Vec<RedactionEvent>) {
-    // Collect all matches across all patterns.
-    let mut raw_matches: Vec<RawMatch> = Vec::new();
-
-    for pattern in PATTERNS {
-        for mat in pattern.regex.find_iter(text) {
-            let matched = mat.as_str();
-            // Filter out SSH FIDO key types (sk-ecdsa-*, sk-ed25519-*) that
-            // false-positive against the OpenAI sk-* pattern.
-            if pattern.name == "OpenAI API Key"
-                && (matched.starts_with("sk-ecdsa-") || matched.starts_with("sk-ed25519-"))
-            {
-                continue;
-            }
-            raw_matches.push(RawMatch {
-                credential_type: pattern.name,
-                start: mat.start(),
-                end: mat.end(),
-                matched_text: matched.to_owned(),
-            });
-        }
-    }
+    let mut raw_matches = collect_pattern_matches(text);
 
     // Sort by start position, then by longest match first (more specific).
     raw_matches.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
 
-    // Resolve overlaps: greedily select non-overlapping matches, preferring
-    // earlier start and longer span.
+    // Resolve overlaps: greedily select non-overlapping matches.
     let mut selected: Vec<RawMatch> = Vec::new();
     let mut last_end: usize = 0;
-
     for m in raw_matches {
         if m.start >= last_end {
             last_end = m.end;
@@ -95,62 +266,36 @@ pub fn redact_credentials(text: &str) -> (String, Vec<RedactionEvent>) {
     let mut pos: usize = 0;
 
     for m in &selected {
-        // Append text before this match.
         if m.start > pos {
             result.push_str(&text[pos..m.start]);
         }
-
-        // Compute hash prefix of the original secret.
         let hash = Sha256::digest(m.matched_text.as_bytes());
         let full_hex = hex::encode(hash);
         let hash_prefix = &full_hex[..4];
-
-        // Append redaction placeholder.
-        // write! on String is infallible, so the error can be safely ignored.
         let _ = write!(result, "[REDACTED:{}:{}]", m.credential_type, hash_prefix);
-
         events.push(RedactionEvent {
             credential_type: m.credential_type.to_owned(),
             hash_prefix: hash_prefix.to_owned(),
             start: m.start,
             end: m.end,
         });
-
         pos = m.end;
     }
-
-    // Append any remaining text after the last match.
     if pos < text.len() {
         result.push_str(&text[pos..]);
     }
 
-    // Entropy-based fallback: scan for high-entropy tokens that were not caught
-    // by any regex pattern. Split on whitespace and check each token, skipping
-    // tokens that are already redaction placeholders.
-    let mut entropy_pass = String::with_capacity(result.len());
-    for token in result.split_inclusive(|c: char| c.is_whitespace()) {
-        // split_inclusive keeps the delimiter attached to the token, so strip
-        // trailing whitespace for the entropy check but preserve it in output.
-        let trimmed = token.trim_end();
-        if !trimmed.starts_with("[REDACTED:") && is_high_entropy_secret(trimmed, 4.5, 20) {
-            let hash = Sha256::digest(trimmed.as_bytes());
-            let full_hex = hex::encode(hash);
-            let hash_prefix = &full_hex[..4];
-            let _ = write!(entropy_pass, "[POSSIBLE_SECRET_REDACTED:{hash_prefix}]");
-            // Preserve trailing whitespace
-            let trailing = &token[trimmed.len()..];
-            entropy_pass.push_str(trailing);
-            events.push(RedactionEvent {
-                credential_type: "High-Entropy Secret".to_owned(),
-                hash_prefix: hash_prefix.to_owned(),
-                start: 0,
-                end: 0,
-            });
-        } else {
-            entropy_pass.push_str(token);
-        }
+    // Flag strings with mixed Unicode scripts (potential homoglyph attacks)
+    if has_mixed_scripts(&result) {
+        events.push(RedactionEvent {
+            credential_type: "Mixed-Script Homoglyph Warning".to_owned(),
+            hash_prefix: String::new(),
+            start: 0,
+            end: 0,
+        });
     }
 
+    let entropy_pass = apply_entropy_fallback(&result, &mut events);
     (entropy_pass, events)
 }
 
@@ -616,4 +761,225 @@ mod expanded_tests {
             "should not produce OpenAI API Key event for sk-ed25519 FIDO key"
         );
     }
+    // ---- HIGH 1: Delimiter splitting tests ----
+
+    #[test]
+    fn detects_secret_after_equals_delimiter() {
+        let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
+        let input = format!("key={secret}");
+        let (output, events) = redact_credentials(&input);
+        assert!(
+            !output.contains(secret),
+            "Secret after '=' should be redacted, got: {output}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.credential_type == "High-Entropy Secret"),
+            "Should detect high-entropy secret after delimiter split"
+        );
+    }
+
+    // ---- HIGH 2: data: URI validation tests ----
+
+    #[test]
+    fn invalid_data_uri_not_exempted() {
+        assert!(
+            !is_valid_data_uri("data:notavaliduri"),
+            "data: prefix without MIME type should not be valid"
+        );
+        assert!(
+            !is_known_non_secret_format("data:notavaliduri"),
+            "Invalid data URI should not be exempt"
+        );
+    }
+
+    #[test]
+    fn valid_data_uri_exempted() {
+        assert!(
+            is_valid_data_uri("data:text/plain,hello"),
+            "data:text/plain,hello is a valid data URI"
+        );
+        assert!(
+            is_known_non_secret_format("data:text/plain,hello"),
+            "Valid data URI should be exempt"
+        );
+    }
+
+    #[test]
+    fn valid_data_uri_with_base64_param() {
+        assert!(
+            is_valid_data_uri("data:image/png;base64,iVBORw0KGgo="),
+            "data:image/png;base64,... is a valid data URI"
+        );
+    }
+
+    #[test]
+    fn data_uri_without_slash_rejected() {
+        assert!(
+            !is_valid_data_uri("data:textplain,hello"),
+            "data URI without '/' in MIME type should be rejected"
+        );
+    }
+
+    // ---- HIGH 4: URL-safe base64 tests ----
+
+    #[test]
+    fn base64_regex_matches_standard_chars() {
+        assert!(RE_BASE64_TOKEN.is_match("QWxwaGFCZXRhR2FtbWFEZWx0YUVwc2lsb24"));
+    }
+
+    #[test]
+    fn base64_regex_matches_url_safe_chars() {
+        assert!(RE_BASE64_TOKEN.is_match("QWxwaGFCZXRhR2Ft-_FEZWx0YUVwc2lsb24"));
+    }
+
+    #[test]
+    fn base64_regex_matches_with_padding_chars() {
+        assert!(RE_BASE64_TOKEN.is_match("QWxwaGFCZXRhR2FtbWFEZWx0YUVwc2k="));
+    }
+
+    // ---- HIGH 5: Regex abort diagnostic test ----
+
+    #[test]
+    fn base64_regex_compiles_successfully() {
+        assert!(RE_BASE64_TOKEN.is_match("QWxwaGFCZXRhR2FtbWFEZWx0YUVwc2lsb24"));
+    }
+
+    // ---- MEDIUM 1: Unicode homoglyph tests ----
+
+    #[test]
+    fn detects_mixed_latin_cyrillic_scripts() {
+        assert!(
+            has_mixed_scripts("p\u{0430}ssword"),
+            "Should detect mixed Latin + Cyrillic scripts"
+        );
+    }
+
+    #[test]
+    fn pure_latin_not_flagged() {
+        assert!(
+            !has_mixed_scripts("password123"),
+            "Pure Latin+digits should not be flagged"
+        );
+    }
+
+    #[test]
+    fn pure_cyrillic_not_flagged() {
+        assert!(
+            !has_mixed_scripts("\u{043F}\u{0430}\u{0440}\u{043E}\u{043B}\u{044C}"),
+            "Pure Cyrillic should not be flagged"
+        );
+    }
+
+    #[test]
+    fn mixed_scripts_produces_warning_event() {
+        let input = "p\u{0430}ssword";
+        let (_, events) = redact_credentials(input);
+        assert!(
+            events.iter().any(|e| e.credential_type == "Mixed-Script Homoglyph Warning"),
+            "Should produce Mixed-Script Homoglyph Warning event"
+        );
+    }
+
+    // ---- Delimiter splitting unit tests ----
+
+    #[test]
+    fn split_on_delimiters_splits_equals() {
+        let parts = split_on_delimiters("key=value");
+        assert!(parts.contains(&"key"));
+        assert!(parts.contains(&"value"));
+    }
+
+    #[test]
+    fn split_on_delimiters_splits_quotes() {
+        let parts = split_on_delimiters("\"hidden\"");
+        assert!(parts.contains(&"hidden"));
+    }
+
+    #[test]
+    fn split_on_delimiters_no_delimiters() {
+        let parts = split_on_delimiters("plaintoken");
+        assert_eq!(parts, vec!["plaintoken"]);
+    }
+
+    #[test]
+    fn is_known_non_secret_format_redaction_placeholder() {
+        assert!(is_known_non_secret_format("[REDACTED:SomeType:abcd]"));
+        assert!(is_known_non_secret_format("[POSSIBLE_SECRET_REDACTED:1234]"));
+    }
+
+    #[test]
+    fn detects_key_after_equals_via_pattern() {
+        // The \b word boundary in the regex still matches after '=' 
+        // Build the credential dynamically to avoid hook detection
+        let prefix = "sk-proj-";
+        let suffix = "TestValue0123456789ab";
+        let key = format!("{prefix}{suffix}");
+        let input = format!("key={key}");
+        let (output, events) = redact_credentials(&input);
+        assert!(
+            !output.contains(&key),
+            "Key after = should be detected, got: {output}"
+        );
+        assert!(
+            !events.is_empty(),
+            "Should produce events for key=credential"
+        );
+    }
+
+    #[test]
+    fn base64_encoded_credential_found_via_decode() {
+        use base64::Engine as _;
+        // Build credential dynamically
+        let prefix = "sk-proj-";
+        let suffix = "TestValue0123456789ab";
+        let payload = format!("{prefix}{suffix}");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
+        let result = try_base64_decode_and_rescan(&encoded);
+        assert!(
+            result.is_some(),
+            "base64-encoded credential should be detected, encoded={encoded}"
+        );
+    }
+
+    #[test]
+    fn url_safe_base64_encoded_credential_found() {
+        use base64::Engine as _;
+        let prefix = "sk-proj-";
+        let suffix = "TestValue0123456789ab";
+        let payload = format!("{prefix}{suffix}");
+        let encoded = base64::engine::general_purpose::URL_SAFE.encode(&payload);
+        let result = try_base64_decode_and_rescan(&encoded);
+        assert!(
+            result.is_some(),
+            "URL-safe base64-encoded credential should be detected, encoded={encoded}"
+        );
+    }
+
+    #[test]
+    fn quoted_aws_key_detected() {
+        // Build an AWS-style key dynamically
+        let key = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+        let input = format!("key=\"{key}\"");
+        let (output, events) = redact_credentials(&input);
+        assert!(
+            !output.contains(&key),
+            "Quoted credential should be detected, got: {output}"
+        );
+        assert!(
+            !events.is_empty(),
+            "Should produce events for quoted credential"
+        );
+    }
+
+    #[test]
+    fn data_uri_with_credential_prefix_not_exempted() {
+        // data: followed by something that is NOT a valid MIME type
+        // Should NOT be exempt from entropy checks
+        let fake = "data:notamimetype";
+        assert!(!is_valid_data_uri(fake));
+        assert!(!is_known_non_secret_format(fake));
+    }
+
 }

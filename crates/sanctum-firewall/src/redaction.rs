@@ -35,28 +35,33 @@ const ENTROPY_DELIMITERS: &[char] = &['=', ':', '"', '\'', ',', ';'];
 // --- Known non-secret format patterns ---
 
 /// Hex-only string of exactly 40 characters (e.g., Git SHA-1).
-static RE_HEX_40: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[0-9a-fA-F]{40}$").unwrap_or_else(|_| {
+static RE_HEX_40: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[0-9a-fA-F]{40}$").unwrap_or_else(|_| {
         std::process::abort();
-    }));
+    })
+});
 
 /// Hex-only string of exactly 64 characters (e.g., Git SHA-256, file hash).
-static RE_HEX_64: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[0-9a-fA-F]{64}$").unwrap_or_else(|_| {
+static RE_HEX_64: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[0-9a-fA-F]{64}$").unwrap_or_else(|_| {
         std::process::abort();
-    }));
+    })
+});
 
 /// UUID format (with or without hyphens).
-static RE_UUID: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$").unwrap_or_else(|_| {
-        std::process::abort();
-    }));
+static RE_UUID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$")
+        .unwrap_or_else(|_| {
+            std::process::abort();
+        })
+});
 
 /// Docker image digest format.
-static RE_DOCKER_DIGEST: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^sha256:[0-9a-fA-F]{64}$").unwrap_or_else(|_| {
+static RE_DOCKER_DIGEST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^sha256:[0-9a-fA-F]{64}$").unwrap_or_else(|_| {
         std::process::abort();
-    }));
+    })
+});
 
 /// Regex matching standard AND URL-safe base64 tokens (20+ chars, optional
 /// padding). Used in the decode-and-rescan pass to catch secrets that have
@@ -69,9 +74,7 @@ static RE_BASE64_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
             // Mirrors the diagnostic approach used in patterns.rs.
             #[allow(clippy::print_stderr)]
             {
-                eprintln!(
-                    "FATAL: sanctum base64 token regex failed to compile: {e}"
-                );
+                eprintln!("FATAL: sanctum base64 token regex failed to compile: {e}");
             }
             std::process::abort();
         }
@@ -354,10 +357,7 @@ fn resolve_overlaps(mut raw_matches: Vec<RawMatch>) -> Vec<RawMatch> {
 }
 
 /// Build redacted output string and events from selected matches.
-fn build_redacted_output(
-    text: &str,
-    selected: &[RawMatch],
-) -> (String, Vec<RedactionEvent>) {
+fn build_redacted_output(text: &str, selected: &[RawMatch]) -> (String, Vec<RedactionEvent>) {
     let mut result = String::with_capacity(text.len());
     let mut events = Vec::with_capacity(selected.len());
     let mut pos: usize = 0;
@@ -440,13 +440,11 @@ pub fn redact_credentials_with_config(
             if overlaps_existing {
                 return None;
             }
-            try_base64_decode_and_rescan_recursive(token, PATTERNS, 0).map(|evt| {
-                RawMatch {
-                    credential_type: Cow::Owned(evt.credential_type),
-                    start: mat.start(),
-                    end: mat.end(),
-                    matched_text: token.to_owned(),
-                }
+            try_base64_decode_and_rescan_recursive(token, PATTERNS, 0).map(|evt| RawMatch {
+                credential_type: Cow::Owned(evt.credential_type),
+                start: mat.start(),
+                end: mat.end(),
+                matched_text: token.to_owned(),
             })
         })
         .collect();
@@ -1121,7 +1119,9 @@ mod expanded_tests {
         let input = "p\u{0430}ssword";
         let (_, events) = redact_credentials(input);
         assert!(
-            events.iter().any(|e| e.credential_type == "Mixed-Script Homoglyph Warning"),
+            events
+                .iter()
+                .any(|e| e.credential_type == "Mixed-Script Homoglyph Warning"),
             "Should produce Mixed-Script Homoglyph Warning event"
         );
     }
@@ -1150,12 +1150,14 @@ mod expanded_tests {
     #[test]
     fn is_known_non_secret_format_redaction_placeholder() {
         assert!(is_known_non_secret_format("[REDACTED:SomeType:abcd]"));
-        assert!(is_known_non_secret_format("[POSSIBLE_SECRET_REDACTED:1234]"));
+        assert!(is_known_non_secret_format(
+            "[POSSIBLE_SECRET_REDACTED:1234]"
+        ));
     }
 
     #[test]
     fn detects_key_after_equals_via_pattern() {
-        // The \b word boundary in the regex still matches after '=' 
+        // The \b word boundary in the regex still matches after '='
         // Build the credential dynamically to avoid hook detection
         let prefix = "sk-proj-";
         let suffix = "TestValue0123456789ab";
@@ -1283,12 +1285,22 @@ mod expanded_tests {
 
     #[test]
     fn is_known_non_secret_format_unit_tests() {
-        assert!(is_known_non_secret_format("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
-        assert!(is_known_non_secret_format("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
-        assert!(is_known_non_secret_format("550e8400-e29b-41d4-a716-446655440000"));
-        assert!(is_known_non_secret_format("550e8400e29b41d4a716446655440000"));
+        assert!(is_known_non_secret_format(
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        ));
+        assert!(is_known_non_secret_format(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+        assert!(is_known_non_secret_format(
+            "550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(is_known_non_secret_format(
+            "550e8400e29b41d4a716446655440000"
+        ));
         assert!(is_known_non_secret_format("data:image/png;base64,abc"));
-        assert!(is_known_non_secret_format("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+        assert!(is_known_non_secret_format(
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
         assert!(!is_known_non_secret_format("some_random_string_here"));
         assert!(!is_known_non_secret_format("abcdef"));
     }
@@ -1355,7 +1367,9 @@ mod expanded_tests {
         let moderate = "abcdefghijklmnopqrstu";
         let input = format!("val: {moderate}");
         let (_output, events) = redact_credentials_with_config(&input, 2.0, 20, &HashSet::new());
-        assert!(events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(events
+            .iter()
+            .any(|e| e.credential_type == "High-Entropy Secret"));
     }
 
     #[test]
@@ -1363,7 +1377,9 @@ mod expanded_tests {
         let short = "Kj7mPq2Xz9LwN5vR4T";
         let input = format!("val: {short}");
         let (_, events) = redact_credentials_with_config(&input, 3.0, 25, &HashSet::new());
-        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(!events
+            .iter()
+            .any(|e| e.credential_type == "High-Entropy Secret"));
     }
 
     // ---- Entropy allowlist tests (from main) ----
@@ -1378,7 +1394,9 @@ mod expanded_tests {
         let input = format!("config: {secret}");
         let (output, events) = redact_credentials_with_config(&input, 5.0, 20, &allowlist);
         assert!(output.contains(secret));
-        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(!events
+            .iter()
+            .any(|e| e.credential_type == "High-Entropy Secret"));
     }
 
     #[test]
@@ -1387,10 +1405,11 @@ mod expanded_tests {
         let input = format!("config: {secret}");
         let (output, events) = redact_credentials_with_config(&input, 5.0, 20, &HashSet::new());
         assert!(!output.contains(secret));
-        assert!(events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(events
+            .iter()
+            .any(|e| e.credential_type == "High-Entropy Secret"));
     }
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1425,7 +1444,10 @@ mod base64_rescan_tests {
         use base64::Engine as _;
         let secret = make_test_secret();
         let encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&secret);
-        assert!(!encoded.ends_with('='), "STANDARD_NO_PAD should not produce padding");
+        assert!(
+            !encoded.ends_with('='),
+            "STANDARD_NO_PAD should not produce padding"
+        );
         let result = try_base64_decode_and_rescan(&encoded);
         assert!(
             result.is_some(),
@@ -1489,7 +1511,9 @@ mod config_tests {
         let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
         let input = format!("config: {secret}");
         let (output, events) = redact_credentials_with_config(&input, 99.0, 20, &HashSet::new());
-        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(!events
+            .iter()
+            .any(|e| e.credential_type == "High-Entropy Secret"));
         assert!(output.contains(secret));
     }
 
@@ -1498,7 +1522,9 @@ mod config_tests {
         let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
         let input = format!("config: {secret}");
         let (output, events) = redact_credentials_with_config(&input, 3.0, 100, &HashSet::new());
-        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(!events
+            .iter()
+            .any(|e| e.credential_type == "High-Entropy Secret"));
         assert!(output.contains(secret));
     }
 
@@ -1511,7 +1537,9 @@ mod config_tests {
         let input = format!("config: {secret}");
         let allowlist: HashSet<String> = vec![hex_hash].into_iter().collect();
         let (output, events) = redact_credentials_with_config(&input, 3.0, 20, &allowlist);
-        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(!events
+            .iter()
+            .any(|e| e.credential_type == "High-Entropy Secret"));
         assert!(output.contains(secret));
     }
 

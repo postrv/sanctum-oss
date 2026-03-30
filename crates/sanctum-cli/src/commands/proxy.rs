@@ -47,12 +47,12 @@ fn cmd_start(port: u16) -> Result<(), CliError> {
 
     let addr = format!("127.0.0.1:{port}");
     write_info(&format!("Starting proxy on {addr}..."))?;
-    write_info(&format!("Set HTTPS_PROXY=http://{addr} in your tools to route through Sanctum."))?;
+    write_info(&format!(
+        "Set HTTPS_PROXY=http://{addr} in your tools to route through Sanctum."
+    ))?;
 
     let rt = tokio::runtime::Runtime::new().map_err(CliError::Io)?;
-    rt.block_on(async {
-        run_proxy_server(&addr, &key_path, &cert_path).await
-    })
+    rt.block_on(async { run_proxy_server(&addr, &key_path, &cert_path).await })
 }
 
 /// Run the proxy server (async entry point).
@@ -66,14 +66,9 @@ async fn run_proxy_server(
 
     let config = sanctum_types::config::SanctumConfig::default();
     let tracker = sanctum_budget::BudgetTracker::new(&config.budgets);
-    let server = sanctum_proxy::ProxyServer::bind(
-        addr,
-        tracker,
-        config.budgets,
-        config.proxy,
-    )
-    .await
-    .map_err(|e| CliError::CommandFailed(format!("failed to start proxy: {e}")))?;
+    let server = sanctum_proxy::ProxyServer::bind(addr, tracker, config.budgets, config.proxy)
+        .await
+        .map_err(|e| CliError::CommandFailed(format!("failed to start proxy: {e}")))?;
 
     // Store the CA in the server state for CONNECT handling.
     // For now the CA is loaded but the full MITM pipeline integration
@@ -116,7 +111,10 @@ fn cmd_status() -> Result<(), CliError> {
         write_stdout("CA certificate: not installed")?;
         write_stdout("  Run `sanctum proxy install-ca` to generate.")?;
     }
-    write_stdout(&format!("Default port: {}", sanctum_types::config::DEFAULT_PROXY_PORT))?;
+    write_stdout(&format!(
+        "Default port: {}",
+        sanctum_types::config::DEFAULT_PROXY_PORT
+    ))?;
 
     Ok(())
 }
@@ -141,7 +139,10 @@ fn cmd_install_ca() -> Result<(), CliError> {
     write_info("Next steps:")?;
     write_info("  1. Trust the CA: `sanctum proxy trust`")?;
     write_info("  2. Start the proxy: `sanctum proxy start`")?;
-    write_info(&format!("  3. Set HTTPS_PROXY=http://127.0.0.1:{} in your tools", config.listen_port))?;
+    write_info(&format!(
+        "  3. Set HTTPS_PROXY=http://127.0.0.1:{} in your tools",
+        config.listen_port
+    ))?;
 
     Ok(())
 }
@@ -177,7 +178,10 @@ fn trust_platform(cert_path: &std::path::Path) -> Result<(), CliError> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn trust_platform(cert_path: &std::path::Path) -> Result<(), CliError> {
     write_info("Automatic trust store installation is not supported on this platform.")?;
-    write_info(&format!("Manually add {} to your system trust store.", cert_path.display()))?;
+    write_info(&format!(
+        "Manually add {} to your system trust store.",
+        cert_path.display()
+    ))?;
     Err(CliError::PreviewFeature(
         "trust store installation not supported on this platform".to_string(),
     ))
@@ -193,8 +197,10 @@ fn trust_macos(cert_path: &std::path::Path) -> Result<(), CliError> {
         .args([
             "add-trusted-cert",
             "-d",
-            "-r", "trustRoot",
-            "-k", "/Library/Keychains/System.keychain",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
         ])
         .arg(cert_path)
         .output()
@@ -216,14 +222,18 @@ fn trust_macos(cert_path: &std::path::Path) -> Result<(), CliError> {
 fn trust_linux(cert_path: &std::path::Path) -> Result<(), CliError> {
     let dest = std::path::Path::new("/usr/local/share/ca-certificates/sanctum-ca.crt");
 
-    write_info(&format!("Copying CA to {} (may require sudo)...", dest.display()))?;
+    write_info(&format!(
+        "Copying CA to {} (may require sudo)...",
+        dest.display()
+    ))?;
 
     // Copy the cert to the system CA directory.
-    std::fs::copy(cert_path, dest)
-        .map_err(|e| CliError::CommandFailed(format!(
+    std::fs::copy(cert_path, dest).map_err(|e| {
+        CliError::CommandFailed(format!(
             "failed to copy CA cert to {}: {e}. Try running with sudo.",
             dest.display()
-        )))?;
+        ))
+    })?;
 
     // Run update-ca-certificates.
     let output = std::process::Command::new("update-ca-certificates")

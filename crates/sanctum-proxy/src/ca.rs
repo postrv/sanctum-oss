@@ -77,11 +77,11 @@ pub fn generate_ca(validity_days: u32) -> Result<CaIdentity, ProxyError> {
     params.not_after = not_after;
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
 
-    let cert = params.self_signed(&key_pair).map_err(|e| {
-        ProxyError::CaGeneration {
+    let cert = params
+        .self_signed(&key_pair)
+        .map_err(|e| ProxyError::CaGeneration {
             reason: format!("failed to self-sign CA certificate: {e}"),
-        }
-    })?;
+        })?;
 
     let cert_pem = cert.pem();
     let key_pem = key_pair.serialize_pem();
@@ -186,11 +186,11 @@ pub fn load_ca(cert_path: &Path, key_path: &Path) -> Result<CaIdentity, ProxyErr
     }
 
     // Re-derive the certificate by self-signing the parsed params.
-    let cert = cert_params.self_signed(&key_pair).map_err(|e| {
-        ProxyError::CaGeneration {
+    let cert = cert_params
+        .self_signed(&key_pair)
+        .map_err(|e| ProxyError::CaGeneration {
             reason: format!("failed to reconstruct CA cert: {e}"),
-        }
-    })?;
+        })?;
     let cert_der = CertificateDer::from(cert.der().to_vec());
     let key_der_bytes = key_pair.serialize_der();
 
@@ -254,10 +254,7 @@ fn validate_domain(domain: &str) -> Result<(), ProxyError> {
                 reason: format!("domain label '{label}' has leading or trailing hyphen"),
             });
         }
-        if !label
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        {
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err(ProxyError::CaGeneration {
                 reason: format!("domain label '{label}' contains invalid characters"),
             });
@@ -297,11 +294,10 @@ pub fn generate_site_cert(
         not_after_date.day_u8(),
     );
 
-    let mut params = CertificateParams::new(vec![domain.to_owned()]).map_err(|e| {
-        ProxyError::CaGeneration {
+    let mut params =
+        CertificateParams::new(vec![domain.to_owned()]).map_err(|e| ProxyError::CaGeneration {
             reason: format!("failed to create site cert params: {e}"),
-        }
-    })?;
+        })?;
 
     params
         .distinguished_name
@@ -323,16 +319,17 @@ pub fn generate_site_cert(
         reason: format!("failed to parse CA key for signing: {e}"),
     })?;
 
-    let ca_cert_params =
-        CertificateParams::from_ca_cert_pem(&ca.cert_pem).map_err(|e| ProxyError::CaGeneration {
-            reason: format!("failed to parse CA cert for signing: {e}"),
-        })?;
-
-    let ca_cert = ca_cert_params.self_signed(&ca_key).map_err(|e| {
+    let ca_cert_params = CertificateParams::from_ca_cert_pem(&ca.cert_pem).map_err(|e| {
         ProxyError::CaGeneration {
-            reason: format!("failed to reconstruct CA cert for signing: {e}"),
+            reason: format!("failed to parse CA cert for signing: {e}"),
         }
     })?;
+
+    let ca_cert = ca_cert_params
+        .self_signed(&ca_key)
+        .map_err(|e| ProxyError::CaGeneration {
+            reason: format!("failed to reconstruct CA cert for signing: {e}"),
+        })?;
 
     let site_cert = params
         .signed_by(&site_key, &ca_cert, &ca_key)

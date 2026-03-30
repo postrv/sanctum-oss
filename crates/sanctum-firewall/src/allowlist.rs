@@ -109,9 +109,7 @@ pub fn load_allowlist_struct(path: &Path) -> Result<Allowlist, io::Error> {
         if allowlist.entries.len() >= MAX_ENTRIES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "allowlist exceeds maximum of {MAX_ENTRIES} entries"
-                ),
+                format!("allowlist exceeds maximum of {MAX_ENTRIES} entries"),
             ));
         }
 
@@ -171,7 +169,9 @@ pub fn save_allowlist_struct(allowlist: &Allowlist, path: &Path) -> Result<(), i
 
 /// Check whether a string is a valid 64-character lowercase hex hash.
 fn is_valid_hex_hash(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// Load an entropy allowlist from a line-oriented file.
@@ -323,9 +323,12 @@ pub fn default_allowlist_path() -> Option<PathBuf> {
         }
     }
     // Fall back to ~/.config
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".config").join("sanctum").join("allowlist"))
+    std::env::var("HOME").ok().map(|h| {
+        PathBuf::from(h)
+            .join(".config")
+            .join("sanctum")
+            .join("allowlist")
+    })
 }
 
 /// Write data to a file with 0o600 permissions on Unix.
@@ -615,7 +618,11 @@ mod tests {
         std::fs::write(&path, &content).expect("write");
 
         let loaded = load_allowlist(&path);
-        assert_eq!(loaded.len(), 1, "Only the valid 64-char lowercase hex hash should be loaded");
+        assert_eq!(
+            loaded.len(),
+            1,
+            "Only the valid 64-char lowercase hex hash should be loaded"
+        );
         assert!(loaded.contains(&valid_hash));
     }
 

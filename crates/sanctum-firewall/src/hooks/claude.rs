@@ -23,8 +23,7 @@ use crate::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use crate::mcp::audit::McpAuditLog;
 use crate::mcp::policy::McpPolicy;
 use crate::redaction::{
-    redact_credentials_with_config, DEFAULT_ENTROPY_MIN_LENGTH,
-    DEFAULT_ENTROPY_THRESHOLD,
+    redact_credentials_with_config, DEFAULT_ENTROPY_MIN_LENGTH, DEFAULT_ENTROPY_THRESHOLD,
 };
 
 /// Npm/JS package manager configuration for hook behaviour.
@@ -972,7 +971,9 @@ fn is_credential_file_access(command: &str) -> bool {
             {
                 return true;
             }
-        } else if normalised_lower.contains(&redir_no_space) || normalised_lower.contains(&redir_space) {
+        } else if normalised_lower.contains(&redir_no_space)
+            || normalised_lower.contains(&redir_space)
+        {
             return true;
         }
     }
@@ -5615,7 +5616,10 @@ mod tests {
     #[test]
     fn test_case_insensitive_credential_path() {
         // macOS filesystem is case-insensitive; ~/.SSH/id_rsa should be blocked
-        let output = pre_bash(&make_input("bash", serde_json::json!({"command": "myreader ~/.SSH/id_rsa"})));
+        let output = pre_bash(&make_input(
+            "bash",
+            serde_json::json!({"command": "myreader ~/.SSH/id_rsa"}),
+        ));
         assert_eq!(
             output.decision,
             HookDecision::Block,
@@ -5625,7 +5629,10 @@ mod tests {
 
     #[test]
     fn test_case_insensitive_env_path() {
-        let output = pre_bash(&make_input("bash", serde_json::json!({"command": "myreader /home/user/.ENV"})));
+        let output = pre_bash(&make_input(
+            "bash",
+            serde_json::json!({"command": "myreader /home/user/.ENV"}),
+        ));
         assert_eq!(
             output.decision,
             HookDecision::Block,
@@ -6159,7 +6166,10 @@ mod expanded_claude_tests {
     #[test]
     fn pre_bash_blocks_uppercase_ssh_path() {
         // macOS APFS is case-insensitive: uppercase paths should be caught
-        let output = pre_bash(&make_test_input("bash", serde_json::json!({"command": "cat ~/.SSH/config"})));
+        let output = pre_bash(&make_test_input(
+            "bash",
+            serde_json::json!({"command": "cat ~/.SSH/config"}),
+        ));
         assert_eq!(
             output.decision,
             HookDecision::Block,
@@ -6169,7 +6179,10 @@ mod expanded_claude_tests {
 
     #[test]
     fn pre_bash_blocks_uppercase_env_file() {
-        let output = pre_bash(&make_test_input("bash", serde_json::json!({"command": "cat .ENV"})));
+        let output = pre_bash(&make_test_input(
+            "bash",
+            serde_json::json!({"command": "cat .ENV"}),
+        ));
         assert_eq!(
             output.decision,
             HookDecision::Block,
@@ -6179,7 +6192,10 @@ mod expanded_claude_tests {
 
     #[test]
     fn pre_bash_blocks_mixed_case_docker_config() {
-        let output = pre_bash(&make_test_input("bash", serde_json::json!({"command": "cat ~/.Docker/Config.json"})));
+        let output = pre_bash(&make_test_input(
+            "bash",
+            serde_json::json!({"command": "cat ~/.Docker/Config.json"}),
+        ));
         assert_eq!(
             output.decision,
             HookDecision::Block,
@@ -6191,7 +6207,10 @@ mod expanded_claude_tests {
 
     #[test]
     fn pre_read_blocks_claude_settings() {
-        let input = make_test_input("read", serde_json::json!({"file_path": "~/.claude/settings.json"}));
+        let input = make_test_input(
+            "read",
+            serde_json::json!({"file_path": "~/.claude/settings.json"}),
+        );
         let output = pre_read(&input);
         assert_eq!(
             output.decision,
@@ -6202,7 +6221,10 @@ mod expanded_claude_tests {
 
     #[test]
     fn pre_read_blocks_cursor_mcp_config() {
-        let input = make_test_input("read", serde_json::json!({"file_path": "~/.cursor/mcp.json"}));
+        let input = make_test_input(
+            "read",
+            serde_json::json!({"file_path": "~/.cursor/mcp.json"}),
+        );
         let output = pre_read(&input);
         assert_eq!(
             output.decision,
@@ -6213,7 +6235,10 @@ mod expanded_claude_tests {
 
     #[test]
     fn pre_read_blocks_copilot_dir() {
-        let input = make_test_input("read", serde_json::json!({"file_path": "~/.copilot/config.json"}));
+        let input = make_test_input(
+            "read",
+            serde_json::json!({"file_path": "~/.copilot/config.json"}),
+        );
         let output = pre_read(&input);
         assert_eq!(
             output.decision,
@@ -6224,7 +6249,10 @@ mod expanded_claude_tests {
 
     #[test]
     fn pre_read_blocks_aider_dir() {
-        let input = make_test_input("read", serde_json::json!({"file_path": "~/.aider/config.yml"}));
+        let input = make_test_input(
+            "read",
+            serde_json::json!({"file_path": "~/.aider/config.yml"}),
+        );
         let output = pre_read(&input);
         assert_eq!(
             output.decision,
@@ -6235,7 +6263,10 @@ mod expanded_claude_tests {
 
     #[test]
     fn pre_read_blocks_cline_dir() {
-        let input = make_test_input("read", serde_json::json!({"file_path": "~/.cline/settings.json"}));
+        let input = make_test_input(
+            "read",
+            serde_json::json!({"file_path": "~/.cline/settings.json"}),
+        );
         let output = pre_read(&input);
         assert_eq!(
             output.decision,
@@ -6246,7 +6277,10 @@ mod expanded_claude_tests {
 
     #[test]
     fn pre_read_blocks_roo_dir() {
-        let input = make_test_input("read", serde_json::json!({"file_path": "~/.roo/config.json"}));
+        let input = make_test_input(
+            "read",
+            serde_json::json!({"file_path": "~/.roo/config.json"}),
+        );
         let output = pre_read(&input);
         assert_eq!(
             output.decision,

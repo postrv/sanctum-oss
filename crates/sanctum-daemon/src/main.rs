@@ -204,16 +204,12 @@ async fn run_daemon(
                 );
                 None
             } else {
-                let nm_dirs =
-                    sanctum_sentinel::npm::watcher::discover_node_modules(&project_dirs);
+                let nm_dirs = sanctum_sentinel::npm::watcher::discover_node_modules(&project_dirs);
                 if nm_dirs.is_empty() {
                     tracing::warn!("no node_modules directories found in configured project_dirs");
                     None
                 } else {
-                    tracing::info!(
-                        count = nm_dirs.len(),
-                        "npm lifecycle monitoring enabled"
-                    );
+                    tracing::info!(count = nm_dirs.len(), "npm lifecycle monitoring enabled");
                     match sanctum_sentinel::npm::watcher::NpmWatcher::start(&nm_dirs, npm_file_tx) {
                         Ok(w) => {
                             tracing::info!("npm filesystem watcher started");
@@ -270,8 +266,7 @@ async fn run_daemon(
 
                 // After receiving events or timeout, check if we should scan
                 if debouncer.should_scan() {
-                    let dirs: Vec<std::path::PathBuf> =
-                        debouncer.drain().into_iter().collect();
+                    let dirs: Vec<std::path::PathBuf> = debouncer.drain().into_iter().collect();
                     let audit_p = audit_path_npm.clone();
                     let handle = tokio::task::spawn_blocking(move || {
                         event_handler::handle_npm_scan_results(&dirs, &audit_p);
@@ -1688,5 +1683,4 @@ mod tests {
             other => panic!("expected ThreatList, got {other:?}"),
         }
     }
-
 }

@@ -98,10 +98,7 @@ impl McpPolicy {
 
         // Normalize paths: collapse `.`, `..` segments and lowercase for
         // case-insensitive matching (macOS APFS is case-preserving).
-        let paths: Vec<String> = raw_paths
-            .iter()
-            .map(|p| normalize_mcp_path(p))
-            .collect();
+        let paths: Vec<String> = raw_paths.iter().map(|p| normalize_mcp_path(p)).collect();
 
         // Phase 1: Check built-in sensitive path restrictions.
         // These apply to ALL MCP tools regardless of user rules.

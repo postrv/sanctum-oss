@@ -264,8 +264,7 @@ impl NpmWatcher {
                         let package_dir = path.parent().map(Path::to_path_buf).unwrap_or(path);
                         let file_event = NpmFileEvent { package_dir };
                         if tx.blocking_send(file_event).is_err() {
-                            alive_clone
-                                .store(false, std::sync::atomic::Ordering::Release);
+                            alive_clone.store(false, std::sync::atomic::Ordering::Release);
                             return;
                         }
                     }
@@ -319,9 +318,7 @@ mod tests {
             "/project/node_modules/pkg/package.json"
         )));
         assert!(is_npm_watched_file(Path::new("package.json")));
-        assert!(is_npm_watched_file(Path::new(
-            "/deep/path/to/package.json"
-        )));
+        assert!(is_npm_watched_file(Path::new("/deep/path/to/package.json")));
     }
 
     #[test]
@@ -359,8 +356,7 @@ mod tests {
         // Only dir1 has node_modules
         std::fs::create_dir(dir1.path().join("node_modules")).expect("create");
 
-        let result =
-            discover_node_modules(&[dir1.path().to_path_buf(), dir2.path().to_path_buf()]);
+        let result = discover_node_modules(&[dir1.path().to_path_buf(), dir2.path().to_path_buf()]);
         assert_eq!(result.len(), 1);
     }
 

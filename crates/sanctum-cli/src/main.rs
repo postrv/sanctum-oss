@@ -385,8 +385,8 @@ mod tests {
 
     #[test]
     fn entropy_allow_accepts_optional_value() {
-        let cli =
-            Cli::try_parse_from(["sanctum", "entropy", "allow", "my-secret"]).expect("should parse");
+        let cli = Cli::try_parse_from(["sanctum", "entropy", "allow", "my-secret"])
+            .expect("should parse");
         match cli.command {
             Commands::Entropy {
                 action: EntropyAction::Allow { value },

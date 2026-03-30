@@ -6,7 +6,7 @@
 pub mod scanner;
 pub mod watcher;
 
-use crate::pth::lineage::{ProcessLineage, ProcSource, SystemProcSource};
+use crate::pth::lineage::{ProcSource, ProcessLineage, SystemProcSource};
 
 /// Check whether a lockfile change is expected given the current context.
 ///

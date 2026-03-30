@@ -135,15 +135,9 @@ mod tests {
             identify_provider("generativelanguage.googleapis.com"),
             Some(Provider::Google)
         );
-        assert_eq!(
-            identify_provider("api.mistral.ai"),
-            Some(Provider::Mistral)
-        );
+        assert_eq!(identify_provider("api.mistral.ai"), Some(Provider::Mistral));
         assert_eq!(identify_provider("api.groq.com"), Some(Provider::Groq));
-        assert_eq!(
-            identify_provider("api.cohere.com"),
-            Some(Provider::Cohere)
-        );
+        assert_eq!(identify_provider("api.cohere.com"), Some(Provider::Cohere));
         assert_eq!(
             identify_provider("api.deepseek.com"),
             Some(Provider::DeepSeek)

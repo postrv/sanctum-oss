@@ -16,16 +16,11 @@ fn make_policy_with_rules() -> McpPolicy {
         },
         PolicyRule {
             tool: "write_file".to_owned(),
-            restricted_paths: vec![
-                "/etc/**".to_owned(),
-                "**/*.pth".to_owned(),
-            ],
+            restricted_paths: vec!["/etc/**".to_owned(), "**/*.pth".to_owned()],
         },
         PolicyRule {
             tool: "exec".to_owned(),
-            restricted_paths: vec![
-                "/usr/bin/**".to_owned(),
-            ],
+            restricted_paths: vec!["/usr/bin/**".to_owned()],
         },
     ])
 }

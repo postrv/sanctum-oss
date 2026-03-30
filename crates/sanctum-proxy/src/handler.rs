@@ -349,13 +349,10 @@ async fn send_upstream(
         req_builder = req_builder.body(request_body);
     }
 
-    req_builder
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::debug!(error = %e, "upstream request failed");
-            ProxyError::Upstream("upstream request failed".to_string())
-        })
+    req_builder.send().await.map_err(|e| {
+        tracing::debug!(error = %e, "upstream request failed");
+        ProxyError::Upstream("upstream request failed".to_string())
+    })
 }
 
 /// Check whether a request body contains `"stream": true`, indicating
@@ -424,14 +421,10 @@ async fn read_response_body_limited(
 
     let mut total: u64 = 0;
     let mut chunks: Vec<bytes::Bytes> = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| {
-            tracing::debug!(error = %e, "failed to read response body");
-            ProxyError::Upstream("failed to read response body".to_string())
-        })?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        tracing::debug!(error = %e, "failed to read response body");
+        ProxyError::Upstream("failed to read response body".to_string())
+    })? {
         total = total.saturating_add(chunk.len() as u64);
         if total > max_bytes {
             return Err(ProxyError::PayloadTooLarge {
@@ -514,7 +507,9 @@ const fn error_type_str(error: &ProxyError) -> &'static str {
         ProxyError::SsrfBlocked { .. } => "ssrf_blocked",
         ProxyError::MethodNotAllowed { .. } => "method_not_allowed",
         ProxyError::ConflictingContentLength => "conflicting_content_length",
-        ProxyError::DnsResolutionFailed { .. } | ProxyError::ConnectFailed { .. } => "connect_error",
+        ProxyError::DnsResolutionFailed { .. } | ProxyError::ConnectFailed { .. } => {
+            "connect_error"
+        }
         ProxyError::Upstream(_) | ProxyError::TunnelTimeout { .. } => "upstream_error",
         _ => "internal_error",
     }

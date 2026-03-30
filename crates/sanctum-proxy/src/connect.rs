@@ -60,7 +60,13 @@ const HEADER_BOUNDARY: &[u8] = b"\r\n\r\n";
 pub const MAX_CERT_CACHE_SIZE: usize = 100;
 
 /// Parsed HTTP request components: (method, path, query, headers, body).
-type ParsedRequest = (String, String, Option<String>, Vec<(String, String)>, Vec<u8>);
+type ParsedRequest = (
+    String,
+    String,
+    Option<String>,
+    Vec<(String, String)>,
+    Vec<u8>,
+);
 
 /// Shared state for the CONNECT handler, including the CA for MITM.
 #[derive(Clone)]
@@ -392,15 +398,19 @@ pub async fn connect_validated(host: &str, addrs: &[SocketAddr]) -> Result<TcpSt
 /// Returns `ProxyError::InvalidPath` if the authority cannot be parsed.
 pub fn parse_connect_authority(authority: &str) -> Result<(String, u16), ProxyError> {
     // Try to find the last colon that separates host from port.
-    let colon_pos = authority.rfind(':').ok_or_else(|| ProxyError::InvalidPath {
-        reason: format!("CONNECT authority missing port: {authority}"),
-    })?;
+    let colon_pos = authority
+        .rfind(':')
+        .ok_or_else(|| ProxyError::InvalidPath {
+            reason: format!("CONNECT authority missing port: {authority}"),
+        })?;
 
     let host = &authority[..colon_pos];
     let port_str = &authority[colon_pos + 1..];
-    let port = port_str.parse::<u16>().map_err(|_| ProxyError::InvalidPath {
-        reason: format!("CONNECT authority has invalid port: {authority}"),
-    })?;
+    let port = port_str
+        .parse::<u16>()
+        .map_err(|_| ProxyError::InvalidPath {
+            reason: format!("CONNECT authority has invalid port: {authority}"),
+        })?;
 
     if host.is_empty() {
         return Err(ProxyError::InvalidPath {
@@ -542,11 +552,7 @@ fn determine_action(host: &str, port: u16) -> ConnectAction {
 /// # Errors
 ///
 /// Returns `ProxyError` if the connection or relay fails.
-pub async fn blind_tunnel(
-    mut client: TcpStream,
-    host: &str,
-    port: u16,
-) -> Result<(), ProxyError> {
+pub async fn blind_tunnel(mut client: TcpStream, host: &str, port: u16) -> Result<(), ProxyError> {
     // Validate the target is not a private IP (SSRF prevention)
     // and connect using the validated addresses (DNS rebinding prevention).
     let addrs = resolve_and_validate(host, port).await?;
@@ -730,21 +736,15 @@ pub async fn mitm_intercept(
     };
 
     // Write the response back to the client.
-    tls_stream
-        .write_all(&response_bytes)
-        .await
-        .map_err(|e| {
-            tracing::debug!(error = %e, "failed to write TLS response");
-            ProxyError::Upstream("failed to write TLS response".to_string())
-        })?;
+    tls_stream.write_all(&response_bytes).await.map_err(|e| {
+        tracing::debug!(error = %e, "failed to write TLS response");
+        ProxyError::Upstream("failed to write TLS response".to_string())
+    })?;
 
-    tls_stream
-        .shutdown()
-        .await
-        .map_err(|e| {
-            tracing::debug!(error = %e, "failed to shutdown TLS");
-            ProxyError::Upstream("failed to shutdown TLS".to_string())
-        })?;
+    tls_stream.shutdown().await.map_err(|e| {
+        tracing::debug!(error = %e, "failed to shutdown TLS");
+        ProxyError::Upstream("failed to shutdown TLS".to_string())
+    })?;
 
     Ok(())
 }
@@ -795,13 +795,10 @@ where
 
     // Phase 1: Read until we find the header boundary.
     loop {
-        let n = stream
-            .read(&mut temp)
-            .await
-            .map_err(|e| {
-                tracing::debug!(error = %e, "failed to read from MITM stream");
-                ProxyError::Upstream("failed to read from MITM stream".to_string())
-            })?;
+        let n = stream.read(&mut temp).await.map_err(|e| {
+            tracing::debug!(error = %e, "failed to read from MITM stream");
+            ProxyError::Upstream("failed to read from MITM stream".to_string())
+        })?;
 
         if n == 0 {
             // Connection closed before header boundary found.
@@ -825,9 +822,7 @@ where
         // Guard against oversized headers.
         if buf.len() > MAX_HEADER_SIZE {
             return Err(ProxyError::PayloadTooLarge {
-                reason: format!(
-                    "request headers exceed {MAX_HEADER_SIZE} bytes without boundary"
-                ),
+                reason: format!("request headers exceed {MAX_HEADER_SIZE} bytes without boundary"),
             });
         }
     }
@@ -894,13 +889,10 @@ where
 ///
 /// This is a simple parser for HTTP/1.1 requests sufficient for
 /// proxying to the handler module.
-fn parse_http_request(
-    data: &[u8],
-) -> Result<ParsedRequest, ProxyError> {
-    let request_str =
-        std::str::from_utf8(data).map_err(|_| ProxyError::InvalidPath {
-            reason: "request is not valid UTF-8".to_owned(),
-        })?;
+fn parse_http_request(data: &[u8]) -> Result<ParsedRequest, ProxyError> {
+    let request_str = std::str::from_utf8(data).map_err(|_| ProxyError::InvalidPath {
+        reason: "request is not valid UTF-8".to_owned(),
+    })?;
 
     // Split headers from body.
     let (header_section, body_section) = request_str
@@ -948,11 +940,7 @@ fn parse_http_request(
 }
 
 /// Format an HTTP response as raw bytes.
-fn format_http_response(
-    status: u16,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> Vec<u8> {
+fn format_http_response(status: u16, headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -1064,9 +1052,12 @@ pub fn parse_content_length(headers: &[(String, String)]) -> Result<Option<u64>,
 
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("content-length") {
-            let parsed = value.trim().parse::<u64>().map_err(|_| ProxyError::InvalidPath {
-                reason: "invalid Content-Length value".to_owned(),
-            })?;
+            let parsed = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| ProxyError::InvalidPath {
+                    reason: "invalid Content-Length value".to_owned(),
+                })?;
 
             match found_value {
                 Some(existing) if existing != parsed => {
@@ -1136,16 +1127,18 @@ mod tests {
             "generativelanguage.googleapis.com",
         ];
         for host in hosts {
-            assert!(
-                should_intercept(host),
-                "{host} should trigger interception"
-            );
+            assert!(should_intercept(host), "{host} should trigger interception");
         }
     }
 
     #[test]
     fn test_non_llm_hosts_use_blind_tunnel() {
-        let hosts = ["github.com", "google.com", "example.com", "registry.npmjs.org"];
+        let hosts = [
+            "github.com",
+            "google.com",
+            "example.com",
+            "registry.npmjs.org",
+        ];
         for host in hosts {
             assert!(
                 !should_intercept(host),
@@ -1190,7 +1183,10 @@ mod tests {
         assert_eq!(headers.len(), 2);
         assert_eq!(headers[0].0, "Host");
         assert_eq!(headers[0].1, "api.openai.com");
-        assert_eq!(std::str::from_utf8(&body).unwrap(), "{\"model\":\"gpt-4o\"}");
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            "{\"model\":\"gpt-4o\"}"
+        );
     }
 
     #[test]
@@ -1240,10 +1236,7 @@ mod tests {
 
     #[test]
     fn test_format_http_response_strips_header_injection() {
-        let headers = vec![(
-            "x-test".to_owned(),
-            "value\r\nX-Evil: injected".to_owned(),
-        )];
+        let headers = vec![("x-test".to_owned(), "value\r\nX-Evil: injected".to_owned())];
         let body = b"ok";
         let response = format_http_response(200, &headers, body);
         let response_str = String::from_utf8(response).unwrap();
@@ -1253,7 +1246,10 @@ mod tests {
         // one for content-length, and one for the header/body boundary.
         let line_count = response_str.matches("\r\n").count();
         // status + x-test + content-length + blank = 4
-        assert_eq!(line_count, 4, "CRLF injection must not create extra header lines");
+        assert_eq!(
+            line_count, 4,
+            "CRLF injection must not create extra header lines"
+        );
         // The sanitized value should have CRLF removed.
         assert!(
             response_str.contains("x-test: valueX-Evil: injected\r\n"),
@@ -1442,19 +1438,13 @@ mod tests {
 
     #[test]
     fn test_private_ipv6_link_local() {
-        assert!(is_private_ipv6(&Ipv6Addr::new(
-            0xFE80, 0, 0, 0, 0, 0, 0, 1
-        )));
+        assert!(is_private_ipv6(&Ipv6Addr::new(0xFE80, 0, 0, 0, 0, 0, 0, 1)));
     }
 
     #[test]
     fn test_private_ipv6_unique_local() {
-        assert!(is_private_ipv6(&Ipv6Addr::new(
-            0xFC00, 0, 0, 0, 0, 0, 0, 1
-        )));
-        assert!(is_private_ipv6(&Ipv6Addr::new(
-            0xFD00, 0, 0, 0, 0, 0, 0, 1
-        )));
+        assert!(is_private_ipv6(&Ipv6Addr::new(0xFC00, 0, 0, 0, 0, 0, 0, 1)));
+        assert!(is_private_ipv6(&Ipv6Addr::new(0xFD00, 0, 0, 0, 0, 0, 0, 1)));
     }
 
     #[test]
@@ -1516,7 +1506,9 @@ mod tests {
     #[test]
     fn test_is_private_ip_v6_public() {
         // Use a real public IPv6 (not documentation prefix).
-        let ip = IpAddr::V6(Ipv6Addr::new(0x2607, 0xF8B0, 0x4004, 0x0800, 0, 0, 0, 0x200E));
+        let ip = IpAddr::V6(Ipv6Addr::new(
+            0x2607, 0xF8B0, 0x4004, 0x0800, 0, 0, 0, 0x200E,
+        ));
         assert!(!is_private_ip(&ip));
     }
 
@@ -1612,7 +1604,8 @@ mod tests {
 
     #[test]
     fn test_parse_content_length_raw_present() {
-        let headers = "POST /v1/chat HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: 42\r\n\r\n";
+        let headers =
+            "POST /v1/chat HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: 42\r\n\r\n";
         assert_eq!(parse_content_length_raw(headers).unwrap(), Some(42));
     }
 
@@ -1819,8 +1812,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_and_validate_nonexistent_host() {
-        let result =
-            resolve_and_validate("this-host-definitely-does-not-exist.invalid", 80).await;
+        let result = resolve_and_validate("this-host-definitely-does-not-exist.invalid", 80).await;
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -1841,10 +1833,7 @@ mod tests {
     #[tokio::test]
     async fn test_connect_validated_unreachable_addr() {
         // Use a non-routable TEST-NET address that will fail quickly.
-        let addrs = vec![SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            1,
-        )];
+        let addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 1)];
         let result = connect_validated("test.example.com", &addrs).await;
         assert!(result.is_err());
         assert!(matches!(
@@ -1918,7 +1907,9 @@ mod tests {
     #[test]
     fn test_ipv6_documentation_prefix_full_range_is_private() {
         // 2001:db8:ffff:ffff:ffff:ffff:ffff:ffff
-        let ip = Ipv6Addr::new(0x2001, 0x0DB8, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF);
+        let ip = Ipv6Addr::new(
+            0x2001, 0x0DB8, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
+        );
         assert!(is_private_ipv6(&ip));
     }
 

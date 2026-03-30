@@ -345,7 +345,8 @@ mod tests {
         let h = hash_secret("test");
         assert_eq!(h.len(), 64, "SHA-256 hex hash should be 64 chars");
         assert!(
-            h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "hash should be lowercase hex"
         );
     }

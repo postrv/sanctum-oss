@@ -500,7 +500,12 @@ mod tests {
         enforce_security_floor(&mut config, true, &global);
         // Local rule + global rule should both be present.
         assert_eq!(config.ai_firewall.mcp_rules.len(), 2);
-        let tools: Vec<&str> = config.ai_firewall.mcp_rules.iter().map(|r| r.tool.as_str()).collect();
+        let tools: Vec<&str> = config
+            .ai_firewall
+            .mcp_rules
+            .iter()
+            .map(|r| r.tool.as_str())
+            .collect();
         assert!(tools.contains(&"read_file"));
         assert!(tools.contains(&"write_file"));
     }

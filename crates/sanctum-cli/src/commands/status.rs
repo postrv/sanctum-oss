@@ -117,7 +117,10 @@ mod tests {
     #[test]
     fn offline_status_returns_daemon_not_running() {
         let result = offline_status();
-        assert!(result.is_err(), "offline_status should return Err(DaemonNotRunning)");
+        assert!(
+            result.is_err(),
+            "offline_status should return Err(DaemonNotRunning)"
+        );
         let err = result.unwrap_err();
         assert!(
             matches!(err, CliError::DaemonNotRunning),

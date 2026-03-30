@@ -41,10 +41,7 @@ fn bounded_read_file(path: &Path, max_size: u64) -> Result<Option<String>, std::
 
 /// Check whether a path refers to a `sitecustomize.py` or `usercustomize.py` file.
 fn is_site_customize_file(path: &Path) -> bool {
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     file_name.eq_ignore_ascii_case("sitecustomize.py")
         || file_name.eq_ignore_ascii_case("usercustomize.py")
 }
@@ -110,9 +107,8 @@ fn handle_site_customize_event(event: &WatchEvent, audit_path: &Path) {
         .collect();
 
     // Best-effort process lineage
-    let (creator_pid, creator_exe) = try_find_creator_pid(&event.path).map_or(
-        (None, None),
-        |pid| {
+    let (creator_pid, creator_exe) =
+        try_find_creator_pid(&event.path).map_or((None, None), |pid| {
             match ProcessLineage::trace(pid, &SystemProcSource) {
                 Ok(lineage) => {
                     let exe = lineage.root_ancestor().and_then(|p| p.exe.clone());
@@ -124,8 +120,7 @@ fn handle_site_customize_event(event: &WatchEvent, audit_path: &Path) {
                     (Some(pid), None)
                 }
             }
-        },
-    );
+        });
 
     if found_keywords.is_empty() {
         tracing::info!(
@@ -200,23 +195,17 @@ fn handle_pth_event(
     } else {
         Some(config.sentinel.pth_allowlist.as_slice())
     };
-    let analysis = analyse_pth_file_with_custom_allowlist(
-        &content,
-        package_name,
-        &hash,
-        custom_allowlist,
-    );
+    let analysis =
+        analyse_pth_file_with_custom_allowlist(&content, package_name, &hash, custom_allowlist);
 
     // Attempt to determine the creator process (best-effort)
-    let (creator_pid, creator_exe, lineage_assessment) = try_find_creator_pid(&event.path)
-        .map_or(
-            (None, None, LineageAssessment::Undetermined),
-            trace_creator_lineage,
-        );
+    let (creator_pid, creator_exe, lineage_assessment) = try_find_creator_pid(&event.path).map_or(
+        (None, None, LineageAssessment::Undetermined),
+        trace_creator_lineage,
+    );
 
     // Determine the effective threat level, escalating if lineage is suspicious
-    let escalate_for_lineage =
-        lineage_assessment == LineageAssessment::SuspiciousPythonStartup;
+    let escalate_for_lineage = lineage_assessment == LineageAssessment::SuspiciousPythonStartup;
 
     let ctx = VerdictContext {
         event,
@@ -387,10 +376,7 @@ pub fn handle_network_event(event: &sanctum_sentinel::network::NetworkEvent, aud
 ///
 /// Scans each package directory using `scan_package()` and emits threat events
 /// for critical findings. Non-critical findings are logged at info level.
-pub fn handle_npm_scan_results(
-    package_dirs: &[std::path::PathBuf],
-    audit_path: &Path,
-) {
+pub fn handle_npm_scan_results(package_dirs: &[std::path::PathBuf], audit_path: &Path) {
     for package_dir in package_dirs {
         let result = sanctum_sentinel::npm::scanner::scan_package(package_dir);
 
@@ -405,10 +391,7 @@ pub fn handle_npm_scan_results(
         match result.risk {
             sanctum_sentinel::npm::scanner::RiskLevel::Critical => {
                 let description = if result.findings.is_empty() {
-                    format!(
-                        "Critical npm lifecycle threat in {}",
-                        package_dir.display(),
-                    )
+                    format!("Critical npm lifecycle threat in {}", package_dir.display(),)
                 } else {
                     let finding_descs: Vec<&str> =
                         result.findings.iter().map(|f| f.pattern.as_str()).collect();

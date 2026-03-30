@@ -51,11 +51,12 @@ pub fn send_command(command: &IpcCommand) -> Result<IpcResponse, CliError> {
         .map_err(|e| CliError::ConnectionFailed(format!("failed to create runtime: {e}")))?;
 
     runtime.block_on(async {
-        tokio::time::timeout(IPC_TIMEOUT, send_command_async(socket_path, command, auth_token))
-            .await
-            .map_err(|_| {
-                CliError::ConnectionFailed("IPC operation timed out after 10s".to_owned())
-            })?
+        tokio::time::timeout(
+            IPC_TIMEOUT,
+            send_command_async(socket_path, command, auth_token),
+        )
+        .await
+        .map_err(|_| CliError::ConnectionFailed("IPC operation timed out after 10s".to_owned()))?
     })
 }
 

@@ -198,11 +198,7 @@ struct NpmSummary {
 }
 
 /// Run the npm supply chain scan.
-fn run_npm_scan(
-    json: bool,
-    npm_path: Option<PathBuf>,
-    max_depth: usize,
-) -> Result<(), CliError> {
+fn run_npm_scan(json: bool, npm_path: Option<PathBuf>, max_depth: usize) -> Result<(), CliError> {
     let root = match npm_path {
         Some(p) => p,
         None => std::env::current_dir()?,
@@ -400,7 +396,8 @@ fn output_npm_human(results: &[ScanResult], summary: &NpmSummary) {
                     result.risk
                 );
                 for finding in &result.findings {
-                    println!("    [{level}] {source}: {pattern}",
+                    println!(
+                        "    [{level}] {source}: {pattern}",
                         level = finding.level,
                         source = finding.source,
                         pattern = finding.pattern,
@@ -813,11 +810,7 @@ mod tests {
     fn discover_package_jsons_finds_nested_node_modules() {
         let dir = tempfile::tempdir().expect("tempdir");
         // root/package.json
-        fs::write(
-            dir.path().join("package.json"),
-            r#"{"name": "root"}"#,
-        )
-        .expect("write");
+        fs::write(dir.path().join("package.json"), r#"{"name": "root"}"#).expect("write");
 
         // root/node_modules/evil-pkg/package.json
         let evil_dir = dir.path().join("node_modules").join("evil-pkg");
@@ -836,8 +829,7 @@ mod tests {
     fn discover_package_jsons_respects_depth_limit() {
         let dir = tempfile::tempdir().expect("tempdir");
         // root/package.json
-        fs::write(dir.path().join("package.json"), r#"{"name": "root"}"#)
-            .expect("write");
+        fs::write(dir.path().join("package.json"), r#"{"name": "root"}"#).expect("write");
 
         // Create nested node_modules (3 levels deep)
         // Level 1: root/node_modules/a/package.json
@@ -929,10 +921,7 @@ mod tests {
         .expect("write");
 
         let dirs = discover_package_jsons(dir.path(), 2);
-        let results: Vec<ScanResult> = dirs
-            .iter()
-            .map(|d| scanner::scan_package(d))
-            .collect();
+        let results: Vec<ScanResult> = dirs.iter().map(|d| scanner::scan_package(d)).collect();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].risk >= RiskLevel::High);
@@ -949,10 +938,7 @@ mod tests {
         .expect("write");
 
         let dirs = discover_package_jsons(dir.path(), 2);
-        let results: Vec<ScanResult> = dirs
-            .iter()
-            .map(|d| scanner::scan_package(d))
-            .collect();
+        let results: Vec<ScanResult> = dirs.iter().map(|d| scanner::scan_package(d)).collect();
         let summary = aggregate_npm_results(&results);
 
         assert!(!summary.has_high_or_above);
@@ -982,18 +968,14 @@ mod tests {
             "level": finding.level.to_string(),
         });
         let json_str = serde_json::to_string(&obj).expect("serialise");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json_str).expect("parse");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("parse");
 
         assert_eq!(parsed.get("type").and_then(|v| v.as_str()), Some("npm"));
         assert_eq!(
             parsed.get("package_dir").and_then(|v| v.as_str()),
             Some("/test/pkg")
         );
-        assert_eq!(
-            parsed.get("level").and_then(|v| v.as_str()),
-            Some("high")
-        );
+        assert_eq!(parsed.get("level").and_then(|v| v.as_str()), Some("high"));
         assert!(parsed.get("source").is_some());
         assert!(parsed.get("pattern").is_some());
     }
@@ -1020,11 +1002,12 @@ mod tests {
             "ok": !summary.has_high_or_above,
         });
         let json_str = serde_json::to_string(&obj).expect("serialise");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json_str).expect("parse");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("parse");
 
         assert_eq!(
-            parsed.get("packages_scanned").and_then(serde_json::Value::as_u64),
+            parsed
+                .get("packages_scanned")
+                .and_then(serde_json::Value::as_u64),
             Some(5)
         );
         assert_eq!(

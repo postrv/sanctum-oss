@@ -210,13 +210,15 @@ mod kani_proofs {
     use super::*;
 
     #[kani::proof]
-    #[kani::unwind(10)]
+    #[kani::unwind(6)]
     fn shannon_entropy_never_panics() {
-        // Prove that shannon_entropy never panics for any input up to 8 bytes.
+        // Prove that shannon_entropy never panics for any input up to 4 bytes.
+        // Bounded to 4 bytes because HashMap internals generate expensive CBMC
+        // code (hashing, bucket management, iteration).
         let len: usize = kani::any();
-        kani::assume(len <= 8);
+        kani::assume(len <= 4);
 
-        let bytes: [u8; 8] = kani::any();
+        let bytes: [u8; 4] = kani::any();
         // Construct a valid UTF-8 string from the bytes
         if let Ok(s) = std::str::from_utf8(&bytes[..len]) {
             let result = shannon_entropy(s);

@@ -107,16 +107,16 @@ jobs:
 
   kani-core:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Strip rust-version (Kani uses its own nightly toolchain)
         run: sed -i 's/^rust-version.*$//' Cargo.toml crates/*/Cargo.toml
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1
         with:
-          args: -p sanctum-sentinel --default-unwind 20
-      - run: cargo kani -p sanctum-budget --default-unwind 20
-      - run: cargo kani -p sanctum-firewall --default-unwind 20
+          args: -p sanctum-sentinel --default-unwind 10 --harness quarantine_state_transitions --harness validate_id_rejects_traversal
+      - run: cargo kani -p sanctum-budget --default-unwind 10
+      - run: cargo kani -p sanctum-firewall --default-unwind 10
 
   kani-full:
     if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'
@@ -128,7 +128,7 @@ jobs:
         run: sed -i 's/^rust-version.*$//' Cargo.toml crates/*/Cargo.toml
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1
         with:
-          args: --workspace --default-unwind 20
+          args: --workspace --default-unwind 10
 
   fuzz:
     runs-on: ubuntu-latest

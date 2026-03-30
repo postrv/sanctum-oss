@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-31
+
+### Added
+- **SSE streaming budget tracking**: New `sse.rs` module parses Server-Sent Event streams from OpenAI (final chunk usage), Anthropic (split `message_start` + `message_delta`), and Google (last `usageMetadata` chunk). Streaming LLM calls now have full budget enforcement — previously they bypassed tracking entirely.
+- **npx package extraction**: `extract_npx_package()` handles positional args, `--package`/`--package=`/`-p` flags, scoped packages (`@angular/cli`), version stripping, and `-y`/`--yes` flags. Integrated into slopsquatting detection.
+- **npm ci recognition**: `npm ci` recognised as an install command (lockfile-only, no package args). Added to `NPM_INSTALL_PATTERNS` for lifecycle script warnings.
+
+### Fixed
+- **Critical**: SSE extractors used `?` operator inside loops, causing a single malformed or missing-key chunk to abort the entire search instead of continuing to the next event
+- **SSE spec compliance**: Parser stripped all leading spaces after `data:` colon instead of exactly one per the SSE spec
+
+### Changed
+- **Kani CI timeouts**: `kani-core` 45 → 60 min, `kani-full` 120 → 180 min
+- 1,794 tests (up from 1,742)
+
 ## [0.2.0] - 2026-03-30
 
 ### Security

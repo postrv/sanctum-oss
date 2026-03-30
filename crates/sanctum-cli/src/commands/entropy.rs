@@ -66,9 +66,11 @@ fn write_allowlist(entries: &[String], path: &Path) -> Result<(), CliError> {
 /// If `None`, reads a single line from stdin.
 fn run_allow(value: Option<&str>, path: &Path) -> Result<(), CliError> {
     let secret = if let Some(v) = value {
-        tracing::warn!(
-            "Value passed as CLI argument -- it may be visible in shell history and process listings"
-        );
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("Warning: value passed as CLI argument -- it may be visible in shell history and process listings.");
+            eprintln!("Prefer: echo <value> | sanctum entropy allow");
+        }
         v.trim().to_string()
     } else {
         let mut buf = String::new();

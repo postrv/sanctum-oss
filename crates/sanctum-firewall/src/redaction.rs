@@ -167,7 +167,7 @@ const MAX_BASE64_DECODE_DEPTH: usize = 2;
 
 /// Attempt to base64-decode a token and scan the decoded content for
 /// credential patterns. Tries `STANDARD`, `URL_SAFE`, and `URL_SAFE_NO_PAD` engines.
-fn try_base64_decode_and_rescan(
+fn try_base64_decode_and_rescan_recursive(
     token: &str,
     patterns: &[CredentialPattern],
     depth: usize,
@@ -228,7 +228,7 @@ fn try_base64_decode_and_rescan(
         });
     }
 
-    try_base64_decode_and_rescan(&decoded, patterns, depth + 1)
+    try_base64_decode_and_rescan_recursive(&decoded, patterns, depth + 1)
 }
 
 /// Check whether a value's SHA-256 hash is in the entropy allowlist.
@@ -439,7 +439,7 @@ pub fn redact_credentials_with_config(
             if overlaps_existing {
                 return None;
             }
-            try_base64_decode_and_rescan(token, PATTERNS, 0).map(|evt| {
+            try_base64_decode_and_rescan_recursive(token, PATTERNS, 0).map(|evt| {
                 RawMatch {
                     credential_type: Box::leak(evt.credential_type.into_boxed_str()),
                     start: mat.start(),
@@ -1178,7 +1178,7 @@ mod expanded_tests {
         let suffix = "TestValue0123456789ab";
         let payload = format!("{prefix}{suffix}");
         let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
-        let result = try_base64_decode_and_rescan(&encoded, PATTERNS, 0);
+        let result = try_base64_decode_and_rescan_recursive(&encoded, PATTERNS, 0);
         assert!(
             result.is_some(),
             "base64-encoded credential should be detected, encoded={encoded}"
@@ -1192,7 +1192,7 @@ mod expanded_tests {
         let suffix = "TestValue0123456789ab";
         let payload = format!("{prefix}{suffix}");
         let encoded = base64::engine::general_purpose::URL_SAFE.encode(&payload);
-        let result = try_base64_decode_and_rescan(&encoded, PATTERNS, 0);
+        let result = try_base64_decode_and_rescan_recursive(&encoded, PATTERNS, 0);
         assert!(
             result.is_some(),
             "URL-safe base64-encoded credential should be detected, encoded={encoded}"
@@ -1473,6 +1473,53 @@ mod base64_rescan_tests {
         assert!(
             result.is_none(),
             "base64 without credentials should return None"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn with_config_uses_custom_threshold() {
+        let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
+        let input = format!("config: {secret}");
+        let (output, events) = redact_credentials_with_config(&input, 99.0, 20, &HashSet::new());
+        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(output.contains(secret));
+    }
+
+    #[test]
+    fn with_config_uses_custom_min_length() {
+        let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
+        let input = format!("config: {secret}");
+        let (output, events) = redact_credentials_with_config(&input, 3.0, 100, &HashSet::new());
+        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(output.contains(secret));
+    }
+
+    #[test]
+    fn with_config_respects_allowlist() {
+        let secret = "aB3dE7fG9hJ2kL5mN8pQ1rS4tU6vW0x";
+        let hash = sha2::Sha256::digest(secret.as_bytes());
+        let hex_hash = hex::encode(hash);
+
+        let input = format!("config: {secret}");
+        let allowlist: HashSet<String> = vec![hex_hash].into_iter().collect();
+        let (output, events) = redact_credentials_with_config(&input, 3.0, 20, &allowlist);
+        assert!(!events.iter().any(|e| e.credential_type == "High-Entropy Secret"));
+        assert!(output.contains(secret));
+    }
+
+    #[test]
+    fn with_config_still_catches_regex_patterns() {
+        let input = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+        let (_, events) = redact_credentials_with_config(input, 99.0, 100, &HashSet::new());
+        assert!(
+            events.iter().any(|e| e.credential_type == "AWS Access Key"),
+            "regex patterns should still be caught regardless of entropy config"
         );
     }
 }

@@ -279,10 +279,13 @@ pub struct AiFirewallConfig {
     /// Default policy for MCP tools that do not match any explicit rule.
     #[serde(default)]
     pub default_mcp_policy: McpDefaultPolicy,
-    /// Shannon entropy threshold (bits/char) for the entropy-based fallback.
+    /// Shannon entropy threshold for high-entropy secret detection (bits/char).
+    /// Higher values mean fewer false positives but may miss some secrets.
+    /// Security floor: minimum 3.5.
     #[serde(default = "default_entropy_threshold")]
     pub entropy_threshold: f64,
-    /// Minimum token length for entropy-based secret detection.
+    /// Minimum string length for entropy-based secret detection.
+    /// Security floor: minimum 16.
     #[serde(default = "default_entropy_min_length")]
     pub entropy_min_length: usize,
 }

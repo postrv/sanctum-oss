@@ -8,6 +8,7 @@
 //! output. Overlapping matches are resolved by preferring the most specific
 //! pattern (patterns are ordered by specificity in [`crate::patterns::PATTERNS`]).
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
@@ -93,7 +94,7 @@ pub struct RedactionEvent {
 
 /// A match found during scanning, before overlap resolution.
 struct RawMatch {
-    credential_type: &'static str,
+    credential_type: Cow<'static, str>,
     start: usize,
     end: usize,
     matched_text: String,
@@ -271,7 +272,7 @@ fn collect_pattern_matches(text: &str) -> Vec<RawMatch> {
                 continue;
             }
             raw_matches.push(RawMatch {
-                credential_type: pattern.name,
+                credential_type: Cow::Borrowed(pattern.name),
                 start: mat.start(),
                 end: mat.end(),
                 matched_text: matched.to_owned(),
@@ -377,7 +378,7 @@ fn build_redacted_output(
         let _ = write!(result, "[REDACTED:{}:{}]", m.credential_type, hash_prefix);
 
         events.push(RedactionEvent {
-            credential_type: m.credential_type.to_owned(),
+            credential_type: m.credential_type.to_string(),
             hash_prefix: hash_prefix.to_owned(),
             start: m.start,
             end: m.end,
@@ -441,7 +442,7 @@ pub fn redact_credentials_with_config(
             }
             try_base64_decode_and_rescan_recursive(token, PATTERNS, 0).map(|evt| {
                 RawMatch {
-                    credential_type: Box::leak(evt.credential_type.into_boxed_str()),
+                    credential_type: Cow::Owned(evt.credential_type),
                     start: mat.start(),
                     end: mat.end(),
                     matched_text: token.to_owned(),
@@ -482,7 +483,8 @@ pub fn redact_credentials_with_config(
 /// unreliable (e.g., the value is under a key like `sha256`, `digest`, `nonce`,
 /// etc. where high-entropy strings are expected and benign).
 #[must_use]
-pub fn redact_credentials_no_entropy(text: &str) -> (String, Vec<RedactionEvent>) {
+#[allow(dead_code)]
+pub(crate) fn redact_credentials_no_entropy(text: &str) -> (String, Vec<RedactionEvent>) {
     let raw_matches = collect_pattern_matches(text);
     let selected = resolve_overlaps(raw_matches);
     let (result, events) = build_redacted_output(text, &selected);

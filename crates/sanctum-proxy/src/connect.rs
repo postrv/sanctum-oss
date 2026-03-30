@@ -43,6 +43,9 @@ const MAX_HEADER_SIZE: usize = 64 * 1024;
 /// Timeout for the full read of a MITM request (30 seconds).
 const MITM_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Timeout for the TCP connect phase of blind tunnels (10 seconds).
+const BLIND_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Timeout for blind tunnel relay (10 minutes for long-running API calls).
 const BLIND_TUNNEL_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -192,8 +195,10 @@ pub const fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
 
 /// Check whether an IPv6 address is private or reserved.
 ///
-/// Covers loopback, link-local, unique-local, unspecified, and
-/// IPv6-mapped IPv4 addresses (`::ffff:x.x.x.x`).
+/// Covers loopback, link-local, unique-local, unspecified,
+/// IPv6-mapped IPv4 (`::ffff:x.x.x.x`), IPv4-compatible (`::x.x.x.x`),
+/// 6to4 (`2002::/16`), Teredo (`2001:0000::/32`),
+/// documentation (`2001:db8::/32`), and multicast (`ff00::/8`).
 #[must_use]
 pub const fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
     let segments = ip.segments();
@@ -218,6 +223,67 @@ pub const fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
             (lo & 0xFF) as u8,
         );
         return is_private_ipv4(&mapped);
+    }
+
+    // IPv4-compatible addresses (::x.x.x.x, deprecated RFC 4291).
+    // Format: [0, 0, 0, 0, 0, 0, hi16, lo16] -- segments[5] is NOT 0xFFFF.
+    // Excludes ::0.0.0.0 (unspecified) and ::0.0.0.1 (loopback), which are
+    // caught by the loopback/unspecified checks below.
+    if segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0
+        && (segments[6] != 0 || segments[7] > 1)
+    {
+        let hi = segments[6];
+        let lo = segments[7];
+        let compat = Ipv4Addr::new(
+            (hi >> 8) as u8,
+            (hi & 0xFF) as u8,
+            (lo >> 8) as u8,
+            (lo & 0xFF) as u8,
+        );
+        return is_private_ipv4(&compat);
+    }
+
+    // 6to4 addresses (2002::/16) -- embed an IPv4 address in segments[1..2].
+    // e.g. 2002:7f00:0001:: embeds 127.0.0.1.
+    if first_segment == 0x2002 {
+        let hi = segments[1];
+        let lo = segments[2];
+        let embedded = Ipv4Addr::new(
+            (hi >> 8) as u8,
+            (hi & 0xFF) as u8,
+            (lo >> 8) as u8,
+            (lo & 0xFF) as u8,
+        );
+        return is_private_ipv4(&embedded);
+    }
+
+    // Teredo addresses (2001:0000::/32) -- embed an obfuscated IPv4 in
+    // the last 32 bits (XOR'd with 0xFFFF_FFFF).
+    if first_segment == 0x2001 && segments[1] == 0x0000 {
+        let hi = segments[6] ^ 0xFFFF;
+        let lo = segments[7] ^ 0xFFFF;
+        let embedded = Ipv4Addr::new(
+            (hi >> 8) as u8,
+            (hi & 0xFF) as u8,
+            (lo >> 8) as u8,
+            (lo & 0xFF) as u8,
+        );
+        return is_private_ipv4(&embedded);
+    }
+
+    // Documentation prefix (2001:db8::/32, RFC 3849).
+    if first_segment == 0x2001 && segments[1] == 0x0DB8 {
+        return true;
+    }
+
+    // Multicast (ff00::/8).
+    if (first_segment & 0xFF00) == 0xFF00 {
+        return true;
     }
 
     let link_local_mask: u16 = 0xFFC0;
@@ -293,13 +359,20 @@ pub async fn resolve_and_validate(host: &str, port: u16) -> Result<Vec<SocketAdd
 /// Returns `ProxyError::ConnectFailed` if no address could be reached.
 pub async fn connect_validated(host: &str, addrs: &[SocketAddr]) -> Result<TcpStream, ProxyError> {
     for addr in addrs {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => {
+        match tokio::time::timeout(BLIND_CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(e)) => {
                 tracing::debug!(
                     addr = %addr,
                     error = %e,
                     "connection attempt failed, trying next address"
+                );
+            }
+            Err(_elapsed) => {
+                tracing::debug!(
+                    addr = %addr,
+                    timeout_secs = BLIND_CONNECT_TIMEOUT.as_secs(),
+                    "connection attempt timed out, trying next address"
                 );
             }
         }
@@ -1391,8 +1464,9 @@ mod tests {
 
     #[test]
     fn test_public_ipv6_accepted() {
+        // 2607:f8b0:4004:800::200e is a real Google public IPv6 address.
         assert!(!is_private_ipv6(&Ipv6Addr::new(
-            0x2001, 0x0DB8, 0, 0, 0, 0, 0, 1
+            0x2607, 0xF8B0, 0x4004, 0x0800, 0, 0, 0, 0x200E
         )));
     }
 
@@ -1441,7 +1515,8 @@ mod tests {
 
     #[test]
     fn test_is_private_ip_v6_public() {
-        let ip = IpAddr::V6(Ipv6Addr::new(0x2001, 0x0DB8, 0, 0, 0, 0, 0, 1));
+        // Use a real public IPv6 (not documentation prefix).
+        let ip = IpAddr::V6(Ipv6Addr::new(0x2607, 0xF8B0, 0x4004, 0x0800, 0, 0, 0, 0x200E));
         assert!(!is_private_ip(&ip));
     }
 
@@ -1776,6 +1851,168 @@ mod tests {
             result.unwrap_err(),
             ProxyError::ConnectFailed { .. }
         ));
+    }
+
+    // ---------- SSRF: IPv6 6to4 bypass tests ----------
+
+    #[test]
+    fn test_ipv6_6to4_loopback_is_private() {
+        // 2002:7f00:0001:: embeds 127.0.0.1
+        let ip = Ipv6Addr::new(0x2002, 0x7F00, 0x0001, 0, 0, 0, 0, 0);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_6to4_rfc1918_is_private() {
+        // 2002:0a00:0001:: embeds 10.0.0.1
+        let ip = Ipv6Addr::new(0x2002, 0x0A00, 0x0001, 0, 0, 0, 0, 0);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_6to4_rfc1918_class_c_is_private() {
+        // 2002:c0a8:0101:: embeds 192.168.1.1
+        let ip = Ipv6Addr::new(0x2002, 0xC0A8, 0x0101, 0, 0, 0, 0, 0);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_6to4_public_embedded_is_not_private() {
+        // 2002:0808:0808:: embeds 8.8.8.8 (public)
+        let ip = Ipv6Addr::new(0x2002, 0x0808, 0x0808, 0, 0, 0, 0, 0);
+        assert!(!is_private_ipv6(&ip));
+    }
+
+    // ---------- SSRF: IPv4-compatible IPv6 tests ----------
+
+    #[test]
+    fn test_ipv6_ipv4_compatible_loopback_is_private() {
+        // ::127.0.0.1 = ::7f00:0001
+        let ip = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0x7F00, 0x0001);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_ipv4_compatible_rfc1918_is_private() {
+        // ::10.0.0.1 = ::0a00:0001
+        let ip = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0x0A00, 0x0001);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_ipv4_compatible_public_is_not_private() {
+        // ::8.8.8.8 = ::0808:0808
+        let ip = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0x0808, 0x0808);
+        assert!(!is_private_ipv6(&ip));
+    }
+
+    // ---------- SSRF: IPv6 documentation prefix tests ----------
+
+    #[test]
+    fn test_ipv6_documentation_prefix_is_private() {
+        // 2001:db8::1 (RFC 3849 documentation range)
+        let ip = Ipv6Addr::new(0x2001, 0x0DB8, 0, 0, 0, 0, 0, 1);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_documentation_prefix_full_range_is_private() {
+        // 2001:db8:ffff:ffff:ffff:ffff:ffff:ffff
+        let ip = Ipv6Addr::new(0x2001, 0x0DB8, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_not_documentation_prefix() {
+        // 2001:db9::1 is NOT in the documentation range
+        let ip = Ipv6Addr::new(0x2001, 0x0DB9, 0, 0, 0, 0, 0, 1);
+        assert!(!is_private_ipv6(&ip));
+    }
+
+    // ---------- SSRF: IPv6 multicast tests ----------
+
+    #[test]
+    fn test_ipv6_multicast_is_private() {
+        // ff02::1 (all-nodes multicast)
+        let ip = Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 1);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_multicast_all_routers_is_private() {
+        // ff02::2 (all-routers multicast)
+        let ip = Ipv6Addr::new(0xFF02, 0, 0, 0, 0, 0, 0, 2);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_multicast_global_scope_is_private() {
+        // ff0e::1 (global-scope multicast)
+        let ip = Ipv6Addr::new(0xFF0E, 0, 0, 0, 0, 0, 0, 1);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    // ---------- SSRF: IPv6 Teredo tests ----------
+
+    #[test]
+    fn test_ipv6_teredo_loopback_is_private() {
+        // Teredo format: 2001:0000:<server>:<flags>:<client_port_xor>:<client_ip_xor>
+        // Embedded IPv4 = last 32 bits XOR 0xFFFFFFFF
+        // To embed 127.0.0.1 (0x7F000001): XOR -> 0x80FFFFFE
+        let ip = Ipv6Addr::new(0x2001, 0x0000, 0, 0, 0, 0, 0x80FF, 0xFFFE);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_teredo_rfc1918_is_private() {
+        // Embed 10.0.0.1 (0x0A000001): XOR -> 0xF5FFFFFE
+        let ip = Ipv6Addr::new(0x2001, 0x0000, 0, 0, 0, 0, 0xF5FF, 0xFFFE);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_teredo_public_is_not_private() {
+        // Embed 8.8.8.8 (0x08080808): XOR -> 0xF7F7F7F7
+        let ip = Ipv6Addr::new(0x2001, 0x0000, 0, 0, 0, 0, 0xF7F7, 0xF7F7);
+        assert!(!is_private_ipv6(&ip));
+    }
+
+    // ---------- SSRF: Blind tunnel connect timeout test ----------
+
+    #[tokio::test]
+    async fn test_connect_validated_times_out() {
+        // Use an address in the RFC 5737 TEST-NET-1 range on a high port.
+        // This address is non-routable and will not produce a quick
+        // RST/connection-refused, so the connect should time out.
+        let addrs = vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            12345,
+        )];
+        let start = std::time::Instant::now();
+        let result = connect_validated("test-timeout.example.com", &addrs).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ProxyError::ConnectFailed { .. }
+        ));
+        // The connect should complete in a bounded time (at most ~15s with
+        // the 10s timeout plus OS-level teardown). On most systems, TEST-NET
+        // addresses return a quick error, so we just verify it did not hang
+        // for an excessively long time.
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "connect_validated should complete within 30s, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_blind_connect_timeout_constant() {
+        assert_eq!(
+            BLIND_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+            "blind connect timeout should be 10 seconds"
+        );
     }
 
     /// Verify that `resolve_and_validate` returns `Vec<SocketAddr>`.

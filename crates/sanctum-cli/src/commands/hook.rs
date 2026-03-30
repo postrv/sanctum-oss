@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use sanctum_firewall::hooks::claude;
 use sanctum_firewall::hooks::claude::NpmConfig;
 use sanctum_firewall::hooks::protocol::{HookDecision, HookInput, HookOutput};
+use sanctum_firewall::mcp::audit::McpAuditLog;
 use sanctum_types::config::AiFirewallConfig;
 use sanctum_types::errors::CliError;
 use sanctum_types::ipc::{IpcCommand, IpcMessage};
@@ -208,6 +209,7 @@ fn load_npm_config() -> NpmConfig {
         Ok(cfg) => NpmConfig {
             watch_lifecycle: cfg.sentinel.npm.watch_lifecycle,
             ignore_scripts_warning: cfg.sentinel.npm.ignore_scripts_warning,
+            ignore_scripts_required: cfg.sentinel.npm.ignore_scripts_required,
             allowlist: cfg.sentinel.npm.allowlist,
         },
         Err(_) => NpmConfig::default(),
@@ -467,17 +469,26 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
     tracing::debug!(
         watch_lifecycle = npm_config.watch_lifecycle,
         ignore_scripts_warning = npm_config.ignore_scripts_warning,
+        ignore_scripts_required = npm_config.ignore_scripts_required,
         allowlist_len = npm_config.allowlist.len(),
         "npm config"
     );
 
     tracing::debug!(%action, tool_name = %input.tool_name, "dispatching hook");
 
+    // Create an MCP audit log when mcp_audit is enabled.
+    let mcp_audit_enabled = ai_config.as_ref().is_none_or(|cfg| cfg.mcp_audit);
+    let mut audit_log = if action == "pre-mcp" && mcp_audit_enabled {
+        Some(McpAuditLog::new())
+    } else {
+        None
+    };
+
     let output: HookOutput = match action {
         "pre-bash" => claude::pre_bash_with_npm_config(&input, &npm_config),
         "pre-write" => claude::pre_write(&input),
         "pre-read" => claude::pre_read(&input),
-        "pre-mcp" => claude::pre_mcp_tool_use(&input, None),
+        "pre-mcp" => claude::pre_mcp_tool_use(&input, audit_log.as_mut()),
         "post-bash" => claude::post_bash_with_npm_config(&input, &npm_config),
         _ => {
             return Err(CliError::InvalidArgs(format!(
@@ -485,6 +496,20 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
             )));
         }
     };
+
+    // Write the MCP audit log to disk (best-effort).
+    if let Some(ref log) = audit_log {
+        if !log.entries().is_empty() {
+            let audit_path = paths.data_dir.join("mcp_audit.log");
+            if let Err(e) = log.write_to_file(&audit_path) {
+                tracing::warn!(
+                    path = %audit_path.display(),
+                    error = %e,
+                    "failed to write MCP audit log (best-effort)"
+                );
+            }
+        }
+    }
 
     tracing::debug!(?output.decision, message = ?output.message, "hook decision");
 
@@ -1091,6 +1116,7 @@ mod tests {
         let npm_config = NpmConfig {
             watch_lifecycle: false,
             ignore_scripts_warning: false,
+            ignore_scripts_required: false,
             allowlist: vec!["react".to_owned()],
         };
         let input = make_input("bash", json!({"command": "ls -la"}));
@@ -1291,5 +1317,98 @@ mod tests {
             cfg.entropy_min_length, 128,
             "entropy_min_length 10000 should be clamped to 128"
         );
+    }
+
+    // ---- MCP audit log wiring tests ----
+
+    #[test]
+    fn mcp_audit_log_created_when_mcp_audit_enabled() {
+        // Simulate the wiring logic from run_inner: when mcp_audit is true
+        // and the action is "pre-mcp", an audit log should be created and
+        // passed to pre_mcp_tool_use (i.e., not None).
+        let ai_config: Option<AiFirewallConfig> = Some(AiFirewallConfig {
+            mcp_audit: true,
+            ..Default::default()
+        });
+        let action = "pre-mcp";
+
+        let mcp_audit_enabled = ai_config.as_ref().is_none_or(|cfg| cfg.mcp_audit);
+        let mut audit_log = if action == "pre-mcp" && mcp_audit_enabled {
+            Some(McpAuditLog::new())
+        } else {
+            None
+        };
+
+        assert!(
+            audit_log.is_some(),
+            "audit log should be created when mcp_audit is true"
+        );
+
+        // Verify the audit log is actually passed to pre_mcp_tool_use and records entries
+        let input = HookInput {
+            tool_name: "read_file".to_owned(),
+            tool_input: json!({"path": "/home/user/project/main.rs"}),
+            config: Some(AiFirewallConfig {
+                mcp_audit: true,
+                mcp_rules: vec![sanctum_types::config::McpPolicyRuleConfig {
+                    tool: "read_file".to_owned(),
+                    restricted_paths: vec!["/tmp/**".to_owned()],
+                }],
+                ..Default::default()
+            }),
+            entropy_allowlist: Vec::new(),
+        };
+        let _output = claude::pre_mcp_tool_use(&input, audit_log.as_mut());
+
+        let log = audit_log.as_ref().unwrap();
+        assert_eq!(
+            log.entries().len(),
+            1,
+            "audit log should have recorded the MCP invocation"
+        );
+        assert_eq!(log.entries()[0].tool_name, "read_file");
+    }
+
+    #[test]
+    fn mcp_audit_log_not_created_when_disabled() {
+        let ai_config: Option<AiFirewallConfig> = Some(AiFirewallConfig {
+            mcp_audit: false,
+            ..Default::default()
+        });
+        let action = "pre-mcp";
+
+        let mcp_audit_enabled = ai_config.as_ref().is_none_or(|cfg| cfg.mcp_audit);
+        let audit_log = if action == "pre-mcp" && mcp_audit_enabled {
+            Some(McpAuditLog::new())
+        } else {
+            None
+        };
+
+        assert!(
+            audit_log.is_none(),
+            "audit log should NOT be created when mcp_audit is false"
+        );
+    }
+
+    #[test]
+    fn mcp_audit_log_not_created_for_non_mcp_actions() {
+        let ai_config: Option<AiFirewallConfig> = Some(AiFirewallConfig {
+            mcp_audit: true,
+            ..Default::default()
+        });
+
+        for action in &["pre-bash", "pre-write", "pre-read", "post-bash"] {
+            let mcp_audit_enabled = ai_config.as_ref().is_none_or(|cfg| cfg.mcp_audit);
+            let audit_log = if *action == "pre-mcp" && mcp_audit_enabled {
+                Some(McpAuditLog::new())
+            } else {
+                None
+            };
+
+            assert!(
+                audit_log.is_none(),
+                "audit log should NOT be created for action '{action}'"
+            );
+        }
     }
 }

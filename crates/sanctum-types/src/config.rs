@@ -175,6 +175,13 @@ pub struct NetworkConfig {
     #[serde(deserialize_with = "deserialize_poll_interval")]
     pub poll_interval_secs: u64,
     /// Outbound transfer alert threshold in bytes per hour.
+    ///
+    /// Reserved for future use. Volume-based alerting is planned but not yet
+    /// implemented. The field is retained so existing config files do not break
+    /// on upgrade.
+    #[deprecated(
+        note = "not yet implemented — volume-based alerting is planned for a future release"
+    )]
     pub transfer_threshold_bytes: u64,
     /// Processes to exclude from monitoring.
     pub process_allowlist: Vec<String>,
@@ -187,6 +194,7 @@ pub struct NetworkConfig {
 }
 
 impl Default for NetworkConfig {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             poll_interval_secs: 30,
@@ -566,6 +574,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn network_config_defaults_are_correct() {
         let config = NetworkConfig::default();
         assert_eq!(config.poll_interval_secs, 30);
@@ -580,6 +589,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn network_config_deserialises_from_toml() {
         let toml_str = r#"
             [sentinel.network]

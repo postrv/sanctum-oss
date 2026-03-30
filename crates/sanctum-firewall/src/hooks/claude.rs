@@ -37,6 +37,8 @@ pub struct NpmConfig {
     pub watch_lifecycle: bool,
     /// Whether to suggest `--ignore-scripts` in pre-bash npm install warnings.
     pub ignore_scripts_warning: bool,
+    /// Whether to BLOCK npm/yarn/pnpm/bun install commands that lack `--ignore-scripts`.
+    pub ignore_scripts_required: bool,
     /// Package names that skip slopsquatting checks (known-good packages).
     pub allowlist: Vec<String>,
 }
@@ -46,6 +48,7 @@ impl Default for NpmConfig {
         Self {
             watch_lifecycle: true,
             ignore_scripts_warning: true,
+            ignore_scripts_required: false,
             allowlist: Vec::new(),
         }
     }
@@ -1422,6 +1425,19 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
                     ));
                 }
             }
+        }
+
+        // Block npm install commands without --ignore-scripts when required by policy.
+        if is_npm_install
+            && npm_config.ignore_scripts_required
+            && !normalised.contains("--ignore-scripts")
+        {
+            return HookOutput::block(
+                "Blocked: npm install without --ignore-scripts is not permitted by policy\n\
+                 To proceed: add --ignore-scripts to the command, or disable \
+                 ignore_scripts_required in your Sanctum config"
+                    .to_owned(),
+            );
         }
 
         // If we got here with no packages extracted, it might be a bare install
@@ -5296,6 +5312,103 @@ mod tests {
         // We test this by verifying that the allowlist check works in extract logic.
         assert!(npm_config.allowlist.iter().any(|a| a == "my-private-pkg"));
         assert!(!npm_config.allowlist.iter().any(|a| a == "other-pkg"));
+    }
+
+    // ---- ignore_scripts_required blocks npm install without --ignore-scripts ----
+
+    #[test]
+    fn test_ignore_scripts_required_blocks_bare_npm_install() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: true,
+            ..NpmConfig::default()
+        };
+        let input = bash_input("npm install");
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "bare npm install should be blocked when ignore_scripts_required=true"
+        );
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("--ignore-scripts"),
+            "block message should mention --ignore-scripts"
+        );
+    }
+
+    #[test]
+    fn test_ignore_scripts_required_blocks_npm_install_with_package() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: true,
+            ..NpmConfig::default()
+        };
+        let input = bash_input("npm install foo");
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "npm install <pkg> should be blocked when ignore_scripts_required=true"
+        );
+    }
+
+    #[test]
+    fn test_ignore_scripts_required_allows_with_flag() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: true,
+            ..NpmConfig::default()
+        };
+        let input = bash_input("npm install --ignore-scripts foo");
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        assert_ne!(
+            output.decision,
+            HookDecision::Block,
+            "npm install --ignore-scripts should NOT be blocked even when required=true"
+        );
+    }
+
+    #[test]
+    fn test_ignore_scripts_required_blocks_yarn_add() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: true,
+            ..NpmConfig::default()
+        };
+        let input = bash_input("yarn add react");
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "yarn add should be blocked when ignore_scripts_required=true"
+        );
+    }
+
+    #[test]
+    fn test_ignore_scripts_required_blocks_pnpm_install() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: true,
+            ..NpmConfig::default()
+        };
+        let input = bash_input("pnpm install");
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "pnpm install should be blocked when ignore_scripts_required=true"
+        );
+    }
+
+    #[test]
+    fn test_ignore_scripts_required_false_does_not_block() {
+        let npm_config = NpmConfig {
+            ignore_scripts_required: false,
+            ..NpmConfig::default()
+        };
+        let input = bash_input("npm install foo");
+        let output = pre_bash_with_npm_config(&input, &npm_config);
+        assert_ne!(
+            output.decision,
+            HookDecision::Block,
+            "npm install should NOT be blocked when ignore_scripts_required=false"
+        );
     }
 
     // ---- M16: pip install existing → no extra warning ----

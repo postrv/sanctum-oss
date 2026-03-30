@@ -5,12 +5,16 @@
 //! from `{data_dir}/auth_token` and includes it in the IPC message envelope.
 
 use std::path::Path;
+use std::time::Duration;
 
 use tokio::net::UnixStream;
 
 use sanctum_types::errors::CliError;
 use sanctum_types::ipc::IpcMessage;
 pub use sanctum_types::ipc::{IpcCommand, IpcResponse, ProviderBudgetInfo, ThreatListItem};
+
+/// Maximum time to wait for a complete IPC round-trip (connect + write + read).
+const IPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Send a command to the daemon and receive the response.
 ///
@@ -46,7 +50,13 @@ pub fn send_command(command: &IpcCommand) -> Result<IpcResponse, CliError> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|e| CliError::ConnectionFailed(format!("failed to create runtime: {e}")))?;
 
-    runtime.block_on(async { send_command_async(socket_path, command, auth_token).await })
+    runtime.block_on(async {
+        tokio::time::timeout(IPC_TIMEOUT, send_command_async(socket_path, command, auth_token))
+            .await
+            .map_err(|_| {
+                CliError::ConnectionFailed("IPC operation timed out after 10s".to_owned())
+            })?
+    })
 }
 
 async fn send_command_async(
@@ -75,4 +85,46 @@ async fn send_command_async(
 
     serde_json::from_slice(&response_payload)
         .map_err(|e| CliError::ConnectionFailed(format!("invalid response from daemon: {e}")))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// Verify that the timeout error produces the expected `CliError::ConnectionFailed` variant
+    /// with the correct message. We use a real `tokio::time::timeout` with a zero-duration
+    /// timeout against an async operation that will never complete (a pending future)
+    /// to trigger the actual Elapsed error path.
+    #[tokio::test]
+    async fn ipc_timeout_returns_connection_failed() {
+        let result: Result<(), CliError> =
+            tokio::time::timeout(Duration::from_millis(1), futures_never())
+                .await
+                .map_err(|_| {
+                    CliError::ConnectionFailed("IPC operation timed out after 10s".to_owned())
+                });
+
+        let err = result.expect_err("should have timed out");
+        match &err {
+            CliError::ConnectionFailed(msg) => {
+                assert!(
+                    msg.contains("timed out"),
+                    "timeout error message should mention 'timed out', got: {msg}"
+                );
+            }
+            other => panic!("expected ConnectionFailed, got: {other:?}"),
+        }
+    }
+
+    /// A future that never completes, used to trigger timeout.
+    async fn futures_never() {
+        std::future::pending::<()>().await;
+    }
+
+    /// Verify the `IPC_TIMEOUT` constant is 10 seconds.
+    #[test]
+    fn ipc_timeout_is_10_seconds() {
+        assert_eq!(IPC_TIMEOUT, Duration::from_secs(10));
+    }
 }

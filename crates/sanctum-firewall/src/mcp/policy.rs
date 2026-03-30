@@ -337,6 +337,14 @@ const SENSITIVE_BARE_FILENAMES: &[&str] = &[
     ".pypirc",
     ".my.cnf",
     ".vault-token",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    "credentials.json",
+    "service_account.json",
+    "keyfile.json",
+    "token.json",
 ];
 
 fn extract_path_values(value: &serde_json::Value) -> Vec<String> {
@@ -1102,6 +1110,26 @@ mod kani_proofs {
         assert!(
             paths.iter().any(|p| p == ".netrc"),
             "should extract bare .netrc filename"
+        );
+    }
+
+    #[test]
+    fn extract_path_values_catches_bare_id_rsa() {
+        let val = serde_json::json!({"filename": "id_rsa"});
+        let paths = extract_path_values(&val);
+        assert!(
+            paths.iter().any(|p| p == "id_rsa"),
+            "should extract bare id_rsa filename"
+        );
+    }
+
+    #[test]
+    fn extract_path_values_catches_bare_credentials_json() {
+        let val = serde_json::json!({"file": "credentials.json"});
+        let paths = extract_path_values(&val);
+        assert!(
+            paths.iter().any(|p| p == "credentials.json"),
+            "should extract bare credentials.json filename"
         );
     }
 

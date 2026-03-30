@@ -222,7 +222,7 @@ Sanctum does **not** require nono. Each tool provides independent value.
 
 ## Architecture
 
-8 crates, ~36,000 lines of Rust:
+8 crates, ~44,000 lines of Rust:
 
 | Crate | Purpose |
 |-------|---------|
@@ -252,7 +252,7 @@ Sanctum is a security tool. It holds itself to a higher standard than the code i
 - 0 clippy warnings (pedantic + nursery lints enabled)
 
 **Supply chain**:
-- All 295 dependencies audited and version-pinned
+- All 253 dependencies audited and version-pinned
 - `cargo-deny` enforces license policy and advisory database checks in CI
 - Sigstore-signed release binaries with SBOM and Rekor transparency log
 - Reproducible builds verified in CI (build twice, compare SHA-256)

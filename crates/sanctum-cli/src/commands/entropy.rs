@@ -92,18 +92,34 @@ fn write_allowlist(entries: &[String], path: &Path) -> Result<(), CliError> {
 }
 
 /// Write data to a file with 0o600 permissions on Unix.
+///
+/// Uses `create_new(true)` to prevent following symlinks (equivalent to
+/// `O_EXCL`). If the file already exists (e.g. a stale temp file or a
+/// symlink placed by an attacker), it is removed and the open is retried
+/// once.
 fn write_with_permissions(path: &Path, data: &[u8]) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
 
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
+        let open_exclusive = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+        };
+
+        let mut file = match open_exclusive() {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Remove the stale/symlinked file and retry once.
+                let _ = std::fs::remove_file(path);
+                open_exclusive()?
+            }
+            Err(e) => return Err(e),
+        };
         file.write_all(data)?;
         file.sync_all()?;
     }

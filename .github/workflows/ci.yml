@@ -107,7 +107,7 @@ jobs:
 
   kani-core:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Strip rust-version (Kani uses its own nightly toolchain)

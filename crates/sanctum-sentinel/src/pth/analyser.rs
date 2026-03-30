@@ -287,11 +287,47 @@ pub fn analyse_pth_line(line: &str) -> PthVerdict {
     PthVerdict::benign()
 }
 
+/// Join continuation lines (backslash before newline) only for non-comment lines.
+///
+/// A `#` comment line's trailing `\` is literal, not a continuation marker.
+/// Blindly joining `#...\` with the next line would swallow executable content
+/// into a comment, potentially hiding threats.
+fn join_continuation_lines(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut continuation = false;
+
+    for line in content.split('\n') {
+        let raw = line.strip_suffix('\r').unwrap_or(line);
+
+        if continuation {
+            // Previous non-comment line ended with `\`, append this line directly
+            // (no newline between them).
+        } else if !result.is_empty() {
+            result.push('\n');
+        }
+
+        let trimmed = raw.trim();
+        let is_comment = trimmed.starts_with('#');
+
+        if !is_comment && raw.ends_with('\\') {
+            // Non-comment line ending with `\`: continuation
+            result.push_str(&raw[..raw.len() - 1]);
+            continuation = true;
+        } else {
+            result.push_str(raw);
+            continuation = false;
+        }
+    }
+
+    result
+}
+
 /// Analyse an entire `.pth` file.
 ///
 /// The file verdict is the maximum severity of any individual line.
 /// Continuation lines (backslash followed by newline) are joined before
 /// analysis so that keywords split across lines are still detected.
+/// Comment lines (`#`) are never joined with the next line.
 ///
 /// A leading UTF-8 BOM (`\u{FEFF}`) is stripped before processing.
 /// Zero-width characters (U+200B, U+200C, U+200D, U+FEFF mid-string)
@@ -311,7 +347,10 @@ pub fn analyse_pth_file(content: &str) -> FileAnalysis {
 
     // Join Python continuation lines: a backslash immediately before a
     // newline means the logical line continues on the next physical line.
-    let joined = content.replace("\\\r\n", "").replace("\\\n", "");
+    // Only apply to non-comment lines — a `\` inside a `#` comment is
+    // literal, not a continuation, and blindly joining would swallow the
+    // next line into the comment (hiding potential threats).
+    let joined = join_continuation_lines(&content);
 
     for (idx, line) in joined.lines().enumerate() {
         let verdict = analyse_pth_line(line);

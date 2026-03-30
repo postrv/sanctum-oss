@@ -152,6 +152,10 @@ const BUILTIN_SENSITIVE_DIRS: &[&str] = &[
 ];
 
 /// Built-in sensitive filename suffixes / exact names that are always restricted.
+///
+/// Entries ending in `/` are treated as directory prefixes: any path that
+/// *contains* the entry (i.e., is inside or equal to the directory) is blocked.
+/// All other entries use suffix matching.
 const BUILTIN_SENSITIVE_FILENAMES: &[&str] = &[
     "/.kube/config",
     "/.npmrc",
@@ -172,28 +176,14 @@ const BUILTIN_SENSITIVE_FILENAMES: &[&str] = &[
     "/.continue/config.json",
     "/.windsurf/mcp.json",
     "/.github/copilot-instructions.md",
+    // AI coding assistant config directories — may contain API keys,
+    // custom instructions, or session data that should not be exfiltrated.
+    "/.copilot/",
+    "/.aider/",
+    "/.cline/",
+    "/.roo/",
+    "/.codeium/",
 ];
-
-/// Normalize an MCP tool path argument by collapsing `.`, `..` segments and
-/// lowercasing for case-insensitive matching on macOS APFS.
-fn normalize_mcp_path(path: &str) -> String {
-    let mut components: Vec<&str> = Vec::new();
-    for component in path.split('/') {
-        match component {
-            ".." => {
-                components.pop();
-            }
-            "." | "" => {}
-            _ => components.push(component),
-        }
-    }
-    let normalized = if path.starts_with('/') {
-        format!("/{}", components.join("/"))
-    } else {
-        components.join("/")
-    };
-    normalized.to_lowercase()
-}
 
 /// Check whether a path matches any built-in sensitive restriction.
 ///
@@ -216,12 +206,15 @@ fn matches_builtin_restriction(path: &str) -> bool {
         }
     }
 
-    // Check exact filename matches (case-insensitive).
-    // For entries ending with '/' (directory patterns), use `contains` to match
-    // any file within the directory. For all others, use `ends_with`.
+    // Check filename / directory matches (case-insensitive).
+    // Entries ending in '/' are directory prefixes — block any path inside
+    // or equal to the directory. All other entries use suffix matching.
     for name in BUILTIN_SENSITIVE_FILENAMES {
-        if name.ends_with('/') {
-            if path_lower.contains(name) {
+        if let Some(without_trailing) = name.strip_suffix('/') {
+            // Directory entry: match "/.copilot/" anywhere in the path
+            // (covers both files inside and the directory itself with trailing slash).
+            // Also match the directory without trailing slash (e.g. path ends with "/.copilot").
+            if path_lower.contains(name) || path_lower.ends_with(without_trailing) {
                 return true;
             }
         } else if path_lower.ends_with(name) {
@@ -262,6 +255,69 @@ fn matches_builtin_restriction(path: &str) -> bool {
     }
 
     false
+}
+
+/// Normalise an MCP path for policy matching.
+///
+/// Performs the following transformations:
+/// 1. Expands `~` and `$HOME` at the start of the path to the user's home
+///    directory (using `std::env::var("HOME")`). If `HOME` is not set,
+///    expansion is skipped.
+/// 2. Collapses `.` and `..` segments.
+/// 3. Lowercases the result (for case-insensitive matching on macOS).
+///
+/// This ensures that user-defined MCP rules using `~` patterns correctly
+/// match absolute paths supplied by MCP tools.
+#[must_use]
+pub fn normalize_mcp_path(path: &str) -> String {
+    // Step 1: Expand ~ and $HOME
+    let expanded = expand_home_mcp(path);
+
+    // Step 2: Collapse . and .. segments
+    let mut components: Vec<&str> = Vec::new();
+    for component in expanded.split('/') {
+        match component {
+            ".." => {
+                components.pop();
+            }
+            "." | "" => {}
+            _ => components.push(component),
+        }
+    }
+
+    let collapsed = if expanded.starts_with('/') {
+        format!("/{}", components.join("/"))
+    } else {
+        components.join("/")
+    };
+
+    // Step 3: Lowercase for case-insensitive matching
+    collapsed.to_lowercase()
+}
+
+/// Expand `~` and `$HOME` to the actual home directory path for MCP paths.
+///
+/// Falls back to leaving the path unchanged if `HOME` is not set.
+fn expand_home_mcp(path: &str) -> String {
+    let home = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => h,
+        _ => return path.to_owned(),
+    };
+
+    if path == "~" {
+        return home;
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return format!("{home}/{rest}");
+    }
+    if path == "$HOME" {
+        return home;
+    }
+    if let Some(rest) = path.strip_prefix("$HOME/") {
+        return format!("{home}/{rest}");
+    }
+
+    path.to_owned()
 }
 
 /// Extract string values from a JSON value that look like file paths.
@@ -1242,4 +1298,162 @@ mod expanded_policy_tests {
             "case-insensitive .SSH should be blocked"
         );
     }
+
+    // ---- AI dotfile directory restriction tests ----
+
+    #[test]
+    fn builtin_blocks_copilot_config() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.copilot/settings.json"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".copilot/ directory should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_aider_config() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.aider/state"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".aider/ directory should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_cline_config() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.cline/settings.json"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".cline/ directory should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_roo_config() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.roo/keys.json"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".roo/ directory should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_codeium_config() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.codeium/config.json"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".codeium/ directory should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_ai_dotfile_dir_itself() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.copilot"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".copilot directory path (no trailing slash) should be blocked"
+        );
+    }
+
+    #[test]
+    fn builtin_blocks_ai_dotfile_case_insensitive() {
+        let policy = McpPolicy::from_config(vec![]);
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.COPILOT/config.json"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
+            HookDecision::Block,
+            ".COPILOT (uppercase) should be blocked"
+        );
+    }
+
+    // ---- normalize_mcp_path tests ----
+
+    #[test]
+    fn normalize_mcp_path_expands_tilde() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp/test".to_owned());
+        let result = normalize_mcp_path("~/docs/file.txt");
+        let expected = format!("{}/docs/file.txt", home.to_lowercase());
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn normalize_mcp_path_expands_dollar_home() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp/test".to_owned());
+        let input = format!("{}{}", "$", "HOME/projects/code");
+        let result = normalize_mcp_path(&input);
+        let expected = format!("{}/projects/code", home.to_lowercase());
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn normalize_mcp_path_collapses_dot_segments() {
+        let result = normalize_mcp_path("/home/user/./project/../data/key");
+        assert_eq!(result, "/home/user/data/key");
+    }
+
+    #[test]
+    fn normalize_mcp_path_lowercases() {
+        let result = normalize_mcp_path("/Home/User/Data/Key");
+        assert_eq!(result, "/home/user/data/key");
+    }
+
+    #[test]
+    fn normalize_mcp_path_bare_tilde() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp/test".to_owned());
+        let result = normalize_mcp_path("~");
+        assert_eq!(result, home.to_lowercase());
+    }
+
+    #[test]
+    fn normalize_mcp_path_absolute_unchanged() {
+        let result = normalize_mcp_path("/usr/local/bin");
+        assert_eq!(result, "/usr/local/bin");
+    }
+
+    #[test]
+    fn normalize_mcp_path_tilde_in_middle_not_expanded() {
+        let result = normalize_mcp_path("/some/path/~file");
+        assert_eq!(result, "/some/path/~file");
+    }
+
 }

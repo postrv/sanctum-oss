@@ -138,7 +138,7 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
-    /// Manage the HTTP gateway proxy.
+    /// Manage the HTTP gateway proxy (preview).
     Proxy {
         #[command(subcommand)]
         action: ProxyCliAction,
@@ -326,7 +326,24 @@ fn main() -> ExitCode {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn proxy_help_text_contains_preview() {
+        let cmd = Cli::command();
+        let proxy_sub = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "proxy")
+            .expect("proxy subcommand should exist");
+        let about = proxy_sub
+            .get_about()
+            .expect("proxy should have about text")
+            .to_string();
+        assert!(
+            about.contains("(preview)"),
+            "Proxy help text should contain '(preview)', got: {about}"
+        );
+    }
 
     #[test]
     fn npm_path_without_npm_flag_is_rejected() {
@@ -391,5 +408,10 @@ mod tests {
             }
             _ => panic!("expected Entropy Allow variant"),
         }
+    }
+
+    #[test]
+    fn cli_verifies_structure() {
+        Cli::command().debug_assert();
     }
 }

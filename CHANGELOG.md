@@ -7,38 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- **NpmDebouncer bounded capacity**: Pending-path set capped at 10,000 entries to prevent OOM from malicious event floods; callers receive `AtCapacity` signal to trigger immediate drain
-- **Dead code removal**: Removed unused `NpmLifecycleEvent` channel, struct, and handler from daemon (real npm events flow through the file watcher/debouncer path)
-- **Dead code removal**: Removed unused `sanctum_firewall::registry` module (hooks use their own `check_package_exists_with_timeout` in claude.rs)
-- **Documentation freshness**: Updated test counts, LOC counts, dependency count (282→295), and proxy status to reflect actual codebase state
-
-### Fixed
-- **RUSTSEC-2025-0134**: Added `rustls-pemfile` advisory ignore in `deny.toml` (unmaintained, not vulnerable; migration to `rustls-pki-types` tracked separately)
-- SBOM generation: use `--override-filename` and `--top-level` flags
-- Release `verify-ci` job: remove matrix/conditional jobs from required checks
-- Kani CI: reduce proof bound, consolidate per-crate, non-blocking release gate
-- Kani CI timeouts increased (core 30 to 60 min, full 60 to 120 min)
-- Test installer fixed: `sanctum-daemon` has no `--version` flag
-- Stale documentation counts, URLs, and changelog structure corrected
-- CDLA-Permissive-2.0 license allowed for `webpki-roots` v1.0.6
-- LiteLLM attack date and sanctum.dev references corrected
-
-### Fixed (round 4 adversarial review)
-- **Status exit code**: `sanctum status` now returns non-zero when daemon is offline, enabling shell hook auto-start
-- **Daemon log leak**: `sanctum run` suppresses daemon stdout/stderr when auto-starting
-- **Proxy status output**: `sanctum proxy status` writes to stdout (was stderr)
-- **Budget help text**: `--daily` example changed from `$50` to `$200` to differentiate from `--session`
-- **Model names**: Recommended config updated to current model IDs (claude-opus-4-6, gpt-5.4, gemini-3.1-pro, grok-4.20-0309-reasoning)
-- **ListThreats validation**: Category and level fields now validated (max 64 chars) matching other IPC commands
-- **deny.toml**: Removed stale RUSTSEC-2025-0134 advisory ignore (rustls-pemfile no longer a dependency)
-- **README**: Output examples updated to match actual CLI format; proxy stop documented as unimplemented
-- **Test counts**: Updated to ~1,700 across README, CHANGELOG, and SECURITY.md
+## [0.2.0] - 2026-03-30
 
 ### Security
-- Round 2 adversarial review: 36 fixes across 8 crates, 48 new tests
-- Crash prevention, data durability, and credential detection hardening
-- Internal planning documents removed from repository
+- **IPv6 SSRF hardening**: Block 6to4 (`2002::/16`), Teredo (`2001:0::/32`), IPv4-compatible (`::x.x.x.x`), documentation prefix (`2001:db8::/32`), and multicast (`ff00::/8`) in proxy SSRF validation
+- **Memory leak fix**: Replace `Box::leak` with `Cow<'static, str>` in credential base64 rescan path (unbounded memory growth)
+- **Symlink attack prevention**: Temp files use `create_new(true)` (O_EXCL) in allowlist and entropy writes
+- **MCP bare filename detection**: SSH keys (`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`), credential files (`credentials.json`, `service_account.json`, `keyfile.json`, `token.json`) now blocked by MCP policy
+- **API surface restriction**: `redact_credentials_no_entropy` reduced to `pub(crate)` to prevent bypass
+- **Blind tunnel timeout**: 10-second connect timeout for proxy blind tunnels (was unbounded)
+- 5 rounds of adversarial review: 75+ findings, 90+ new tests, full remediation
+
+### Added
+- **`ignore_scripts_required` enforcement**: When `true`, blocks `npm install`/`yarn add`/`pnpm install` without `--ignore-scripts` (was parsed but unwired)
+- **MCP audit logging**: `mcp_audit = true` now produces `mcp_audit.log` via `McpAuditLog` (was completely unwired)
+- **IPC client timeout**: CLI IPC operations bounded to 10 seconds (was unbounded)
+
+### Changed
+- **NpmDebouncer bounded capacity**: Pending-path set capped at 10,000 entries to prevent OOM from malicious event floods
+- **Dead code removal**: Removed unused `NpmLifecycleEvent` channel, `sanctum_firewall::registry` module
+- **Kani CI**: Added `--default-unwind 20` to kani-core, reduced proof bounds for CI feasibility (16-byte PTH, 4-byte prefix/suffix)
+- **CI audit**: Added `issues: write` permission for advisory issue creation
+- **CI reproducible-build**: Wired into `build-release` dependency chain
+- **Deprecated**: `transfer_threshold_bytes` config field (volume-based alerting not yet implemented)
+- **deny.toml**: Removed stale `bitflags v1` and `windows-sys v0.52` skip entries
+
+### Fixed
+- Kani CI timeout/failure caused by unbounded stdlib loop unwinding
+- Status exit code for shell hook auto-start detection
+- Daemon log suppression on auto-start
+- Proxy status output to stdout
+- Model names updated to current IDs
+- Documentation: LOC (~44K), dependency count (253), test count (~1,741)
 
 ## [0.1.0] - 2026-03-27
 

@@ -8,8 +8,8 @@ repository.workspace = true
 description = "AI firewall with credential redaction and hook handlers for Sanctum"
 
 [dependencies]
-sanctum-types = { path = "../sanctum-types", version = "0.1.0" }
-sanctum-sentinel = { path = "../sanctum-sentinel", version = "0.1.0" }
+sanctum-types = { path = "../sanctum-types", version = "0.2.0" }
+sanctum-sentinel = { path = "../sanctum-sentinel", version = "0.2.0" }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

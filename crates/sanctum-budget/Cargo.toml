@@ -8,7 +8,7 @@ repository.workspace = true
 description = "LLM spend tracking and budget enforcement for Sanctum"
 
 [dependencies]
-sanctum-types = { path = "../sanctum-types", version = "0.1.0" }
+sanctum-types = { path = "../sanctum-types", version = "0.2.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

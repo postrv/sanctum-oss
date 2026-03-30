@@ -115,7 +115,6 @@ jobs:
       - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1
         with:
           args: -p sanctum-budget --default-unwind 10
-      - run: cargo kani -p sanctum-firewall --default-unwind 10
 
   kani-full:
     if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'

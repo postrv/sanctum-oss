@@ -224,7 +224,7 @@ where
 }
 
 /// An entry in the `.pth` allowlist.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PthAllowlistEntry {
     /// Package name (e.g., "setuptools").
     pub package: String,
@@ -235,21 +235,21 @@ pub struct PthAllowlistEntry {
 /// Default policy for MCP tools that do not match any explicit rule.
 ///
 /// Controls what happens when an MCP tool invocation has no matching
-/// policy rule. `Allow` preserves backwards-compatible behaviour.
+/// policy rule. `Deny` ensures fail-closed behaviour when no config exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum McpDefaultPolicy {
-    /// Allow unmatched MCP tools (backwards-compatible default).
-    #[default]
+    /// Allow unmatched MCP tools.
     Allow,
     /// Allow but emit a warning for unmatched MCP tools.
     Warn,
-    /// Block unmatched MCP tools entirely.
+    /// Block unmatched MCP tools entirely (secure default).
+    #[default]
     Deny,
 }
 
 /// Configuration for a single MCP policy rule.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpPolicyRuleConfig {
     /// The MCP tool name this rule applies to.
     pub tool: String,
@@ -314,7 +314,7 @@ impl Default for AiFirewallConfig {
             check_package_existence: true,
             package_check_timeout_ms: default_package_check_timeout(),
             mcp_rules: Vec::new(),
-            default_mcp_policy: McpDefaultPolicy::Allow,
+            default_mcp_policy: McpDefaultPolicy::Deny,
             entropy_threshold: default_entropy_threshold(),
             entropy_min_length: default_entropy_min_length(),
         }
@@ -615,19 +615,19 @@ mod tests {
     }
 
     #[test]
-    fn test_default_mcp_policy_defaults_to_allow() {
+    fn test_mcp_default_policy_is_deny() {
         let config = AiFirewallConfig::default();
-        assert_eq!(config.default_mcp_policy, McpDefaultPolicy::Allow);
+        assert_eq!(config.default_mcp_policy, McpDefaultPolicy::Deny);
     }
 
     #[test]
-    fn test_default_mcp_policy_omitted_is_allow() {
+    fn test_default_mcp_policy_omitted_is_deny() {
         let toml_str = "";
         let config: SanctumConfig =
             toml::from_str(toml_str).expect("empty config should use defaults");
         assert_eq!(
             config.ai_firewall.default_mcp_policy,
-            McpDefaultPolicy::Allow
+            McpDefaultPolicy::Deny
         );
     }
 

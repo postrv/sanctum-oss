@@ -740,18 +740,28 @@ async fn handle_ipc_command(
             }
         }
         IpcCommand::ListThreats { category, level } => {
-            let paths_clone = paths.clone();
-            let cat = category.clone();
-            let lvl = level.clone();
-            match tokio::task::spawn_blocking(move || {
-                handle_list_threats(&paths_clone, cat.as_deref(), lvl.as_deref())
-            })
-            .await
-            {
-                Ok(resp) => resp,
-                Err(e) => IpcResponse::Error {
-                    message: format!("task failed: {e}"),
-                },
+            if category.as_ref().is_some_and(|c| c.len() > 64) {
+                IpcResponse::Error {
+                    message: "category too long (max 64 chars)".to_string(),
+                }
+            } else if level.as_ref().is_some_and(|l| l.len() > 64) {
+                IpcResponse::Error {
+                    message: "level too long (max 64 chars)".to_string(),
+                }
+            } else {
+                let paths_clone = paths.clone();
+                let cat = category.clone();
+                let lvl = level.clone();
+                match tokio::task::spawn_blocking(move || {
+                    handle_list_threats(&paths_clone, cat.as_deref(), lvl.as_deref())
+                })
+                .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => IpcResponse::Error {
+                        message: format!("task failed: {e}"),
+                    },
+                }
             }
         }
         IpcCommand::GetThreatDetails { id } => {

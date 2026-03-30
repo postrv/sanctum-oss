@@ -59,88 +59,6 @@ pub const MAX_CERT_CACHE_SIZE: usize = 100;
 /// Parsed HTTP request components: (method, path, query, headers, body).
 type ParsedRequest = (String, String, Option<String>, Vec<(String, String)>, Vec<u8>);
 
-/// A bounded cache for TLS site certificates.
-///
-/// Uses `DashMap` for lock-free concurrent reads. When the cache
-/// reaches `MAX_CERT_CACHE_SIZE`, it is cleared entirely (simple
-/// eviction strategy appropriate for a small, stable key space).
-#[derive(Debug)]
-pub struct CertCache {
-    /// The underlying concurrent map from hostname to certificate bytes.
-    cache: DashMap<String, Vec<u8>>,
-}
-
-impl CertCache {
-    /// Create a new empty certificate cache.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            cache: DashMap::new(),
-        }
-    }
-
-    /// Retrieve a cached certificate for the given hostname.
-    #[must_use]
-    pub fn get(&self, host: &str) -> Option<Vec<u8>> {
-        self.cache.get(host).map(|entry| entry.value().clone())
-    }
-
-    /// Insert or retrieve a certificate, generating it on cache miss.
-    ///
-    /// If the cache is at capacity, it is cleared before inserting.
-    /// This prevents unbounded memory growth.
-    ///
-    /// # Errors
-    ///
-    /// Returns `ProxyError::CaGeneration` if `generate_fn` fails.
-    pub fn get_or_generate<F>(
-        &self,
-        host: &str,
-        generate_fn: F,
-    ) -> Result<Vec<u8>, ProxyError>
-    where
-        F: FnOnce(&str) -> Result<Vec<u8>, ProxyError>,
-    {
-        // Fast path: cache hit.
-        if let Some(cert) = self.get(host) {
-            return Ok(cert);
-        }
-
-        // Slow path: generate and cache.
-        let cert = generate_fn(host)?;
-
-        // Enforce size cap before inserting.
-        if self.cache.len() >= MAX_CERT_CACHE_SIZE {
-            tracing::warn!(
-                capacity = MAX_CERT_CACHE_SIZE,
-                "cert cache at capacity, clearing all entries"
-            );
-            self.cache.clear();
-        }
-
-        self.cache.insert(host.to_owned(), cert.clone());
-        Ok(cert)
-    }
-
-    /// Return the current number of cached entries.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.cache.len()
-    }
-
-    /// Return whether the cache is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
-    }
-}
-
-impl Default for CertCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Shared state for the CONNECT handler, including the CA for MITM.
 #[derive(Clone)]
 pub struct ConnectState {
@@ -229,8 +147,12 @@ pub const fn is_private_ip(ip: &IpAddr) -> bool {
 /// - `169.254.0.0/16` (link-local)
 /// - `172.16.0.0/12` (RFC 1918)
 /// - `192.0.0.0/24` (IETF protocol assignments)
+/// - `192.0.2.0/24` (TEST-NET-1, RFC 5737)
 /// - `192.168.0.0/16` (RFC 1918)
 /// - `198.18.0.0/15` (benchmarking, RFC 2544)
+/// - `198.51.100.0/24` (TEST-NET-2, RFC 5737)
+/// - `203.0.113.0/24` (TEST-NET-3, RFC 5737)
+/// - `240.0.0.0/4` (Class E / reserved for future use)
 /// - `255.255.255.255/32` (broadcast)
 #[must_use]
 pub const fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
@@ -252,20 +174,52 @@ pub const fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
     || (octets[0] == 172 && (octets[1] & mask_12bit) == 16)
     // 192.0.0.0/24 -- IETF protocol assignments
     || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+    // 192.0.2.0/24 -- TEST-NET-1 (RFC 5737)
+    || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
     // 192.168.0.0/16 -- RFC 1918 private
     || (octets[0] == 192 && octets[1] == 168)
     // 198.18.0.0/15 -- benchmarking (RFC 2544)
     || (octets[0] == 198 && (octets[1] & mask_15bit) == 18)
+    // 198.51.100.0/24 -- TEST-NET-2 (RFC 5737)
+    || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+    // 203.0.113.0/24 -- TEST-NET-3 (RFC 5737)
+    || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+    // 240.0.0.0/4 -- Class E (reserved for future use)
+    || (octets[0] & mask_12bit) == 240
     // 255.255.255.255 -- broadcast
     || (octets[0] == 255 && octets[1] == 255 && octets[2] == 255 && octets[3] == 255)
 }
 
 /// Check whether an IPv6 address is private or reserved.
 ///
-/// Covers loopback, link-local, unique-local, and unspecified.
+/// Covers loopback, link-local, unique-local, unspecified, and
+/// IPv6-mapped IPv4 addresses (`::ffff:x.x.x.x`).
 #[must_use]
 pub const fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
-    let seg0 = ip.segments()[0];
+    let segments = ip.segments();
+    let first_segment = segments[0];
+
+    // IPv6-mapped IPv4 (::ffff:x.x.x.x) -- check the embedded IPv4 address.
+    // Format: [0, 0, 0, 0, 0, 0xFFFF, hi16, lo16]
+    if segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0xFFFF
+    {
+        // Extract the embedded IPv4 octets from the last two segments.
+        let hi = segments[6];
+        let lo = segments[7];
+        let mapped = Ipv4Addr::new(
+            (hi >> 8) as u8,
+            (hi & 0xFF) as u8,
+            (lo >> 8) as u8,
+            (lo & 0xFF) as u8,
+        );
+        return is_private_ipv4(&mapped);
+    }
+
     let link_local_mask: u16 = 0xFFC0;
     let link_local_prefix: u16 = 0xFE80;
     let unique_local_mask: u16 = 0xFE00;
@@ -273,9 +227,9 @@ pub const fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
     // ::1 -- loopback
     ip.is_loopback()
     // fe80::/10 -- link-local
-    || (seg0 & link_local_mask) == link_local_prefix
+    || (first_segment & link_local_mask) == link_local_prefix
     // fc00::/7 -- unique local (RFC 4193)
-    || (seg0 & unique_local_mask) == unique_local_prefix
+    || (first_segment & unique_local_mask) == unique_local_prefix
     // :: (unspecified)
     || ip.is_unspecified()
 }
@@ -614,8 +568,33 @@ pub async fn mitm_intercept(
     state: &ConnectState,
 ) -> Result<(), ProxyError> {
     // SSRF prevention: validate the target is not a private IP.
-    // DNS rebinding prevention: resolve once, connect with validated addresses.
-    resolve_and_validate(host, port).await?;
+    // DNS rebinding prevention: resolve once, pin the validated addresses
+    // so that reqwest does not perform a second DNS lookup (TOCTOU).
+    let validated_addrs = resolve_and_validate(host, port).await?;
+
+    // Build a per-request reqwest client that pins DNS to the validated
+    // addresses. This prevents a DNS rebinding attack where the first
+    // lookup returns a public IP and the second returns a private one.
+    let mut pinned_builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none());
+    for addr in &validated_addrs {
+        pinned_builder = pinned_builder.resolve(host, *addr);
+    }
+    let pinned_client = pinned_builder.build().map_err(|e| {
+        tracing::debug!(error = %e, "failed to build pinned reqwest client");
+        ProxyError::Upstream("failed to build HTTP client".to_string())
+    })?;
+
+    // Create a handler state clone with the pinned client.
+    let pinned_handler = HandlerState {
+        client: pinned_client,
+        budget_tracker: Arc::clone(&state.handler.budget_tracker),
+        pending_cost: Arc::clone(&state.handler.pending_cost),
+        budget_config: Arc::clone(&state.handler.budget_config),
+        proxy_config: Arc::clone(&state.handler.proxy_config),
+    };
 
     // Get or generate a per-host certificate (with caching).
     let (site_cert, site_key_bytes) = state.get_or_generate_site_cert(host)?;
@@ -635,7 +614,8 @@ pub async fn mitm_intercept(
 
     // Perform TLS handshake with the client.
     let mut tls_stream = tls_acceptor.accept(client_stream).await.map_err(|e| {
-        ProxyError::Upstream(format!("TLS handshake failed for {host}: {e}"))
+        tracing::debug!(host = %host, error = %e, "TLS handshake failed");
+        ProxyError::Upstream("TLS handshake failed".to_string())
     })?;
 
     // Read the HTTP request from the TLS stream using a proper read loop
@@ -665,7 +645,7 @@ pub async fn mitm_intercept(
         content_length: parse_content_length(&headers)?,
     };
 
-    let response = crate::handler::handle_request(&state.handler, proxy_req).await;
+    let response = crate::handler::handle_request(&pinned_handler, proxy_req).await;
 
     // Build HTTP response bytes.
     let response_bytes = match response {
@@ -680,12 +660,18 @@ pub async fn mitm_intercept(
     tls_stream
         .write_all(&response_bytes)
         .await
-        .map_err(|e| ProxyError::Upstream(format!("failed to write TLS response: {e}")))?;
+        .map_err(|e| {
+            tracing::debug!(error = %e, "failed to write TLS response");
+            ProxyError::Upstream("failed to write TLS response".to_string())
+        })?;
 
     tls_stream
         .shutdown()
         .await
-        .map_err(|e| ProxyError::Upstream(format!("failed to shutdown TLS: {e}")))?;
+        .map_err(|e| {
+            tracing::debug!(error = %e, "failed to shutdown TLS");
+            ProxyError::Upstream("failed to shutdown TLS".to_string())
+        })?;
 
     Ok(())
 }
@@ -739,7 +725,10 @@ where
         let n = stream
             .read(&mut temp)
             .await
-            .map_err(|e| ProxyError::Upstream(format!("failed to read from MITM stream: {e}")))?;
+            .map_err(|e| {
+                tracing::debug!(error = %e, "failed to read from MITM stream");
+                ProxyError::Upstream("failed to read from MITM stream".to_string())
+            })?;
 
         if n == 0 {
             // Connection closed before header boundary found.
@@ -774,15 +763,17 @@ where
     // Parse the header section as a string (headers are ASCII).
     let header_str = String::from_utf8_lossy(header_bytes);
 
-    // Check for chunked transfer encoding (reject it).
-    if has_chunked_encoding(&header_str) {
+    // Reject all Transfer-Encoding headers (not just chunked).
+    // The MITM path uses Content-Length framing; any TE header would
+    // break the body read loop and could be used for request smuggling.
+    if has_transfer_encoding(&header_str) {
         return Err(ProxyError::Upstream(
-            "Transfer-Encoding: chunked is not supported for MITM interception".to_string(),
+            "Transfer-Encoding is not supported for MITM interception".to_string(),
         ));
     }
 
-    // Parse Content-Length from raw header string.
-    let content_length = parse_content_length_raw(&header_str);
+    // Parse Content-Length from raw header string (rejects CL-CL desync).
+    let content_length = parse_content_length_raw(&header_str)?;
 
     match content_length {
         Some(cl) => {
@@ -799,7 +790,8 @@ where
             // Read remaining body bytes.
             while buf.len() < total_expected {
                 let n = stream.read(&mut temp).await.map_err(|e| {
-                    ProxyError::Upstream(format!("failed to read body from MITM stream: {e}"))
+                    tracing::debug!(error = %e, "failed to read body from MITM stream");
+                    ProxyError::Upstream("failed to read body from MITM stream".to_string())
                 })?;
 
                 if n == 0 {
@@ -901,7 +893,10 @@ fn format_http_response(
 
     let mut response = format!("HTTP/1.1 {status} {status_text}\r\n");
     for (name, value) in headers {
-        let _ = write!(response, "{name}: {value}\r\n");
+        // Sanitize header values: strip CR and LF to prevent header injection.
+        let safe_name: String = name.chars().filter(|&c| c != '\r' && c != '\n').collect();
+        let safe_value: String = value.chars().filter(|&c| c != '\r' && c != '\n').collect();
+        let _ = write!(response, "{safe_name}: {safe_value}\r\n");
     }
     let _ = write!(response, "content-length: {}\r\n", body.len());
     response.push_str("\r\n");
@@ -918,11 +913,16 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// Check if headers contain `Transfer-Encoding: chunked`.
-fn has_chunked_encoding(headers: &str) -> bool {
+/// Check if headers contain any `Transfer-Encoding` header.
+///
+/// ALL Transfer-Encoding values are rejected (not just chunked).
+/// The MITM interception path uses Content-Length framing; any
+/// Transfer-Encoding header (chunked, gzip, deflate, identity, etc.)
+/// would break the body read loop and could be used for smuggling.
+fn has_transfer_encoding(headers: &str) -> bool {
     for line in headers.lines() {
         let lower = line.to_lowercase();
-        if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
+        if lower.starts_with("transfer-encoding:") {
             return true;
         }
     }
@@ -932,15 +932,41 @@ fn has_chunked_encoding(headers: &str) -> bool {
 /// Parse the `Content-Length` header value from a raw header string.
 ///
 /// Used by the MITM read loop where headers are raw strings.
-fn parse_content_length_raw(headers: &str) -> Option<usize> {
+/// Scans ALL headers and rejects conflicting values (CL-CL desync
+/// prevention). Duplicate headers with the same value are tolerated.
+///
+/// # Errors
+///
+/// Returns `ProxyError::ConflictingContentLength` if multiple
+/// Content-Length headers exist with different values.
+fn parse_content_length_raw(headers: &str) -> Result<Option<usize>, ProxyError> {
+    let mut found_value: Option<usize> = None;
+
     for line in headers.lines() {
         let lower = line.to_lowercase();
         if lower.starts_with("content-length:") {
-            let value = line.split_once(':')?.1.trim();
-            return value.parse::<usize>().ok();
+            let Some(value_str) = line.split_once(':').map(|(_, v)| v.trim()) else {
+                continue;
+            };
+            let Ok(parsed) = value_str.parse::<usize>() else {
+                continue;
+            };
+
+            match found_value {
+                Some(existing) if existing != parsed => {
+                    return Err(ProxyError::ConflictingContentLength);
+                }
+                Some(_) => {
+                    // Same value -- tolerate duplicate.
+                }
+                None => {
+                    found_value = Some(parsed);
+                }
+            }
         }
     }
-    None
+
+    Ok(found_value)
 }
 
 /// Parse and validate the Content-Length header from a list of headers.
@@ -1139,6 +1165,29 @@ mod tests {
         assert!(response_str.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
     }
 
+    #[test]
+    fn test_format_http_response_strips_header_injection() {
+        let headers = vec![(
+            "x-test".to_owned(),
+            "value\r\nX-Evil: injected".to_owned(),
+        )];
+        let body = b"ok";
+        let response = format_http_response(200, &headers, body);
+        let response_str = String::from_utf8(response).unwrap();
+        // The CRLF should be stripped so "X-Evil: injected" is NOT a
+        // separate header line. Count the number of \r\n sequences:
+        // there should be one for the status line, one for x-test,
+        // one for content-length, and one for the header/body boundary.
+        let line_count = response_str.matches("\r\n").count();
+        // status + x-test + content-length + blank = 4
+        assert_eq!(line_count, 4, "CRLF injection must not create extra header lines");
+        // The sanitized value should have CRLF removed.
+        assert!(
+            response_str.contains("x-test: valueX-Evil: injected\r\n"),
+            "sanitized value should be present"
+        );
+    }
+
     // ---------- Connection established response ----------
 
     #[test]
@@ -1274,8 +1323,8 @@ mod tests {
     #[test]
     fn test_private_ipv4_broadcast() {
         assert!(is_private_ipv4(&Ipv4Addr::BROADCAST));
-        // Not broadcast (only partial 255s).
-        assert!(!is_private_ipv4(&Ipv4Addr::new(255, 255, 255, 0)));
+        // 255.255.255.0 is in Class E range -- also blocked.
+        assert!(is_private_ipv4(&Ipv4Addr::new(255, 255, 255, 0)));
     }
 
     #[test]
@@ -1283,7 +1332,32 @@ mod tests {
         assert!(!is_private_ipv4(&Ipv4Addr::new(8, 8, 8, 8)));
         assert!(!is_private_ipv4(&Ipv4Addr::new(1, 1, 1, 1)));
         assert!(!is_private_ipv4(&Ipv4Addr::new(104, 18, 0, 1)));
-        assert!(!is_private_ipv4(&Ipv4Addr::new(203, 0, 113, 1)));
+    }
+
+    #[test]
+    fn test_private_ipv4_test_net_1() {
+        assert!(is_private_ipv4(&Ipv4Addr::new(192, 0, 2, 0)));
+        assert!(is_private_ipv4(&Ipv4Addr::new(192, 0, 2, 255)));
+        assert!(!is_private_ipv4(&Ipv4Addr::new(192, 0, 3, 0)));
+    }
+
+    #[test]
+    fn test_private_ipv4_test_net_2() {
+        assert!(is_private_ipv4(&Ipv4Addr::new(198, 51, 100, 0)));
+        assert!(is_private_ipv4(&Ipv4Addr::new(198, 51, 100, 255)));
+    }
+
+    #[test]
+    fn test_private_ipv4_test_net_3() {
+        assert!(is_private_ipv4(&Ipv4Addr::new(203, 0, 113, 0)));
+        assert!(is_private_ipv4(&Ipv4Addr::new(203, 0, 113, 255)));
+    }
+
+    #[test]
+    fn test_private_ipv4_class_e() {
+        assert!(is_private_ipv4(&Ipv4Addr::new(240, 0, 0, 0)));
+        assert!(is_private_ipv4(&Ipv4Addr::new(240, 0, 0, 1)));
+        assert!(!is_private_ipv4(&Ipv4Addr::new(239, 0, 0, 1)));
     }
 
     // ---------- SSRF: Private IPv6 blocking tests ----------
@@ -1320,6 +1394,29 @@ mod tests {
         assert!(!is_private_ipv6(&Ipv6Addr::new(
             0x2001, 0x0DB8, 0, 0, 0, 0, 0, 1
         )));
+    }
+
+    // ---------- SSRF: IPv6-mapped IPv4 tests ----------
+
+    #[test]
+    fn test_ipv6_mapped_ipv4_loopback_is_private() {
+        // ::ffff:127.0.0.1
+        let ip = Ipv6Addr::new(0, 0, 0, 0, 0, 0xFFFF, 0x7F00, 0x0001);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_mapped_ipv4_rfc1918_is_private() {
+        // ::ffff:10.0.0.1
+        let ip = Ipv6Addr::new(0, 0, 0, 0, 0, 0xFFFF, 0x0A00, 0x0001);
+        assert!(is_private_ipv6(&ip));
+    }
+
+    #[test]
+    fn test_ipv6_mapped_ipv4_public_is_not_private() {
+        // ::ffff:8.8.8.8
+        let ip = Ipv6Addr::new(0, 0, 0, 0, 0, 0xFFFF, 0x0808, 0x0808);
+        assert!(!is_private_ipv6(&ip));
     }
 
     // ---------- is_private_ip umbrella tests ----------
@@ -1441,39 +1538,69 @@ mod tests {
     #[test]
     fn test_parse_content_length_raw_present() {
         let headers = "POST /v1/chat HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: 42\r\n\r\n";
-        assert_eq!(parse_content_length_raw(headers), Some(42));
+        assert_eq!(parse_content_length_raw(headers).unwrap(), Some(42));
     }
 
     #[test]
     fn test_parse_content_length_raw_missing() {
         let headers = "GET /v1/models HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
-        assert_eq!(parse_content_length_raw(headers), None);
+        assert_eq!(parse_content_length_raw(headers).unwrap(), None);
     }
 
     #[test]
     fn test_parse_content_length_raw_case_insensitive() {
         let headers = "POST / HTTP/1.1\r\ncontent-length: 100\r\n\r\n";
-        assert_eq!(parse_content_length_raw(headers), Some(100));
+        assert_eq!(parse_content_length_raw(headers).unwrap(), Some(100));
     }
 
-    // ---------- Chunked encoding detection ----------
+    #[test]
+    fn test_parse_content_length_raw_duplicate_same() {
+        let headers = "POST / HTTP/1.1\r\nContent-Length: 50\r\nContent-Length: 50\r\n\r\n";
+        assert_eq!(parse_content_length_raw(headers).unwrap(), Some(50));
+    }
 
     #[test]
-    fn test_has_chunked_encoding() {
+    fn test_parse_content_length_raw_duplicate_conflict() {
+        let headers = "POST / HTTP/1.1\r\nContent-Length: 50\r\nContent-Length: 99\r\n\r\n";
+        let result = parse_content_length_raw(headers);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ProxyError::ConflictingContentLength
+        ));
+    }
+
+    // ---------- Transfer-Encoding detection ----------
+
+    #[test]
+    fn test_has_transfer_encoding_chunked() {
         let headers = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
-        assert!(has_chunked_encoding(headers));
+        assert!(has_transfer_encoding(headers));
     }
 
     #[test]
-    fn test_has_chunked_encoding_case_insensitive() {
+    fn test_has_transfer_encoding_case_insensitive() {
         let headers = "POST / HTTP/1.1\r\ntransfer-encoding: Chunked\r\n\r\n";
-        assert!(has_chunked_encoding(headers));
+        assert!(has_transfer_encoding(headers));
     }
 
     #[test]
-    fn test_no_chunked_encoding() {
+    fn test_has_transfer_encoding_gzip() {
+        // All TE values must be rejected, not just chunked.
+        let headers = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n";
+        assert!(has_transfer_encoding(headers));
+    }
+
+    #[test]
+    fn test_has_transfer_encoding_identity() {
+        let headers = "POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\n\r\n";
+        assert!(has_transfer_encoding(headers));
+    }
+
+    #[test]
+    fn test_no_transfer_encoding() {
         let headers = "POST / HTTP/1.1\r\nContent-Length: 42\r\n\r\n";
-        assert!(!has_chunked_encoding(headers));
+        assert!(!has_transfer_encoding(headers));
     }
 
     // ---------- Byte utilities ----------
@@ -1543,105 +1670,6 @@ mod tests {
         let result3 = state.get_or_generate_site_cert("api.anthropic.com");
         assert!(result3.is_ok());
         assert_eq!(state.cert_cache.len(), 2);
-    }
-
-    // ---------- CertCache bounded tests ----------
-
-    #[test]
-    fn test_cert_cache_new_is_empty() {
-        let cache = CertCache::new();
-        assert!(cache.is_empty());
-        assert_eq!(cache.len(), 0);
-    }
-
-    #[test]
-    fn test_cert_cache_default_is_empty() {
-        let cache = CertCache::default();
-        assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn test_cert_cache_get_miss() {
-        let cache = CertCache::new();
-        assert!(cache.get("example.com").is_none());
-    }
-
-    #[test]
-    fn test_cert_cache_get_or_generate_inserts() {
-        let cache = CertCache::new();
-        let cert = cache
-            .get_or_generate("api.openai.com", |host| {
-                Ok(format!("cert-for-{host}").into_bytes())
-            })
-            .unwrap();
-        assert_eq!(cert, b"cert-for-api.openai.com");
-        assert_eq!(cache.len(), 1);
-    }
-
-    #[test]
-    fn test_cert_cache_get_or_generate_returns_cached() {
-        let cache = CertCache::new();
-        let call_count = std::sync::atomic::AtomicUsize::new(0);
-
-        let cert1 = cache
-            .get_or_generate("example.com", |host| {
-                call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(format!("cert-{host}").into_bytes())
-            })
-            .unwrap();
-
-        let cert2 = cache
-            .get_or_generate("example.com", |host| {
-                call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(format!("cert-{host}-v2").into_bytes())
-            })
-            .unwrap();
-
-        assert_eq!(cert1, cert2, "second call should return cached cert");
-        assert_eq!(
-            call_count.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "generator should only be called once"
-        );
-    }
-
-    #[test]
-    fn test_cert_cache_clears_at_capacity() {
-        let cache = CertCache::new();
-
-        // Fill the cache to capacity.
-        for i in 0..MAX_CERT_CACHE_SIZE {
-            let host = format!("host-{i}.example.com");
-            cache
-                .get_or_generate(&host, |h| Ok(format!("cert-{h}").into_bytes()))
-                .unwrap();
-        }
-        assert_eq!(cache.len(), MAX_CERT_CACHE_SIZE);
-
-        // Insert one more -- should trigger a clear.
-        cache
-            .get_or_generate("overflow.example.com", |h| {
-                Ok(format!("cert-{h}").into_bytes())
-            })
-            .unwrap();
-
-        // Cache should have been cleared and then the new entry inserted.
-        assert_eq!(cache.len(), 1);
-        assert!(cache.get("overflow.example.com").is_some());
-        // Old entries should be gone.
-        assert!(cache.get("host-0.example.com").is_none());
-    }
-
-    #[test]
-    fn test_cert_cache_generator_error_propagated() {
-        let cache = CertCache::new();
-        let result = cache.get_or_generate("fail.example.com", |_| {
-            Err(ProxyError::CaGeneration {
-                reason: "test failure".to_owned(),
-            })
-        });
-        assert!(result.is_err());
-        assert!(cache.is_empty(), "failed generation should not cache");
     }
 
     // ---------- SSRF error message redaction tests ----------

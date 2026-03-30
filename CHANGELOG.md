@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CDLA-Permissive-2.0 license allowed for `webpki-roots` v1.0.6
 - LiteLLM attack date and sanctum.dev references corrected
 
+### Fixed (round 4 adversarial review)
+- **Status exit code**: `sanctum status` now returns non-zero when daemon is offline, enabling shell hook auto-start
+- **Daemon log leak**: `sanctum run` suppresses daemon stdout/stderr when auto-starting
+- **Proxy status output**: `sanctum proxy status` writes to stdout (was stderr)
+- **Budget help text**: `--daily` example changed from `$50` to `$200` to differentiate from `--session`
+- **Model names**: Recommended config updated to current model IDs (claude-opus-4-6, gpt-5.4, gemini-3.1-pro, grok-4.20-0309-reasoning)
+- **ListThreats validation**: Category and level fields now validated (max 64 chars) matching other IPC commands
+- **deny.toml**: Removed stale RUSTSEC-2025-0134 advisory ignore (rustls-pemfile no longer a dependency)
+- **README**: Output examples updated to match actual CLI format; proxy stop documented as unimplemented
+- **Test counts**: Updated to ~1,700 across README, CHANGELOG, and SECURITY.md
+
 ### Security
 - Round 2 adversarial review: 36 fixes across 8 crates, 48 new tests
 - Crash prevention, data durability, and credential detection hardening
@@ -62,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Nightly extended fuzz testing**: 5-hour fuzz runs via cron schedule (2.5 hours per target)
 - **Release workflow gates**: `verify-ci` job checks CI status before building release artifacts
 - **Glob matcher safety**: Multi-star patterns now return false with a warning instead of silently falling through to exact match
-- **1,453 tests** across 8 crates, 0 clippy warnings (pedantic + nursery)
+- **~1,700 tests** across 8 crates, 0 clippy warnings (pedantic + nursery)
 - **Fuzz targets**: pth_analyser and config_parser with CI integration
 - **Property-based tests**: 9 proptest harnesses (6 sentinel + 3 budget)
 

@@ -95,23 +95,28 @@ fn cmd_stop() -> Result<(), CliError> {
     ))
 }
 
+/// Write informational output to stdout (for status display).
+fn write_stdout(msg: &str) -> Result<(), CliError> {
+    writeln!(std::io::stdout(), "{msg}").map_err(CliError::Io)
+}
+
 /// Show proxy status.
 fn cmd_status() -> Result<(), CliError> {
     let paths = WellKnownPaths::require().map_err(CliError::InvalidArgs)?;
     let key_path = ca::default_key_path(&paths.data_dir);
     let cert_path = ca::default_cert_path(&paths.data_dir);
 
-    write_info("Sanctum Proxy Status")?;
-    write_info("====================")?;
+    write_stdout("Sanctum Proxy Status")?;
+    write_stdout("====================")?;
     if key_path.exists() && cert_path.exists() {
-        write_info("CA certificate: installed")?;
-        write_info(&format!("  Key:  {}", key_path.display()))?;
-        write_info(&format!("  Cert: {}", cert_path.display()))?;
+        write_stdout("CA certificate: installed")?;
+        write_stdout(&format!("  Key:  {}", key_path.display()))?;
+        write_stdout(&format!("  Cert: {}", cert_path.display()))?;
     } else {
-        write_info("CA certificate: not installed")?;
-        write_info("  Run `sanctum proxy install-ca` to generate.")?;
+        write_stdout("CA certificate: not installed")?;
+        write_stdout("  Run `sanctum proxy install-ca` to generate.")?;
     }
-    write_info(&format!("Default port: {}", sanctum_types::config::DEFAULT_PROXY_PORT))?;
+    write_stdout(&format!("Default port: {}", sanctum_types::config::DEFAULT_PROXY_PORT))?;
 
     Ok(())
 }

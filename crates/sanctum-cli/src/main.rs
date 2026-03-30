@@ -159,7 +159,7 @@ enum BudgetAction {
         /// Session budget limit (e.g. $50).
         #[arg(long, value_name = "AMOUNT")]
         session: Option<String>,
-        /// Daily budget limit (e.g. $50).
+        /// Daily budget limit (e.g. $200).
         #[arg(long, value_name = "AMOUNT")]
         daily: Option<String>,
     },

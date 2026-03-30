@@ -85,8 +85,9 @@ fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
         cfg.check_package_existence = true;
     }
 
-    // Enforce entropy detection security floor: threshold >= 3.5, min_length >= 16.
-    // A malicious local config could set threshold to 99.0 to disable detection.
+    // Enforce entropy detection security floor: threshold in 3.5..=6.5, min_length in 16..=128.
+    // A malicious local config could set threshold to 99.0 to disable detection,
+    // or min_length to 10000 to effectively skip all strings.
     if cfg.entropy_threshold < 3.5 {
         tracing::warn!(
             "Project-local config entropy_threshold {} below security floor 3.5 \u{2014} clamping",
@@ -94,12 +95,26 @@ fn enforce_ai_firewall_security_floor(cfg: &mut AiFirewallConfig) {
         );
         cfg.entropy_threshold = 3.5;
     }
+    if cfg.entropy_threshold > 6.5 {
+        tracing::warn!(
+            "Project-local config entropy_threshold {} above security ceiling 6.5 \u{2014} clamping",
+            cfg.entropy_threshold
+        );
+        cfg.entropy_threshold = 6.5;
+    }
     if cfg.entropy_min_length < 16 {
         tracing::warn!(
             "Project-local config entropy_min_length {} below security floor 16 \u{2014} clamping",
             cfg.entropy_min_length
         );
         cfg.entropy_min_length = 16;
+    }
+    if cfg.entropy_min_length > 128 {
+        tracing::warn!(
+            "Project-local config entropy_min_length {} above security ceiling 128 \u{2014} clamping",
+            cfg.entropy_min_length
+        );
+        cfg.entropy_min_length = 128;
     }
 }
 
@@ -1234,6 +1249,47 @@ mod tests {
         assert_eq!(
             cfg.entropy_min_length, 20,
             "valid entropy_min_length should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_entropy_threshold_upper_bound() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            entropy_threshold: 99.0,
+            entropy_min_length: 20,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert!(
+            (cfg.entropy_threshold - 6.5).abs() < f64::EPSILON,
+            "entropy_threshold 99.0 should be clamped to 6.5, got {}",
+            cfg.entropy_threshold
+        );
+    }
+
+    #[test]
+    fn test_entropy_min_length_upper_bound() {
+        let mut cfg = AiFirewallConfig {
+            claude_hooks: true,
+            redact_credentials: true,
+            mcp_audit: true,
+            check_package_existence: true,
+            package_check_timeout_ms: 3000,
+            mcp_rules: Vec::new(),
+            default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            entropy_threshold: 5.0,
+            entropy_min_length: 10000,
+        };
+        enforce_ai_firewall_security_floor(&mut cfg);
+        assert_eq!(
+            cfg.entropy_min_length, 128,
+            "entropy_min_length 10000 should be clamped to 128"
         );
     }
 }

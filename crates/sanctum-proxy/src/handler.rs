@@ -146,7 +146,10 @@ pub fn build_shared_client() -> Result<reqwest::Client, ProxyError> {
         // should never issue redirects.
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| ProxyError::Upstream(format!("failed to build HTTP client: {e}")))
+        .map_err(|e| {
+            tracing::debug!(error = %e, "failed to build HTTP client");
+            ProxyError::Upstream("failed to build HTTP client".to_string())
+        })
 }
 
 /// Handle a single proxied request end-to-end.
@@ -349,7 +352,10 @@ async fn send_upstream(
     req_builder
         .send()
         .await
-        .map_err(|e| ProxyError::Upstream(format!("upstream request failed: {e}")))
+        .map_err(|e| {
+            tracing::debug!(error = %e, "upstream request failed");
+            ProxyError::Upstream("upstream request failed".to_string())
+        })
 }
 
 /// Check whether a request body contains `"stream": true`, indicating
@@ -421,7 +427,10 @@ async fn read_response_body_limited(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| ProxyError::Upstream(format!("failed to read response body: {e}")))?
+        .map_err(|e| {
+            tracing::debug!(error = %e, "failed to read response body");
+            ProxyError::Upstream("failed to read response body".to_string())
+        })?
     {
         total = total.saturating_add(chunk.len() as u64);
         if total > max_bytes {

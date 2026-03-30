@@ -64,9 +64,9 @@ pub fn run() -> Result<(), CliError> {
 /// All filesystem operations are best-effort — failures are silently handled
 /// with fallback display strings.
 ///
-/// Returns `Ok(())` because the status command should succeed whether the
-/// daemon is online or offline -- it reports the state either way.
-#[allow(clippy::unnecessary_wraps)]
+/// Prints useful offline diagnostics, then returns `Err(CliError::DaemonNotRunning)`
+/// so that shell hooks (`if ! sanctum daemon status`) can detect offline state
+/// and auto-start the daemon.
 fn offline_status() -> Result<(), CliError> {
     let paths = WellKnownPaths::default();
 
@@ -106,16 +106,22 @@ fn offline_status() -> Result<(), CliError> {
         println!("  Start with: sanctum daemon start");
     }
 
-    Ok(())
+    Err(CliError::DaemonNotRunning)
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn offline_status_returns_ok() {
+    fn offline_status_returns_daemon_not_running() {
         let result = offline_status();
-        assert!(result.is_ok(), "offline_status should return Ok(())");
+        assert!(result.is_err(), "offline_status should return Err(DaemonNotRunning)");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CliError::DaemonNotRunning),
+            "expected DaemonNotRunning, got: {err}"
+        );
     }
 }

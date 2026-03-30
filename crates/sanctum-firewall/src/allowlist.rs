@@ -2,8 +2,8 @@
 //!
 //! Maintains a persistent set of SHA-256 hashes for values that should be
 //! exempted from entropy-based secret detection. The hashes (not the original
-//! values) are stored in a JSON file so that the allowlist itself does not
-//! leak secrets.
+//! values) are stored in a line-oriented text file so that the allowlist itself
+//! does not leak secrets.
 //!
 //! Uses atomic writes (write-to-temp-then-rename) and restrictive file
 //! permissions (0o600 on Unix) to prevent data loss and unauthorized access.
@@ -169,10 +169,18 @@ pub fn save_allowlist_struct(allowlist: &Allowlist, path: &Path) -> Result<(), i
     })
 }
 
-/// Load an entropy allowlist from a JSON file.
+/// Check whether a string is a valid 64-character lowercase hex hash.
+fn is_valid_hex_hash(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// Load an entropy allowlist from a line-oriented file.
 ///
-/// The file is expected to contain a JSON array of hex-encoded SHA-256 hashes.
-/// Returns an empty set if the file does not exist or cannot be parsed.
+/// Each line is expected to be a 64-character lowercase hex-encoded SHA-256
+/// hash. Empty lines and lines starting with `#` are ignored. Lines that do
+/// not match the expected format are skipped with a warning.
+///
+/// Returns an empty set if the file does not exist or cannot be read.
 ///
 /// # Security limits
 ///
@@ -199,30 +207,41 @@ pub fn load_allowlist(path: &Path) -> HashSet<String> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return HashSet::new();
     };
-    let Ok(hashes) = serde_json::from_str::<Vec<String>>(&content) else {
-        tracing::warn!(
-            path = %path.display(),
-            "Failed to parse entropy allowlist JSON"
-        );
-        return HashSet::new();
-    };
 
-    if hashes.len() > MAX_ENTRIES {
-        tracing::warn!(
-            path = %path.display(),
-            count = hashes.len(),
-            max = MAX_ENTRIES,
-            "Entropy allowlist exceeds maximum entry count, ignoring"
-        );
-        return HashSet::new();
+    let mut result = HashSet::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if result.len() >= MAX_ENTRIES {
+            tracing::warn!(
+                path = %path.display(),
+                max = MAX_ENTRIES,
+                "Entropy allowlist exceeds maximum entry count, ignoring remainder"
+            );
+            break;
+        }
+
+        if !is_valid_hex_hash(trimmed) {
+            tracing::warn!(
+                path = %path.display(),
+                entry = trimmed,
+                "Skipping invalid allowlist entry (expected 64-char lowercase hex)"
+            );
+            continue;
+        }
+
+        result.insert(trimmed.to_owned());
     }
 
-    hashes.into_iter().collect()
+    result
 }
 
-/// Save an entropy allowlist to a JSON file using atomic write.
+/// Save an entropy allowlist to a line-oriented file using atomic write.
 ///
-/// Writes the set of hex-encoded SHA-256 hashes as a JSON array. Creates
+/// Writes the set of hex-encoded SHA-256 hashes as one hash per line. Creates
 /// parent directories if they do not exist. The write is atomic: data is first
 /// written to a temporary file in the same directory, then renamed to the
 /// target path. On Unix, the file is created with 0o600 permissions.
@@ -240,21 +259,23 @@ pub fn save_allowlist(path: &Path, allowlist: &HashSet<String>) -> Result<(), st
     })?;
     std::fs::create_dir_all(parent)?;
 
-    let sorted: Vec<&String> = {
-        let mut v: Vec<_> = allowlist.iter().collect();
-        v.sort();
-        v
-    };
-    let json = serde_json::to_string_pretty(&sorted).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })?;
+    let mut sorted: Vec<&String> = allowlist.iter().collect();
+    sorted.sort();
+
+    let mut content = String::new();
+    content.push_str("# Sanctum entropy allowlist\n");
+    content.push_str("# Each line is a SHA-256 hex hash of an allowlisted value\n");
+    for entry in &sorted {
+        content.push_str(entry);
+        content.push('\n');
+    }
 
     // Generate temp file path in the same directory
     let temp_name = temp_filename(path);
     let temp_path = parent.join(&temp_name);
 
     // Write to temp file with secure permissions
-    write_with_permissions(&temp_path, json.as_bytes())?;
+    write_with_permissions(&temp_path, content.as_bytes())?;
 
     // Atomic rename
     std::fs::rename(&temp_path, path).inspect_err(|_| {
@@ -502,22 +523,22 @@ mod tests {
         assert!(path.exists());
     }
 
-    // ---- JSON (HashSet-based) API tests ----
+    // ---- Line-oriented (HashSet-based) API tests ----
 
     #[test]
     fn load_allowlist_returns_empty_for_missing_file() {
-        let path = std::path::Path::new("/tmp/nonexistent_allowlist_test.json");
+        let path = std::path::Path::new("/tmp/nonexistent_allowlist_test.txt");
         let result = load_allowlist(path);
         assert!(result.is_empty());
     }
 
     #[test]
-    fn json_save_and_load_roundtrip() {
+    fn line_save_and_load_roundtrip() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("allowlist.json");
+        let path = dir.path().join("allowlist.txt");
 
         let mut allowlist = HashSet::new();
-        let hash = hash_value("test_secret");
+        let hash = hash_value("test_value");
         allowlist.insert(hash.clone());
 
         save_allowlist(&path, &allowlist).expect("save");
@@ -552,27 +573,85 @@ mod tests {
     }
 
     #[test]
-    fn load_allowlist_handles_invalid_json() {
+    fn load_allowlist_skips_comments_and_empty_lines() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("bad.json");
-        std::fs::write(&path, "not valid json").expect("write");
-        let result = load_allowlist(&path);
-        assert!(result.is_empty());
+        let path = dir.path().join("allowlist.txt");
+
+        let hash = hash_value("test_value");
+        let content = format!("# comment\n\n{hash}\n\n# another comment\n");
+        std::fs::write(&path, &content).expect("write");
+
+        let loaded = load_allowlist(&path);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains(&hash));
     }
 
     #[test]
-    fn json_save_creates_parent_directories() {
+    fn load_allowlist_skips_invalid_entries() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("nested").join("dir").join("allowlist.json");
+        let path = dir.path().join("allowlist.txt");
+
+        let valid_hash = hash_value("test_value");
+        // Invalid: too short, uppercase, non-hex
+        let content = format!(
+            "{valid_hash}\nabcd1234\nABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234\nnot-hex-at-all\n"
+        );
+        std::fs::write(&path, &content).expect("write");
+
+        let loaded = load_allowlist(&path);
+        assert_eq!(loaded.len(), 1, "Only the valid 64-char lowercase hex hash should be loaded");
+        assert!(loaded.contains(&valid_hash));
+    }
+
+    #[test]
+    fn load_allowlist_deduplicates_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("allowlist.txt");
+
+        let hash = hash_value("test_value");
+        let content = format!("{hash}\n{hash}\n{hash}\n");
+        std::fs::write(&path, &content).expect("write");
+
+        let loaded = load_allowlist(&path);
+        assert_eq!(loaded.len(), 1, "Duplicate entries should be deduplicated");
+    }
+
+    #[test]
+    fn is_valid_hex_hash_accepts_valid() {
+        let h = hash_value("test");
+        assert!(is_valid_hex_hash(&h));
+    }
+
+    #[test]
+    fn is_valid_hex_hash_rejects_uppercase() {
+        let upper = "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234";
+        assert!(!is_valid_hex_hash(upper));
+    }
+
+    #[test]
+    fn is_valid_hex_hash_rejects_short() {
+        assert!(!is_valid_hex_hash("abcd1234"));
+    }
+
+    #[test]
+    fn is_valid_hex_hash_rejects_non_hex() {
+        let bad = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        assert!(!is_valid_hex_hash(bad));
+    }
+
+    #[test]
+    fn line_save_creates_parent_directories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("dir").join("allowlist.txt");
         let allowlist = HashSet::new();
         save_allowlist(&path, &allowlist).expect("save should create parent dirs");
         assert!(path.exists());
     }
 
     #[test]
-    fn json_load_rejects_oversized_file() {
+    fn line_load_rejects_oversized_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("allowlist.json");
+        let path = dir.path().join("allowlist.txt");
 
         // Create a file larger than MAX_FILE_SIZE
         #[allow(clippy::cast_possible_truncation)]
@@ -585,9 +664,9 @@ mod tests {
     }
 
     #[test]
-    fn json_atomic_write_no_partial_content() {
+    fn line_atomic_write_no_partial_content() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("allowlist.json");
+        let path = dir.path().join("allowlist.txt");
 
         let mut al = HashSet::new();
         al.insert(hash_value("first"));
@@ -606,7 +685,7 @@ mod tests {
         assert!(loaded.contains(&hash_value("second")));
 
         // Verify no temp file remains
-        let temp_path = dir.path().join(".allowlist.json.tmp");
+        let temp_path = dir.path().join(".allowlist.txt.tmp");
         assert!(
             !temp_path.exists(),
             "Temp file should not remain after successful rename"

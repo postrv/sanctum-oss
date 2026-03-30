@@ -54,6 +54,7 @@ pub fn load_config(path: &Path) -> Result<SanctumConfig, DaemonError> {
 /// - `sentinel.watch_credentials` forced to `true`
 /// - `sentinel.pth_response` cannot be downgraded from `Quarantine`
 /// - `sentinel.credential_allowlist` must be a subset of the global allowlist
+#[allow(clippy::too_many_lines)]
 pub fn enforce_security_floor(
     config: &mut SanctumConfig,
     is_project_local: bool,
@@ -94,13 +95,14 @@ pub fn enforce_security_floor(
         );
         config.ai_firewall.mcp_audit = true;
     }
-    // Prevent project-local config from setting default_mcp_policy to Allow
-    // when the global config uses a stricter policy.
-    if config.ai_firewall.default_mcp_policy == McpDefaultPolicy::Allow
-        && global.ai_firewall.default_mcp_policy != McpDefaultPolicy::Allow
+    // Prevent project-local config from setting default_mcp_policy to Allow or Warn
+    // when the global config uses Deny. Warn maps to exit-code 0 so MCP tools
+    // still proceed -- it must be treated the same as Allow for security purposes.
+    if global.ai_firewall.default_mcp_policy == McpDefaultPolicy::Deny
+        && config.ai_firewall.default_mcp_policy != McpDefaultPolicy::Deny
     {
         tracing::warn!(
-            "project config tried to weaken default_mcp_policy to allow \u{2014} using global value"
+            "project config tried to weaken default_mcp_policy below deny \u{2014} using global value"
         );
         config.ai_firewall.default_mcp_policy = global.ai_firewall.default_mcp_policy;
     }
@@ -125,6 +127,63 @@ pub fn enforce_security_floor(
             .sentinel
             .credential_allowlist
             .clone_from(&global.sentinel.credential_allowlist);
+    }
+
+    // pth_allowlist: project-local list must be a subset of the global list.
+    // A project cannot introduce entries not present in the global allowlist.
+    let has_non_global_pth = config
+        .sentinel
+        .pth_allowlist
+        .iter()
+        .any(|entry| !global.sentinel.pth_allowlist.contains(entry));
+    if has_non_global_pth {
+        tracing::warn!(
+            "project config pth_allowlist contains entries not in global allowlist \u{2014} using global allowlist"
+        );
+        config
+            .sentinel
+            .pth_allowlist
+            .clone_from(&global.sentinel.pth_allowlist);
+    }
+
+    // MCP rules: global rules always apply. Local rules are additive —
+    // they cannot remove or clear global rules, only add more.
+    for global_rule in &global.ai_firewall.mcp_rules {
+        if !config.ai_firewall.mcp_rules.contains(global_rule) {
+            config.ai_firewall.mcp_rules.push(global_rule.clone());
+        }
+    }
+
+    // Entropy threshold: clamp to 3.5..=6.5 (Shannon entropy bounds).
+    if config.ai_firewall.entropy_threshold < 3.5 {
+        tracing::warn!(
+            "project config entropy_threshold {} below security floor 3.5 \u{2014} clamping",
+            config.ai_firewall.entropy_threshold
+        );
+        config.ai_firewall.entropy_threshold = 3.5;
+    }
+    if config.ai_firewall.entropy_threshold > 6.5 {
+        tracing::warn!(
+            "project config entropy_threshold {} above security ceiling 6.5 \u{2014} clamping",
+            config.ai_firewall.entropy_threshold
+        );
+        config.ai_firewall.entropy_threshold = 6.5;
+    }
+
+    // Entropy min_length: clamp to 16..=128.
+    if config.ai_firewall.entropy_min_length < 16 {
+        tracing::warn!(
+            "project config entropy_min_length {} below security floor 16 \u{2014} clamping",
+            config.ai_firewall.entropy_min_length
+        );
+        config.ai_firewall.entropy_min_length = 16;
+    }
+    if config.ai_firewall.entropy_min_length > 128 {
+        tracing::warn!(
+            "project config entropy_min_length {} above security ceiling 128 \u{2014} clamping",
+            config.ai_firewall.entropy_min_length
+        );
+        config.ai_firewall.entropy_min_length = 128;
     }
 }
 
@@ -367,7 +426,8 @@ mod tests {
 
     #[test]
     fn enforce_security_floor_allows_mcp_policy_deny_when_global_is_allow() {
-        let global = SanctumConfig::default(); // default is Allow
+        let mut global = SanctumConfig::default();
+        global.ai_firewall.default_mcp_policy = McpDefaultPolicy::Allow;
         let mut config = SanctumConfig::default();
         config.ai_firewall.default_mcp_policy = McpDefaultPolicy::Deny;
         enforce_security_floor(&mut config, true, &global);
@@ -380,7 +440,8 @@ mod tests {
 
     #[test]
     fn enforce_security_floor_allows_mcp_policy_warn_when_global_is_allow() {
-        let global = SanctumConfig::default(); // default is Allow
+        let mut global = SanctumConfig::default();
+        global.ai_firewall.default_mcp_policy = McpDefaultPolicy::Allow;
         let mut config = SanctumConfig::default();
         config.ai_firewall.default_mcp_policy = McpDefaultPolicy::Warn;
         enforce_security_floor(&mut config, true, &global);
@@ -388,6 +449,112 @@ mod tests {
         assert_eq!(
             config.ai_firewall.default_mcp_policy,
             McpDefaultPolicy::Warn
+        );
+    }
+
+    #[test]
+    fn test_daemon_floor_blocks_warn_downgrade() {
+        let mut global = SanctumConfig::default();
+        global.ai_firewall.default_mcp_policy = McpDefaultPolicy::Deny;
+        let mut config = SanctumConfig::default();
+        config.ai_firewall.default_mcp_policy = McpDefaultPolicy::Warn;
+        enforce_security_floor(&mut config, true, &global);
+        // Warn maps to exit-code 0, so it must be upgraded to Deny.
+        assert_eq!(
+            config.ai_firewall.default_mcp_policy,
+            McpDefaultPolicy::Deny,
+            "Warn should be upgraded to Deny when global is Deny"
+        );
+    }
+
+    #[test]
+    fn test_local_cannot_clear_global_mcp_rules() {
+        use sanctum_types::config::McpPolicyRuleConfig;
+        let mut global = SanctumConfig::default();
+        global.ai_firewall.mcp_rules = vec![McpPolicyRuleConfig {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/secret/**".to_owned()],
+        }];
+        // Local config has no rules — tries to clear global.
+        let mut config = SanctumConfig::default();
+        config.ai_firewall.mcp_rules = Vec::new();
+        enforce_security_floor(&mut config, true, &global);
+        // Global rules must still be present.
+        assert_eq!(config.ai_firewall.mcp_rules.len(), 1);
+        assert_eq!(config.ai_firewall.mcp_rules[0].tool, "read_file");
+    }
+
+    #[test]
+    fn test_local_adds_rules_to_global() {
+        use sanctum_types::config::McpPolicyRuleConfig;
+        let mut global = SanctumConfig::default();
+        global.ai_firewall.mcp_rules = vec![McpPolicyRuleConfig {
+            tool: "read_file".to_owned(),
+            restricted_paths: vec!["/secret/**".to_owned()],
+        }];
+        let mut config = SanctumConfig::default();
+        config.ai_firewall.mcp_rules = vec![McpPolicyRuleConfig {
+            tool: "write_file".to_owned(),
+            restricted_paths: vec!["/tmp/**".to_owned()],
+        }];
+        enforce_security_floor(&mut config, true, &global);
+        // Local rule + global rule should both be present.
+        assert_eq!(config.ai_firewall.mcp_rules.len(), 2);
+        let tools: Vec<&str> = config.ai_firewall.mcp_rules.iter().map(|r| r.tool.as_str()).collect();
+        assert!(tools.contains(&"read_file"));
+        assert!(tools.contains(&"write_file"));
+    }
+
+    #[test]
+    fn test_pth_allowlist_subset_enforcement() {
+        use sanctum_types::config::PthAllowlistEntry;
+        let mut global = SanctumConfig::default();
+        global.sentinel.pth_allowlist = vec![PthAllowlistEntry {
+            package: "setuptools".to_owned(),
+            hash: "abc123".to_owned(),
+        }];
+        let mut config = SanctumConfig::default();
+        // Local config tries to add a new entry not in global.
+        config.sentinel.pth_allowlist = vec![PthAllowlistEntry {
+            package: "evil".to_owned(),
+            hash: "deadbeef".to_owned(),
+        }];
+        enforce_security_floor(&mut config, true, &global);
+        // Should be replaced with global allowlist.
+        assert_eq!(config.sentinel.pth_allowlist.len(), 1);
+        assert_eq!(config.sentinel.pth_allowlist[0].package, "setuptools");
+    }
+
+    #[test]
+    fn test_daemon_floor_clamps_entropy() {
+        let global = SanctumConfig::default();
+
+        // Test lower bound clamping
+        let mut config = SanctumConfig::default();
+        config.ai_firewall.entropy_threshold = 1.0;
+        config.ai_firewall.entropy_min_length = 4;
+        enforce_security_floor(&mut config, true, &global);
+        assert!(
+            config.ai_firewall.entropy_threshold >= 3.5,
+            "entropy_threshold below 3.5 should be clamped"
+        );
+        assert!(
+            config.ai_firewall.entropy_min_length >= 16,
+            "entropy_min_length below 16 should be clamped"
+        );
+
+        // Test upper bound clamping
+        let mut config = SanctumConfig::default();
+        config.ai_firewall.entropy_threshold = 99.0;
+        config.ai_firewall.entropy_min_length = 10000;
+        enforce_security_floor(&mut config, true, &global);
+        assert!(
+            config.ai_firewall.entropy_threshold <= 6.5,
+            "entropy_threshold above 6.5 should be clamped"
+        );
+        assert!(
+            config.ai_firewall.entropy_min_length <= 128,
+            "entropy_min_length above 128 should be clamped"
         );
     }
 

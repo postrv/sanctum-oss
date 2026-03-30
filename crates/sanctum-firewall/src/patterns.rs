@@ -79,7 +79,7 @@ static_regex!(
 static_regex!(PRIVATE_KEY_RE, r"-----BEGIN[A-Z ]*PRIVATE KEY-----");
 static_regex!(
     CONNECTION_STRING_RE,
-    r"\b(postgresql|postgres|mongodb|redis|mysql|mariadb|mssql|sqlserver|amqp|amqps)://[^\s@]+@[^\s]+\b"
+    r"\b(postgresql|postgres|mongodb|redis|mysql|mariadb|mssql|sqlserver|amqp|amqps|sqlite|clickhouse|cockroachdb|nats)://[^\s@]+@[^\s]+\b"
 );
 static_regex!(
     SLACK_USER_RE,
@@ -890,6 +890,30 @@ mod tests {
     #[test]
     fn connection_string_matches_amqps() {
         let conn = "amqps://user:pass@broker.example.com:5671/vhost";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    #[test]
+    fn connection_string_matches_sqlite() {
+        let conn = "sqlite://user:pass@localhost/mydb.sqlite";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    #[test]
+    fn connection_string_matches_clickhouse() {
+        let conn = "clickhouse://default:pw@ch.example.com:8123/analytics";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    #[test]
+    fn connection_string_matches_cockroachdb() {
+        let conn = "cockroachdb://root:pw@crdb.example.com:26257/defaultdb";
+        assert!(CONNECTION_STRING_RE.is_match(conn));
+    }
+
+    #[test]
+    fn connection_string_matches_nats() {
+        let conn = "nats://admin:pw@nats.example.com:4222";
         assert!(CONNECTION_STRING_RE.is_match(conn));
     }
 

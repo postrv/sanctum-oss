@@ -1,7 +1,8 @@
 //! `sanctum entropy` -- Manage the allowlist for high-entropy strings flagged as possible secrets.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 use sanctum_types::errors::CliError;
 use sanctum_types::paths::WellKnownPaths;
@@ -31,8 +32,14 @@ fn default_allowlist_path() -> PathBuf {
     paths.data_dir.join(ALLOWLIST_FILE)
 }
 
+/// Compute the SHA-256 hash of a value as lowercase hex.
+fn hash_secret(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+
 /// Read all entries from the allowlist file.
 ///
+/// Skips empty lines and lines starting with `#` (comments).
 /// Returns an empty list if the file does not exist.
 fn read_allowlist(path: &Path) -> Result<Vec<String>, CliError> {
     if !path.exists() {
@@ -41,29 +48,80 @@ fn read_allowlist(path: &Path) -> Result<Vec<String>, CliError> {
     let content = std::fs::read_to_string(path)?;
     Ok(content
         .lines()
-        .filter(|l| !l.is_empty())
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(String::from)
         .collect())
 }
 
-/// Write the full allowlist back to disk, creating parent directories as needed.
+/// Write the full allowlist back to disk using atomic temp+rename.
+///
+/// Creates parent directories as needed. On Unix, the file is created with
+/// 0o600 permissions to prevent unauthorized access.
 fn write_allowlist(entries: &[String], path: &Path) -> Result<(), CliError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let parent = path.parent().ok_or_else(|| {
+        CliError::InvalidArgs("allowlist path has no parent directory".to_string())
+    })?;
+    std::fs::create_dir_all(parent)?;
+
+    let mut content = String::new();
+    content.push_str("# Sanctum entropy allowlist (SHA-256 hashes)\n");
+    for entry in entries {
+        content.push_str(entry);
+        content.push('\n');
     }
-    let content = entries.join("\n");
-    let mut file = std::fs::File::create(path)?;
-    file.write_all(content.as_bytes())?;
-    if !content.is_empty() {
-        file.write_all(b"\n")?;
+
+    // Generate temp file path in the same directory
+    let temp_name = format!(
+        ".{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("allowlist")
+    );
+    let temp_path = parent.join(&temp_name);
+
+    // Write to temp file with secure permissions
+    write_with_permissions(&temp_path, content.as_bytes())?;
+
+    // Atomic rename
+    std::fs::rename(&temp_path, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_path);
+    })?;
+
+    Ok(())
+}
+
+/// Write data to a file with 0o600 permissions on Unix.
+fn write_with_permissions(path: &Path, data: &[u8]) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(data)?;
+        file.sync_all()?;
     }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, data)?;
+    }
+
     Ok(())
 }
 
 /// Add a value to the entropy allowlist.
 ///
-/// If `value` is `Some`, uses it directly (with a warning about shell history).
-/// If `None`, reads a single line from stdin.
+/// The value is hashed with SHA-256 before storage so that the allowlist file
+/// does not contain plaintext secrets. If `value` is `Some`, uses it directly
+/// (with a warning about shell history). If `None`, reads a single line from
+/// stdin.
 fn run_allow(value: Option<&str>, path: &Path) -> Result<(), CliError> {
     let secret = if let Some(v) = value {
         #[allow(clippy::print_stderr)]
@@ -86,9 +144,10 @@ fn run_allow(value: Option<&str>, path: &Path) -> Result<(), CliError> {
         trimmed
     };
 
+    let hex_hash = hash_secret(&secret);
     let mut entries = read_allowlist(path)?;
 
-    if entries.iter().any(|e| e == &secret) {
+    if entries.iter().any(|e| e == &hex_hash) {
         #[allow(clippy::print_stdout)]
         {
             println!("Value is already in the entropy allowlist.");
@@ -96,7 +155,7 @@ fn run_allow(value: Option<&str>, path: &Path) -> Result<(), CliError> {
         return Ok(());
     }
 
-    entries.push(secret);
+    entries.push(hex_hash);
     write_allowlist(&entries, path)?;
 
     #[allow(clippy::print_stdout)]
@@ -187,15 +246,23 @@ mod tests {
     }
 
     #[test]
-    fn run_allow_with_positional_arg() {
+    fn run_allow_stores_sha256_hash() {
         let (_dir, path) = test_allowlist_path();
 
-        let result = run_allow(Some("test-secret-value"), &path);
+        let result = run_allow(Some("test-value"), &path);
         assert!(result.is_ok(), "run_allow with arg should succeed");
 
-        // Verify it was written
+        // Verify the stored entry is a SHA-256 hash, not the raw value
         let entries = read_allowlist(&path).expect("read allowlist");
-        assert!(entries.contains(&"test-secret-value".to_string()));
+        let expected_hash = hash_secret("test-value");
+        assert!(
+            entries.contains(&expected_hash),
+            "stored entry should be the SHA-256 hash"
+        );
+        assert!(
+            !entries.iter().any(|e| e == "test-value"),
+            "raw value must not be stored"
+        );
     }
 
     #[test]
@@ -209,7 +276,8 @@ mod tests {
         assert!(result.is_ok());
 
         let entries = read_allowlist(&path).expect("read allowlist");
-        assert!(entries.contains(&"stdin-simulated-value".to_string()));
+        let expected_hash = hash_secret("stdin-simulated-value");
+        assert!(entries.contains(&expected_hash));
     }
 
     #[test]
@@ -220,7 +288,8 @@ mod tests {
         run_allow(Some("dup-value"), &path).expect("duplicate add should succeed");
 
         let entries = read_allowlist(&path).expect("read allowlist");
-        let count = entries.iter().filter(|e| *e == "dup-value").count();
+        let expected_hash = hash_secret("dup-value");
+        let count = entries.iter().filter(|e| *e == &expected_hash).count();
         assert_eq!(count, 1, "duplicate should not be added twice");
     }
 
@@ -247,9 +316,59 @@ mod tests {
     fn allowlist_round_trip() {
         let (_dir, path) = test_allowlist_path();
 
-        let entries = vec!["abc123".to_string(), "def456".to_string()];
+        let h1 = hash_secret("val-a");
+        let h2 = hash_secret("val-b");
+        let entries = vec![h1, h2];
         write_allowlist(&entries, &path).expect("write");
         let read_back = read_allowlist(&path).expect("read");
         assert_eq!(entries, read_back);
+    }
+
+    #[test]
+    fn hash_secret_is_64_char_lowercase_hex() {
+        let h = hash_secret("test");
+        assert_eq!(h.len(), 64, "SHA-256 hex hash should be 64 chars");
+        assert!(
+            h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "hash should be lowercase hex"
+        );
+    }
+
+    #[test]
+    fn hash_secret_is_deterministic() {
+        let h1 = hash_secret("same-value");
+        let h2 = hash_secret("same-value");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn read_allowlist_skips_comments_and_empty_lines() {
+        let (_dir, path) = test_allowlist_path();
+
+        let h = hash_secret("val");
+        let content = format!("# comment\n\n{h}\n\n# another\n");
+        std::fs::write(&path, &content).expect("write");
+
+        let entries = read_allowlist(&path).expect("read");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], h);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_allowlist_creates_file_with_600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, path) = test_allowlist_path();
+
+        let entries = vec![hash_secret("val")];
+        write_allowlist(&entries, &path).expect("write");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "allowlist file must have 0o600 permissions");
     }
 }

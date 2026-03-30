@@ -273,6 +273,9 @@ pub fn normalize_mcp_path(path: &str) -> String {
     // Step 1: Expand ~ and $HOME
     let expanded = expand_home_mcp(path);
 
+    // Step 1.5: Normalise backslashes to forward slashes (Windows-style paths).
+    let expanded = expanded.replace('\\', "/");
+
     // Step 2: Collapse . and .. segments
     let mut components: Vec<&str> = Vec::new();
     for component in expanded.split('/') {
@@ -1456,4 +1459,14 @@ mod expanded_policy_tests {
         assert_eq!(result, "/some/path/~file");
     }
 
+    #[test]
+    fn test_normalize_mcp_path_backslash() {
+        // Windows-style backslashes should be normalised to forward slashes.
+        let result = normalize_mcp_path("\\.ssh\\id_rsa");
+        assert!(
+            !result.contains('\\'),
+            "backslashes should be converted to forward slashes, got: {result}"
+        );
+        assert_eq!(result, "/.ssh/id_rsa");
+    }
 }

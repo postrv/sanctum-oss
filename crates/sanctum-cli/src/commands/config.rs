@@ -173,20 +173,29 @@ default_session = "$50"
 default_daily = "$200"
 alert_at_percent = 75
 
-[budgets.providers.openai]
-session = "$30"
-daily = "$100"
-allowed_models = ["gpt-4o", "gpt-4o-mini", "o3-mini"]
-
+# Anthropic: claude-opus-4-6 ($15/$75), claude-sonnet-4-6 ($3/$15), claude-haiku-4-5 ($1/$5)
 [budgets.providers.anthropic]
 session = "$30"
 daily = "$100"
-allowed_models = ["claude-sonnet-4-6", "claude-haiku-4-5"]
+allowed_models = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]
 
+# OpenAI: gpt-5.4 ($2.50/$10), gpt-5.4-mini ($0.40/$1.60), gpt-5.4-nano ($0.10/$0.40)
+[budgets.providers.openai]
+session = "$30"
+daily = "$100"
+allowed_models = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]
+
+# Google: gemini-3.1-pro ($1.25/$5), gemini-3-flash ($0.15/$0.60), gemini-2.5-flash ($0.15/$0.60)
 [budgets.providers.google]
 session = "$20"
 daily = "$80"
-allowed_models = ["gemini-2.5-pro", "gemini-2.5-flash"]
+allowed_models = ["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-flash"]
+
+# xAI: grok-4.20-0309-reasoning ($3/$15), grok-4-1-fast-reasoning ($1/$5)
+[budgets.providers.xai]
+session = "$20"
+daily = "$80"
+allowed_models = ["grok-4.20-0309-reasoning", "grok-4-1-fast-reasoning"]
 "#
 }
 

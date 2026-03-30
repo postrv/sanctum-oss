@@ -1,5 +1,7 @@
 //! `sanctum run` — Run a command with Sanctum protections.
 
+use std::process::Stdio;
+
 use sanctum_types::errors::CliError;
 
 /// Wait for the daemon socket to appear, polling up to 2 seconds.
@@ -35,6 +37,9 @@ pub fn run(sandbox: bool, command: &[String]) -> Result<(), CliError> {
         }
         if let Err(e) = std::process::Command::new("sanctum-daemon")
             .arg("start")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
         {
             #[allow(clippy::print_stderr)]

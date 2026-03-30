@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sanctum CLI client — init, status, review, scan, budget commands"
+description = "The developer security daemon for the AI coding era"
 
 [[bin]]
 name = "sanctum"

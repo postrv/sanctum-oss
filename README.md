@@ -28,11 +28,17 @@ When a `.pth` file appears, Sanctum traces the process lineage to determine *who
 
 ```
 $ sanctum review
-Quarantined items:
-  1. evil-package.pth  [CRITICAL]
-     exec(open('/tmp/.payload').read())
-     Quarantined: 2026-03-28 14:23:01
-     Creator: python3 (PID 48291) via zsh -> Terminal
+Quarantined items (1 total):
+------------------------------------------------------------------------
+  ID:           a1b2c3d4
+  Original:     /usr/lib/python3/site-packages/evil-package.pth
+  Reason:       CRITICAL: exec(open('/tmp/.payload').read())
+  Quarantined:  2026-03-28 14:23:01
+------------------------------------------------------------------------
+
+Actions:
+  sanctum review --approve <ID>  — restore file to original location
+  sanctum review --delete <ID>   — permanently remove quarantined file
 ```
 
 ### Credential leaks to AI tools
@@ -52,9 +58,9 @@ Tracks per-provider, per-session, and daily spend across OpenAI, Anthropic, and 
 
 ```
 $ sanctum budget
-Session: $12.40 / $50.00 (24%)
-  openai:    $8.20 / $30.00
-  anthropic: $4.20 / $20.00
+Provider      Session Spend    Session Limit    Daily Spend    Daily Limit
+openai        $8.20            $30.00           $12.40         $100.00
+anthropic     $4.20            $20.00           $4.20          $100.00
 ```
 
 ### Credential file access
@@ -113,7 +119,7 @@ sanctum hooks remove claude  # Remove Claude Code hooks
 
 sanctum daemon start|stop|restart
 
-sanctum proxy start|stop|status
+sanctum proxy start|status        # stop: terminate the proxy process manually
 ```
 
 ## Configuration
@@ -239,7 +245,7 @@ Sanctum is a security tool. It holds itself to a higher standard than the code i
 - No `print!()` / `println!()` / `eprint!()` -- all output goes through structured channels
 
 **Testing**:
-- 1,426 tests (unit, integration, end-to-end)
+- 1,700+ tests (unit, integration, end-to-end)
 - 8 Kani bounded model checking proofs (panic-freedom, state machine correctness, overflow safety)
 - 2 fuzz targets on security-critical parsers (CI runs 30s per target on PRs, 2.5h nightly)
 - 9 property-based tests verifying core invariants across random inputs

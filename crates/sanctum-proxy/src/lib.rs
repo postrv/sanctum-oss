@@ -30,6 +30,7 @@ pub mod handler;
 pub mod provider;
 pub mod routing;
 pub mod server;
+pub(crate) mod sse;
 pub mod usage;
 
 pub use ca::CaIdentity;

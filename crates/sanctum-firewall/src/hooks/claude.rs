@@ -86,9 +86,11 @@ impl std::fmt::Display for Registry {
 /// - `npm install foo bar` -> `[("foo", Npm), ("bar", Npm)]`
 /// - `pip install requests flask` -> `[("requests", PyPI), ("flask", PyPI)]`
 /// - `npm install --save-dev foo -g bar` -> `[("foo", Npm), ("bar", Npm)]`
+/// - `npx prettier .` -> `[("prettier", Npm)]`
+/// - `npx --package=cowsay -- cowsay hello` -> `[("cowsay", Npm)]`
 ///
 /// Returns an empty vec if no packages are found (e.g., bare `npm install`
-/// from lockfile).
+/// from lockfile, or `npm ci` which installs from lockfile).
 fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
     let normalised = command.replace('\t', " ");
     let trimmed = normalised.trim();
@@ -97,6 +99,7 @@ fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
     let npm_prefixes: &[&str] = &[
         "npm install ",
         "npm i ",
+        "npm ci ",
         "pnpm install ",
         "pnpm add ",
         "pnpm i ",
@@ -107,8 +110,22 @@ fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
     ];
     for prefix in npm_prefixes {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
+            // npm ci takes no package arguments — it installs from lockfile
+            if *prefix == "npm ci " {
+                return Vec::new();
+            }
             return parse_package_args(rest, &Registry::Npm);
         }
+    }
+
+    // Bare commands without trailing args (e.g., `npm ci`, `npm install`)
+    if trimmed == "npm ci" {
+        return Vec::new();
+    }
+
+    // npx: extract the package being executed
+    if let Some(rest) = trimmed.strip_prefix("npx ") {
+        return extract_npx_package(rest);
     }
 
     // pip/pip3 install patterns
@@ -116,6 +133,66 @@ fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
     for prefix in pip_prefixes {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             return parse_package_args(rest, &Registry::PyPI);
+        }
+    }
+
+    Vec::new()
+}
+
+/// Extract the package name from an `npx` command's arguments.
+///
+/// `npx` can be invoked as:
+/// - `npx <package> [args...]` — runs the package, first positional arg is the package
+/// - `npx -y <package> [args...]` — auto-confirm install
+/// - `npx --package=<pkg> -- <cmd>` — explicit package specification
+/// - `npx --package <pkg> -- <cmd>` — explicit package with space separator
+///
+/// Only the package name is extracted (not the command's own arguments).
+fn extract_npx_package(args: &str) -> Vec<(String, Registry)> {
+    let mut tokens = args.split_whitespace().peekable();
+    let mut skip_next = false;
+
+    while let Some(token) = tokens.next() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        // Stop at `--` separator — package must come before it or via --package
+        if token == "--" {
+            break;
+        }
+
+        // Handle --package=<pkg>
+        if let Some(pkg) = token.strip_prefix("--package=") {
+            let name = extract_pkg_name_from_token(pkg);
+            if !name.is_empty() {
+                return vec![(name.to_owned(), Registry::Npm)];
+            }
+            continue;
+        }
+
+        // Handle --package <pkg> (space-separated)
+        if token == "--package" || token == "-p" {
+            if let Some(&next) = tokens.peek() {
+                let name = extract_pkg_name_from_token(next);
+                if !name.is_empty() {
+                    return vec![(name.to_owned(), Registry::Npm)];
+                }
+            }
+            skip_next = true;
+            continue;
+        }
+
+        // Skip known npx flags
+        if token.starts_with('-') {
+            continue;
+        }
+
+        // First positional argument is the package
+        let name = extract_pkg_name_from_token(token);
+        if !name.is_empty() {
+            return vec![(name.to_owned(), Registry::Npm)];
         }
     }
 
@@ -1195,9 +1272,12 @@ fn is_env_dump(command: &str) -> bool {
 ///
 /// Each pattern is matched with a trailing space OR at end-of-string,
 /// so bare `npm i` (install from lockfile) is detected too.
+/// Includes `npm ci` (clean-install from lockfile) and `npx` (execute package).
 const NPM_INSTALL_PATTERNS: &[&str] = &[
     "npm install ",
     "npm i ",
+    "npm ci ",
+    "npx ",
     "pnpm install ",
     "pnpm add ",
     "pnpm i ",
@@ -6152,13 +6232,123 @@ mod expanded_claude_tests {
         }
     }
 
+    // ---- npx extraction tests ----
+
     #[test]
-    fn extract_all_packages_does_not_handle_npx() {
-        let packages = extract_all_packages("npx some-package-name");
-        assert!(
-            packages.is_empty(),
-            "extract_all_packages does not yet handle npx"
+    fn extract_all_packages_handles_npx_simple() {
+        let pkgs = extract_all_packages("npx some-package-name");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "some-package-name");
+        assert_eq!(pkgs[0].1, Registry::Npm);
+    }
+
+    #[test]
+    fn extract_all_packages_handles_npx_with_yes_flag() {
+        let pkgs = extract_all_packages("npx -y prettier");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "prettier");
+    }
+
+    #[test]
+    fn extract_all_packages_handles_npx_with_long_yes_flag() {
+        let pkgs = extract_all_packages("npx --yes prettier@latest");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "prettier");
+    }
+
+    #[test]
+    fn extract_all_packages_handles_npx_scoped_package() {
+        let pkgs = extract_all_packages("npx @angular/cli new my-app");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "@angular/cli");
+    }
+
+    #[test]
+    fn extract_all_packages_handles_npx_with_package_flag() {
+        // npx --package=cowsay -- cowsay hello
+        let pkgs = extract_all_packages("npx --package=cowsay -- cowsay hello");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "cowsay");
+    }
+
+    #[test]
+    fn extract_all_packages_handles_npx_with_package_flag_space() {
+        // npx --package cowsay -- cowsay hello
+        let pkgs = extract_all_packages("npx --package cowsay -- cowsay hello");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "cowsay");
+    }
+
+    #[test]
+    fn extract_all_packages_npx_ignores_args_after_package() {
+        // Only the package is extracted, not its arguments
+        let pkgs = extract_all_packages("npx create-react-app my-app --template typescript");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "create-react-app");
+    }
+
+    #[test]
+    fn extract_all_packages_npx_bare_returns_empty() {
+        let pkgs = extract_all_packages("npx");
+        assert_eq!(pkgs.len(), 0, "bare npx without package returns empty");
+    }
+
+    #[test]
+    fn extract_all_packages_npx_only_flags_returns_empty() {
+        let pkgs = extract_all_packages("npx -y");
+        assert_eq!(
+            pkgs.len(),
+            0,
+            "npx with only flags and no package returns empty"
         );
+    }
+
+    #[test]
+    fn extract_all_packages_npx_version_stripped() {
+        let pkgs = extract_all_packages("npx eslint@8.0.0 .");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "eslint");
+    }
+
+    // ---- npm ci tests ----
+
+    #[test]
+    fn extract_all_packages_npm_ci_returns_empty() {
+        // npm ci installs from lockfile — no package arguments
+        let pkgs = extract_all_packages("npm ci");
+        assert_eq!(pkgs.len(), 0, "npm ci has no package args");
+    }
+
+    #[test]
+    fn is_npm_install_command_recognises_npm_ci() {
+        assert!(is_npm_install_command("npm ci"));
+        assert!(is_npm_install_command("npm ci --ignore-scripts"));
+    }
+
+    #[test]
+    fn is_npm_install_command_recognises_npx() {
+        assert!(is_npm_install_command("npx some-package"));
+        assert!(is_npm_install_command("npx -y prettier"));
+    }
+
+    #[test]
+    fn extract_all_packages_npx_short_p_flag() {
+        let pkgs = extract_all_packages("npx -p cowsay -- cowsay hello");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "cowsay");
+    }
+
+    #[test]
+    fn extract_all_packages_npx_package_flag_no_value() {
+        // --package as last token with no following value
+        let pkgs = extract_all_packages("npx --package");
+        assert_eq!(pkgs.len(), 0, "incomplete --package flag returns empty");
+    }
+
+    #[test]
+    fn extract_all_packages_npx_short_p_flag_no_value() {
+        let pkgs = extract_all_packages("npx -p");
+        assert_eq!(pkgs.len(), 0, "incomplete -p flag returns empty");
     }
 
     // ---- Case-insensitive credential path matching (Fix 4) ----

@@ -206,16 +206,8 @@ pub async fn handle_request(
     // H3: Redact credentials from request body.
     let request_body = redact_body_bytes(&request.body);
 
-    // Detect SSE streaming requests and warn about budget tracking limitations.
-    if request_body_has_stream_flag(&request.body) {
-        tracing::warn!(
-            provider = %request.provider.display_name(),
-            path = %request.path,
-            "streaming response requested (\"stream\": true); budget usage tracking \
-             will not work for this request because SSE streams do not contain a \
-             single JSON usage object"
-        );
-    }
+    // Detect SSE streaming requests for later response handling.
+    let is_streaming_request = request_body_has_stream_flag(&request.body);
 
     // Build and send the upstream request.
     // On error, cost_guard drops and decrements automatically.
@@ -252,20 +244,32 @@ pub async fn handle_request(
 
     // Record usage from response.
     //
-    // KNOWN LIMITATION: SSE streaming responses (`"stream": true` in request).
-    // When streaming is enabled, the upstream returns an SSE event stream
-    // rather than a single JSON object. The usage data (token counts) is
-    // typically only included in the final `[DONE]` event or as a separate
-    // `usage` field in the last data chunk. This extraction logic expects a
-    // complete JSON response body and will fail to capture usage from SSE
-    // streams. As a result, budget tracking is not applied to streaming
-    // responses. This is tracked for future implementation.
+    // For SSE streaming responses, parse the event stream to extract usage
+    // from provider-specific events (OpenAI final chunk, Anthropic
+    // message_start + message_delta, Google last usageMetadata chunk).
+    // For standard JSON responses, parse the single response object.
     if let Ok(body_str) = std::str::from_utf8(&response_body) {
         let mut tracker = state
             .budget_tracker
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::usage::record_if_available(&mut tracker, body_str);
+
+        let is_sse_response = response_headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("content-type") && value.contains("text/event-stream")
+        });
+
+        if is_sse_response || is_streaming_request {
+            // Try SSE extraction first; fall back to JSON if SSE yields nothing
+            if crate::usage::record_sse_if_available(&mut tracker, body_str).is_none() {
+                tracing::debug!(
+                    "SSE usage extraction found no usage data; \
+                     trying standard JSON extraction as fallback"
+                );
+                crate::usage::record_if_available(&mut tracker, body_str);
+            }
+        } else {
+            crate::usage::record_if_available(&mut tracker, body_str);
+        }
     }
 
     // H3: Redact credentials from response body.
@@ -1174,5 +1178,41 @@ mod tests {
             !request_body_has_stream_flag(b"not json at all"),
             "non-JSON body should return false"
         );
+    }
+
+    // ---------- SSE content-type detection tests ----------
+
+    /// Helper that mirrors the SSE detection logic in `handle_request`.
+    fn is_sse_content_type(headers: &[(String, String)]) -> bool {
+        headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("content-type") && value.contains("text/event-stream")
+        })
+    }
+
+    #[test]
+    fn test_sse_content_type_detected() {
+        let headers = vec![("Content-Type".to_string(), "text/event-stream".to_string())];
+        assert!(is_sse_content_type(&headers));
+    }
+
+    #[test]
+    fn test_sse_content_type_with_charset() {
+        let headers = vec![(
+            "content-type".to_string(),
+            "text/event-stream; charset=utf-8".to_string(),
+        )];
+        assert!(is_sse_content_type(&headers));
+    }
+
+    #[test]
+    fn test_json_content_type_not_sse() {
+        let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+        assert!(!is_sse_content_type(&headers));
+    }
+
+    #[test]
+    fn test_empty_headers_not_sse() {
+        let headers: Vec<(String, String)> = vec![];
+        assert!(!is_sse_content_type(&headers));
     }
 }

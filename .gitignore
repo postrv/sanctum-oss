@@ -36,6 +36,3 @@ forge.toml
 
 # Proptest regressions
 *.proptest-regressions
-
-# Internal planning documents
-SANCTUM_V020_PLAN.md

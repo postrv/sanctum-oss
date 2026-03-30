@@ -1521,6 +1521,10 @@ mod kani_proofs {
             kani::cover!(result.is_ok(), "acceptance path reachable");
             kani::cover!(id.is_empty(), "empty string path reachable");
             kani::cover!(id.contains('/'), "slash path reachable");
+
+            // Prevent CBMC from verifying SentinelError's recursive drop impl
+            // (std::io::Error -> Box<dyn Error> -> deallocate spiral).
+            std::mem::forget(result);
         }
     }
 }

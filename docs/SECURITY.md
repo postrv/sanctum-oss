@@ -12,7 +12,7 @@
 
 Instead, please report vulnerabilities via one of:
 
-1. **GitHub Private Advisory**: [Create a private advisory](https://github.com/postrv/sanctum/security/advisories/new) on this repository.
+1. **GitHub Private Advisory**: [Create a private advisory](https://github.com/postrv/sanctum-oss/security/advisories/new) on this repository.
 
 ### What to include
 
@@ -48,7 +48,7 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 
 - **Zero `unsafe` code** in the entire codebase
 - **No `unwrap`/`expect`/`panic`** outside test code (enforced by workspace-level clippy lints)
-- **Zero clippy warnings** across ~1,700 tests
+- **Zero clippy warnings** across ~1,800 tests
 - **Rust toolchain pinned** to 1.94.0 via `rust-toolchain.toml` for reproducible builds
 
 ### Dependency management
@@ -74,7 +74,7 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 
 ### Testing
 
-- **~1,700 tests** covering all eight workspace crates
+- **~1,800 tests** covering all eight workspace crates (unit, integration, E2E, loom concurrency)
 - **Fuzz testing targets** for security-critical parsers (PTH file analyser, config parser) in `fuzz/fuzz_targets/`
 - **9 property-based tests** using proptest (6 sentinel + 3 budget) that verify invariants such as analyser totality, determinism, quarantine roundtrip identity, pricing overflow safety, and spend monotonicity
 - **8 Kani bounded model checking proofs** for core algorithms (analyser panic-freedom, path classification, exec detection, quarantine state machine, ID traversal rejection, ceiling cost overflow, Shannon entropy panic-freedom, glob exact-match correctness) — integrated as `#[cfg(kani)]` modules with CI enforcement
@@ -89,7 +89,7 @@ Release binaries are signed with [Sigstore](https://sigstore.dev) using keyless 
 cosign verify-blob \
   --signature sanctum-x86_64-unknown-linux-gnu.sig \
   --certificate sanctum-x86_64-unknown-linux-gnu.cert \
-  --certificate-identity-regexp "^https://github\\.com/postrv/sanctum/" \
+  --certificate-identity-regexp "^https://github\\.com/postrv/sanctum-oss/" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   sanctum-x86_64-unknown-linux-gnu
 ```
@@ -100,7 +100,7 @@ cosign verify-blob \
 cosign verify-blob \
   --signature SHA256SUMS.sig \
   --certificate SHA256SUMS.cert \
-  --certificate-identity-regexp "^https://github\\.com/postrv/sanctum/" \
+  --certificate-identity-regexp "^https://github\\.com/postrv/sanctum-oss/" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   SHA256SUMS
 sha256sum -c SHA256SUMS

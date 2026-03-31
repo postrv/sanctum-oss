@@ -119,6 +119,9 @@ Note: `sanctum-firewall` makes outbound HTTPS HEAD requests to `registry.npmjs.o
 | `proptest` | 1.x | Property-based testing | sanctum-types, sanctum-sentinel, sanctum-firewall, sanctum-budget |
 | `assert_cmd` | 2.x | CLI integration testing | sanctum-cli |
 | `predicates` | 3.x | Assertion predicates for CLI output | sanctum-cli |
+| `loom` | 0.7.x | Deterministic concurrency testing for verifying atomic patterns (`PendingCostGuard`) and mutex access patterns under all thread interleavings | sanctum-proxy, sanctum-budget |
+| `generator` | 0.8.x | Transitive via loom — stackful coroutines for deterministic scheduler. MIT/Apache-2.0. Contains unsafe code + `cc`/`libc`. Dev-only. | (transitive via loom) |
+| `scoped-tls` | 1.0.x | Transitive via loom — thread-local storage abstraction. MIT/Apache-2.0. No unsafe code. | (transitive via loom) |
 
 ## CI-only tools (not shipped in binaries)
 

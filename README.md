@@ -5,7 +5,7 @@
 Your AI coding assistant can read your SSH keys, leak your AWS credentials, and run up a $10,000 API bill before you notice. Sanctum watches for all of it -- silently, in the background, without slowing you down.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/postrv/sanctum/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/postrv/sanctum-oss/main/scripts/install.sh | sh
 sanctum init
 # That's it. The daemon starts with your shell.
 ```
@@ -162,8 +162,8 @@ Full configuration reference: see `sanctum config --recommended` for annotated d
 ### From source (recommended for security-conscious users)
 
 ```bash
-git clone https://github.com/postrv/sanctum
-cd sanctum
+git clone https://github.com/postrv/sanctum-oss
+cd sanctum-oss
 cargo build --release
 # Binaries: target/release/sanctum, target/release/sanctum-daemon
 ```
@@ -173,7 +173,7 @@ Requires Rust 1.94.0+ (pinned in `rust-toolchain.toml`).
 ### Script installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/postrv/sanctum/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/postrv/sanctum-oss/main/scripts/install.sh | sh
 ```
 
 The installer verifies SHA-256 checksums (mandatory) and Sigstore signatures (if `cosign` is installed). See [SECURITY.md](docs/SECURITY.md) for the verification model.
@@ -222,7 +222,7 @@ Sanctum does **not** require nono. Each tool provides independent value.
 
 ## Architecture
 
-8 crates, ~44,000 lines of Rust:
+8 crates, ~46,000 lines of Rust:
 
 | Crate | Purpose |
 |-------|---------|
@@ -245,14 +245,14 @@ Sanctum is a security tool. It holds itself to a higher standard than the code i
 - No `print!()` / `println!()` / `eprint!()` -- all output goes through structured channels
 
 **Testing**:
-- 1,700+ tests (unit, integration, end-to-end)
+- 1,800+ tests (unit, integration, end-to-end, loom concurrency)
 - 8 Kani bounded model checking proofs (panic-freedom, state machine correctness, overflow safety)
 - 2 fuzz targets on security-critical parsers (CI runs 30s per target on PRs, 2.5h nightly)
 - 9 property-based tests verifying core invariants across random inputs
 - 0 clippy warnings (pedantic + nursery lints enabled)
 
 **Supply chain**:
-- All 253 dependencies audited and version-pinned
+- All dependencies audited and version-pinned (321 crates in Cargo.lock)
 - `cargo-deny` enforces license policy and advisory database checks in CI
 - Sigstore-signed release binaries with SBOM and Rekor transparency log
 - Reproducible builds verified in CI (build twice, compare SHA-256)

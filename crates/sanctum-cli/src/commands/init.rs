@@ -129,7 +129,7 @@ fn create_config(
 
     let mut default_config = String::from(
         r#"# Sanctum configuration
-# https://github.com/postrv/sanctum/blob/main/docs/ARCHITECTURE.md
+# https://github.com/postrv/sanctum-oss/blob/main/docs/ARCHITECTURE.md
 
 config_version = 1
 

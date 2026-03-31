@@ -1,6 +1,6 @@
 #!/bin/sh
 # Sanctum installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/postrv/sanctum/main/scripts/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/postrv/sanctum-oss/main/scripts/install.sh | sh
 #
 # This script downloads the latest Sanctum binary for your platform,
 # verifies its Sigstore signature, and installs it to /usr/local/bin.
@@ -27,7 +27,7 @@
 
 set -e
 
-REPO="postrv/sanctum"
+REPO="postrv/sanctum-oss"
 INSTALL_DIR="${SANCTUM_INSTALL_DIR:-/usr/local/bin}"
 
 main() {
@@ -127,7 +127,7 @@ main() {
             if cosign verify-blob \
                 --signature "${_tmpdir}/sanctum.sig" \
                 --certificate "${_tmpdir}/sanctum.cert" \
-                --certificate-identity-regexp "^https://github\\.com/postrv/sanctum/" \
+                --certificate-identity-regexp "^https://github\\.com/postrv/sanctum-oss/" \
                 --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
                 "${_tmpdir}/sanctum"; then
                 echo "Signature verified for sanctum."
@@ -143,7 +143,7 @@ main() {
             if cosign verify-blob \
                 --signature "${_tmpdir}/sanctum-daemon.sig" \
                 --certificate "${_tmpdir}/sanctum-daemon.cert" \
-                --certificate-identity-regexp "^https://github\\.com/postrv/sanctum/" \
+                --certificate-identity-regexp "^https://github\\.com/postrv/sanctum-oss/" \
                 --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
                 "${_tmpdir}/sanctum-daemon"; then
                 echo "Signature verified for sanctum-daemon."

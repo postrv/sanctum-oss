@@ -12,8 +12,8 @@ Get from zero to a fully protected AI coding session in under 5 minutes.
 ### From source
 
 ```bash
-git clone https://github.com/postrv/sanctum
-cd sanctum
+git clone https://github.com/postrv/sanctum-oss
+cd sanctum-oss
 cargo build --release
 # Copy both binaries to your PATH:
 sudo cp target/release/sanctum target/release/sanctum-daemon /usr/local/bin/
@@ -22,7 +22,7 @@ sudo cp target/release/sanctum target/release/sanctum-daemon /usr/local/bin/
 ### Via install script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/postrv/sanctum/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/postrv/sanctum-oss/main/scripts/install.sh | sh
 ```
 
 The installer verifies SHA-256 checksums and, if [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is available, Sigstore signatures. See [SECURITY.md](SECURITY.md) for details.

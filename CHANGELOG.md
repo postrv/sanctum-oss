@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-03-31
+
+### Added
+- **End-to-end IPC integration tests**: 5 tests exercising full daemon→IPC→response path (startup/status, budget recording, malformed input resilience, auth rejection, graceful shutdown). Platform-aware test harness works on both macOS and Linux CI. Stale test directory cleanup prevents orphaned daemon processes.
+- **Loom concurrency tests**: 3 tests for `PendingCostGuard` atomic pattern (counter-returns-to-zero, defuse-retains-value, multiple-guards-per-thread), 3 tests for `Mutex<HashMap>` spend accumulation pattern, all gated behind `#[cfg(loom)]`
+- **Loom CI job**: New `loom` job in CI runs concurrency tests on every push/PR
+- **Dependency audit entries**: `loom`, `generator`, `scoped-tls` documented in `DEPENDENCY_AUDIT.md`
+
+### Changed
+- Repository URLs migrated from `postrv/sanctum` to `postrv/sanctum-oss` across all files (Cargo.toml, README, install script, cosign identity patterns, docs, CLI source)
+- Added `cfg(loom)` to workspace `check-cfg` list
+- 1,811 tests (up from 1,794): 1,800 unit + 5 E2E integration + 6 loom concurrency
+
 ## [0.2.1] - 2026-03-31
 
 ### Added

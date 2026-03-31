@@ -243,5 +243,21 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - run: cargo bench --workspace --no-run
 
+  loom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - name: Loom tests (budget)
+        run: RUSTFLAGS="--cfg loom" cargo test -p sanctum-budget --test loom_budget_tracker
+      - name: Build loom tests (proxy)
+        run: cargo rustc -p sanctum-proxy --test loom_pending_cost -- --cfg loom
+      - name: Run loom tests (proxy)
+        run: target/debug/deps/loom_pending_cost-* --test-threads=1
+
   # Binary signing is handled by .github/workflows/release.yml (tag-triggered).
   # It uses keyless Sigstore OIDC signing — no COSIGN_KEY secret needed.

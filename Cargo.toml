@@ -14,12 +14,12 @@ exclude = ["fuzz"]
 
 [workspace.package]
 publish = false
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.94.0"
 license = "MIT"
-repository = "https://github.com/postrv/sanctum"
-homepage = "https://github.com/postrv/sanctum"
+repository = "https://github.com/postrv/sanctum-oss"
+homepage = "https://github.com/postrv/sanctum-oss"
 readme = "README.md"
 description = "The developer security daemon for the AI coding era"
 keywords = ["security", "supply-chain", "daemon", "ai", "credentials"]
@@ -39,7 +39,7 @@ print_stderr = { level = "deny" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(loom)'] }
 
 [workspace.dependencies]
 # Shared across crates — single version source of truth

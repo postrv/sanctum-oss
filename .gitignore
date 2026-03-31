@@ -36,3 +36,4 @@ forge.toml
 
 # Proptest regressions
 *.proptest-regressions
+/SANCTUM_ROADMAP.md

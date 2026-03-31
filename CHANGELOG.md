@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Go module slopsquatting detection**: `go get` and `go install` commands checked against `proxy.golang.org` before execution
+- **`Registry::Go`** variant for Go module existence checks
+- **Go module path validation**: domain-based path structure, case-encoding for Go module proxy
+- **`GoConfig`** with `allowlist` (exact match) and `trusted_prefixes` (prefix match, default: `golang.org/x/`, `google.golang.org/`, etc.)
+- **`PackageManagerConfigs`** bundle struct for extensible per-ecosystem hook configuration
+- **`pre_bash_with_configs`** / **`post_bash_with_configs`** entry points accepting full config bundle
+- **HTTP 410 (Gone)** handling for retracted Go modules (treated as NotFound)
+- **Shell-aware command splitting**: Package extraction now splits compound commands on shell operators (`&&`, `||`, `;`, `|`, etc.) with quote tracking, fixing a bypass where chained installs (e.g. `cd /tmp && npm install evil`) evaded slopsquatting detection
+- **~77 new tests** for Go module detection, extraction, validation, integration, and shell chain splitting
+
+### Fixed
+- **Shell chain slopsquatting bypass**: Commands chained with `&&`, `;`, `||`, etc. now correctly extract packages from all sub-commands (previously only the first command was checked)
+- **Detection/extraction consistency**: `is_npm_install_command`, `is_pip_install_command`, and `is_go_install_command` now use the same shell-aware splitting as package extraction, eliminating detection-without-extraction gaps
+
 ## [0.3.0] - 2026-03-31
 
 ### Added

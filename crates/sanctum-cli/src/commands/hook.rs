@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use sanctum_firewall::hooks::claude;
-use sanctum_firewall::hooks::claude::NpmConfig;
+use sanctum_firewall::hooks::claude::{GoConfig, NpmConfig, PackageManagerConfigs};
 use sanctum_firewall::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use sanctum_firewall::mcp::audit::McpAuditLog;
 use sanctum_types::config::AiFirewallConfig;
@@ -134,6 +134,13 @@ fn load_ai_config_from_path(p: &std::path::Path, is_local: bool) -> AiFirewallCo
                     error = %e,
                     "config parse failed \u{2014} using restrictive defaults"
                 );
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!(
+                        "sanctum: warning: failed to parse config {}, using restrictive defaults: {e}",
+                        p.display()
+                    );
+                }
                 restrictive_ai_firewall_defaults()
             }
         },
@@ -143,6 +150,13 @@ fn load_ai_config_from_path(p: &std::path::Path, is_local: bool) -> AiFirewallCo
                 error = %e,
                 "config read failed \u{2014} using restrictive defaults"
             );
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to read config {}, using restrictive defaults: {e}",
+                    p.display()
+                );
+            }
             restrictive_ai_firewall_defaults()
         }
     };
@@ -202,8 +216,18 @@ fn load_npm_config() -> NpmConfig {
         return NpmConfig::default();
     };
 
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return NpmConfig::default();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to read npm config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            return NpmConfig::default();
+        }
     };
 
     match toml::from_str::<sanctum_types::config::SanctumConfig>(&content) {
@@ -213,7 +237,114 @@ fn load_npm_config() -> NpmConfig {
             ignore_scripts_required: cfg.sentinel.npm.ignore_scripts_required,
             allowlist: cfg.sentinel.npm.allowlist,
         },
-        Err(_) => NpmConfig::default(),
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to parse npm config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            NpmConfig::default()
+        }
+    }
+}
+
+/// Load `GoConfig` from the config file (best-effort).
+///
+/// Deserializes through `SanctumConfig` and maps the `[sentinel.go]` section
+/// to the firewall's `GoConfig`. Returns defaults if unavailable.
+fn load_go_config() -> GoConfig {
+    let config_path = {
+        let local = std::path::PathBuf::from(".sanctum/config.toml");
+        if local.exists() {
+            Some(local)
+        } else {
+            let paths = sanctum_types::paths::WellKnownPaths::default();
+            let global = paths.config_dir.join("config.toml");
+            if global.exists() {
+                Some(global)
+            } else {
+                None
+            }
+        }
+    };
+
+    let Some(path) = config_path else {
+        return GoConfig::default();
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to read Go config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            return GoConfig::default();
+        }
+    };
+
+    match toml::from_str::<sanctum_types::config::SanctumConfig>(&content) {
+        Ok(cfg) => {
+            // Security floor: reject empty or overly broad trusted prefixes.
+            // A malicious .sanctum/config.toml could set trusted_prefixes = [""]
+            // which would match every module path, bypassing slopsquatting detection.
+            let trusted_prefixes: Vec<String> = cfg
+                .sentinel
+                .go
+                .trusted_prefixes
+                .into_iter()
+                .filter(|p| {
+                    let valid = !p.is_empty()
+                        && p.len() <= 256
+                        && p.bytes().all(|b| b.is_ascii())
+                        && p.find('/').is_some_and(|slash| p[..slash].contains('.'));
+                    if !valid {
+                        tracing::warn!(
+                            prefix = %p,
+                            "ignoring invalid Go trusted prefix (must be non-empty, ASCII, contain domain with dot)"
+                        );
+                    }
+                    valid
+                })
+                .collect();
+
+            let allowlist: Vec<String> = cfg
+                .sentinel
+                .go
+                .allowlist
+                .into_iter()
+                .filter(|a| {
+                    let valid = !a.is_empty() && a.len() <= 256;
+                    if !valid {
+                        tracing::warn!(
+                            entry = %a,
+                            "ignoring invalid Go allowlist entry (must be non-empty, <= 256 chars)"
+                        );
+                    }
+                    valid
+                })
+                .collect();
+
+            GoConfig {
+                allowlist,
+                trusted_prefixes,
+            }
+        }
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to parse Go config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            GoConfig::default()
+        }
     }
 }
 
@@ -465,15 +596,23 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
         "entropy allowlist"
     );
 
-    // Load NpmConfig for package manager hooks (best-effort; defaults if unavailable).
+    // Load package manager configs (best-effort; defaults if unavailable).
     let npm_config = load_npm_config();
+    let go_config = load_go_config();
     tracing::debug!(
         watch_lifecycle = npm_config.watch_lifecycle,
         ignore_scripts_warning = npm_config.ignore_scripts_warning,
         ignore_scripts_required = npm_config.ignore_scripts_required,
-        allowlist_len = npm_config.allowlist.len(),
-        "npm config"
+        npm_allowlist_len = npm_config.allowlist.len(),
+        go_allowlist_len = go_config.allowlist.len(),
+        go_trusted_prefixes_len = go_config.trusted_prefixes.len(),
+        "package manager config"
     );
+
+    let pkg_configs = PackageManagerConfigs {
+        npm: npm_config,
+        go: go_config,
+    };
 
     tracing::debug!(%action, tool_name = %input.tool_name, "dispatching hook");
 
@@ -486,11 +625,11 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
     };
 
     let output: HookOutput = match action {
-        "pre-bash" => claude::pre_bash_with_npm_config(&input, &npm_config),
+        "pre-bash" => claude::pre_bash_with_configs(&input, &pkg_configs),
         "pre-write" => claude::pre_write(&input),
         "pre-read" => claude::pre_read(&input),
         "pre-mcp" => claude::pre_mcp_tool_use(&input, audit_log.as_mut()),
-        "post-bash" => claude::post_bash_with_npm_config(&input, &npm_config),
+        "post-bash" => claude::post_bash_with_configs(&input, &pkg_configs),
         _ => {
             return Err(CliError::InvalidArgs(format!(
                 "unknown hook action '{action}'. Supported: pre-bash, pre-write, pre-read, pre-mcp, post-bash"

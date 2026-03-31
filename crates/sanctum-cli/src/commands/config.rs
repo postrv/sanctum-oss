@@ -158,10 +158,17 @@ exfiltration_block_bytes = 20971520     # 20 MB
 exfiltration_window_secs = 60
 exfiltration_host_allowlist = []
 
+# [sentinel.go]
+# allowlist = ["github.com/my-org/internal-module"]
+# Note: setting trusted_prefixes REPLACES the defaults; include the built-ins you want to keep.
+# trusted_prefixes = ["golang.org/x/", "google.golang.org/", "cloud.google.com/go/", "github.com/golang/", "github.com/my-org/"]
+
 [ai_firewall]
 redact_credentials = true
 claude_hooks = true
 mcp_audit = true
+check_package_existence = true
+package_check_timeout_ms = 5000          # 5s default; increase for slow networks
 
 [[ai_firewall.mcp_rules]]
 tool = "filesystem_write"

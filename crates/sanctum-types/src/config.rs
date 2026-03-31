@@ -59,6 +59,9 @@ pub struct SentinelConfig {
     /// npm ecosystem monitoring settings.
     #[serde(default)]
     pub npm: NpmConfig,
+    /// Go module ecosystem monitoring settings.
+    #[serde(default)]
+    pub go: GoConfig,
 }
 
 impl Default for SentinelConfig {
@@ -73,6 +76,7 @@ impl Default for SentinelConfig {
             credential_allowlist: Vec::new(),
             network: NetworkConfig::default(),
             npm: NpmConfig::default(),
+            go: GoConfig::default(),
         }
     }
 }
@@ -144,6 +148,44 @@ pub fn default_npm_allowlist() -> Vec<String> {
         "@prisma/client".to_owned(),
         "@prisma/engines".to_owned(),
         "protobufjs".to_owned(),
+    ]
+}
+
+/// Configuration for Go module ecosystem monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GoConfig {
+    /// Go module paths whose slopsquatting checks are bypassed.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+
+    /// Trusted module path prefixes that skip slopsquatting checks.
+    /// Default includes `golang.org/x/`, `google.golang.org/`, etc.
+    #[serde(default = "default_go_trusted_prefixes")]
+    pub trusted_prefixes: Vec<String>,
+}
+
+impl Default for GoConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            trusted_prefixes: default_go_trusted_prefixes(),
+        }
+    }
+}
+
+/// Default trusted Go module path prefixes.
+///
+/// First-party and well-known module paths that are considered trusted.
+/// Standard library packages are not fetched via `go get` so they are
+/// not listed here.
+#[must_use]
+pub fn default_go_trusted_prefixes() -> Vec<String> {
+    vec![
+        "golang.org/x/".to_owned(),
+        "google.golang.org/".to_owned(),
+        "cloud.google.com/go/".to_owned(),
+        "github.com/golang/".to_owned(),
     ]
 }
 
@@ -997,6 +1039,46 @@ mod tests {
             config.sentinel.network.exfiltration_window_secs, 1,
             "exfiltration_window_secs = 0 should be clamped to 1"
         );
+    }
+
+    #[test]
+    fn go_config_defaults_have_trusted_prefixes() {
+        let go = GoConfig::default();
+        assert!(go.allowlist.is_empty());
+        assert!(go.trusted_prefixes.contains(&"golang.org/x/".to_owned()));
+        assert!(go
+            .trusted_prefixes
+            .contains(&"google.golang.org/".to_owned()));
+    }
+
+    #[test]
+    fn config_with_go_section_deserializes() {
+        let toml_str = r#"
+            [sentinel.go]
+            allowlist = ["github.com/my-org/internal"]
+            trusted_prefixes = ["github.com/my-org/"]
+        "#;
+        let config: SanctumConfig = toml::from_str(toml_str).expect("config with go should parse");
+        assert_eq!(
+            config.sentinel.go.allowlist,
+            vec!["github.com/my-org/internal"]
+        );
+        assert_eq!(
+            config.sentinel.go.trusted_prefixes,
+            vec!["github.com/my-org/"]
+        );
+    }
+
+    #[test]
+    fn config_without_go_section_uses_defaults() {
+        let toml_str = r"
+            [sentinel]
+            watch_pth = true
+        ";
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("config without go should parse");
+        assert!(config.sentinel.go.allowlist.is_empty());
+        assert!(!config.sentinel.go.trusted_prefixes.is_empty());
     }
 
     #[test]

@@ -252,7 +252,7 @@ Sanctum is a security tool. It holds itself to a higher standard than the code i
 - 0 clippy warnings (pedantic + nursery lints enabled)
 
 **Supply chain**:
-- All dependencies audited and version-pinned (321 crates in Cargo.lock)
+- All dependencies audited and version-pinned (317 crates in Cargo.lock)
 - `cargo-deny` enforces license policy and advisory database checks in CI
 - Sigstore-signed release binaries with SBOM and Rekor transparency log
 - Reproducible builds verified in CI (build twice, compare SHA-256)

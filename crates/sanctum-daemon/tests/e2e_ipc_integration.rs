@@ -67,8 +67,7 @@ fn cleanup_stale_test_dirs() {
             continue;
         };
         // Check if the process is still alive
-        let alive =
-            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+        let alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
         if !alive {
             let path = entry.path();
             let _ = fs::remove_dir_all(&path);
@@ -179,8 +178,7 @@ watch_npm = false
 
     fn send_command(&self, msg: &IpcMessage) -> IpcResponse {
         let socket = self.socket_path();
-        let mut stream =
-            UnixStream::connect(&socket).expect("connect to daemon socket");
+        let mut stream = UnixStream::connect(&socket).expect("connect to daemon socket");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("set read timeout");
@@ -286,7 +284,10 @@ fn test_daemon_status_query() {
             ..
         } => {
             assert!(!version.is_empty(), "version should be non-empty");
-            assert!(uptime_secs < 60, "uptime should be < 60s for a fresh daemon");
+            assert!(
+                uptime_secs < 60,
+                "uptime should be < 60s for a fresh daemon"
+            );
         }
         other => panic!("expected Status response, got: {other:?}"),
     }
@@ -346,8 +347,7 @@ fn test_malformed_input_does_not_crash_daemon() {
     // Send garbage data to the socket
     {
         let socket = daemon.socket_path();
-        let mut stream =
-            UnixStream::connect(&socket).expect("connect for garbage write");
+        let mut stream = UnixStream::connect(&socket).expect("connect for garbage write");
         stream
             .set_write_timeout(Some(Duration::from_secs(2)))
             .expect("set write timeout");
@@ -366,9 +366,7 @@ fn test_malformed_input_does_not_crash_daemon() {
         if attempt > 0 {
             thread::sleep(Duration::from_millis(100));
         }
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            daemon.send_command(&msg)
-        })) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| daemon.send_command(&msg))) {
             Ok(resp) => {
                 assert!(
                     matches!(resp, IpcResponse::Status { .. }),
@@ -381,9 +379,7 @@ fn test_malformed_input_does_not_crash_daemon() {
             }
         }
     }
-    panic!(
-        "daemon did not respond to Status after 3 attempts following garbage input: {last_err}"
-    );
+    panic!("daemon did not respond to Status after 3 attempts following garbage input: {last_err}");
 }
 
 #[test]
@@ -448,9 +444,7 @@ fn test_shutdown_terminates_daemon() {
     );
 
     // Wait for the child process to actually exit
-    let mut child = daemon
-        .take_child()
-        .expect("child should be present");
+    let mut child = daemon.take_child().expect("child should be present");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {

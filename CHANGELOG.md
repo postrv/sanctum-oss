@@ -7,20 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-31
+
 ### Added
+- **Rust/Cargo slopsquatting detection**: `cargo add` and `cargo install` commands checked against crates.io sparse index (RFC 2789) before execution. No rate limits, no User-Agent requirement, CDN-backed.
+- **`Registry::CratesIo`** variant with sparse index path computation (1/2/3/4+-char name routing)
+- **Crate name validation**: 1-64 ASCII chars, alphanumeric + `-`/`_`, must start with letter
+- **Cargo `build.rs` awareness**: `post_bash` detects newly downloaded crates and warns about build script execution risk with actionable next steps
+- **Docker image safety checks**: `pre_bash` warns on `:latest`/untagged images and untrusted registries; supports `docker pull/run/create/build`, `podman`, and `docker compose`
+- **Dockerfile linting in `pre_write`**: Detects unpinned `FROM` images, `ADD` with remote URLs, and `curl|sh` pipe-to-shell patterns (with multi-line backslash continuation support)
+- **`DockerConfig`** with `trusted_registries` (default: docker.io, ghcr.io, gcr.io, public.ecr.aws, registry.k8s.io), `warn_latest`, `warn_remote_add`, `warn_pipe_install`
+- **pip source install enforcement**: `warn_source_installs` (default: on) warns about `setup.py` execution risk; `require_binary_only` (default: off) blocks `pip install` without `--only-binary :all:`
+- **`PipConfig`** with separate allowlist (previously shared npm's), `warn_source_installs`, `require_binary_only`
+- **`CargoConfig`** with `allowlist` and `warn_build_scripts`
 - **Go module slopsquatting detection**: `go get` and `go install` commands checked against `proxy.golang.org` before execution
-- **`Registry::Go`** variant for Go module existence checks
-- **Go module path validation**: domain-based path structure, case-encoding for Go module proxy
 - **`GoConfig`** with `allowlist` (exact match) and `trusted_prefixes` (prefix match, default: `golang.org/x/`, `google.golang.org/`, etc.)
-- **`PackageManagerConfigs`** bundle struct for extensible per-ecosystem hook configuration
-- **`pre_bash_with_configs`** / **`post_bash_with_configs`** entry points accepting full config bundle
-- **HTTP 410 (Gone)** handling for retracted Go modules (treated as NotFound)
-- **Shell-aware command splitting**: Package extraction now splits compound commands on shell operators (`&&`, `||`, `;`, `|`, etc.) with quote tracking, fixing a bypass where chained installs (e.g. `cd /tmp && npm install evil`) evaded slopsquatting detection
-- **~77 new tests** for Go module detection, extraction, validation, integration, and shell chain splitting
+- **Shell-aware command splitting**: Package extraction splits compound commands on shell operators (`&&`, `||`, `;`, `|`, etc.) with quote tracking
+- **HTTP 451 (Unavailable For Legal Reasons)** handling for crates.io legal removals (treated as NotFound)
+- **Security floor for project-local configs**: Per-ecosystem warning flags (`warn_build_scripts`, `warn_source_installs`, `warn_latest`, `warn_remote_add`, `warn_pipe_install`) pinned to `true` for project-local configs; allowlist sizes capped at 50 entries
+- **MCP code-key skip**: `code`, `script`, `expression`, `source` parameters excluded from path extraction in MCP policy evaluation, preventing false positives from sandboxed code tools (Forgemax/Narsil)
+- **~109 new tests** for Cargo, Docker, pip, MCP policy, cross-ecosystem integration
 
 ### Fixed
-- **Shell chain slopsquatting bypass**: Commands chained with `&&`, `;`, `||`, etc. now correctly extract packages from all sub-commands (previously only the first command was checked)
-- **Detection/extraction consistency**: `is_npm_install_command`, `is_pip_install_command`, and `is_go_install_command` now use the same shell-aware splitting as package extraction, eliminating detection-without-extraction gaps
+- **MCP explicit-rule semantics**: Tools with explicit rules (including empty `restricted_paths`) are now treated as explicitly allowed, not falling through to a `deny` default. Enables `default_mcp_policy = "deny"` with per-tool allowlisting.
+- **Shell chain slopsquatting bypass**: Commands chained with `&&`, `;`, `||`, etc. now correctly extract packages from all sub-commands
+- **Chained command Docker check bypass**: Docker image checks now run even when package manager checks pass in the same chained command
+- **pip `--only-binary` check too permissive**: Now requires `:all:` specifically (previously `--only-binary numpy` was accepted)
+- **pip `-e`/`--editable` flag handling**: Editable installs no longer extract VCS URLs as package names
+- **Docker port-in-registry false negative**: `evil.com:8080/malware` (untagged) now correctly triggers the "no tag" warning (port colon no longer confused with tag colon)
+- **Dockerfile curl/wget case sensitivity**: `Curl`, `WGET` variants now detected in pipe-to-shell patterns
+- **Detection/extraction consistency**: All `is_*_install_command` functions use shell-aware splitting
+- 2,031 tests (up from 1,922): Cargo, Docker, pip enforcement, MCP policy, Dockerfile linting, cross-ecosystem integration
+
+### Changed
+- `PackageManagerConfigs` expanded: now bundles `NpmConfig`, `GoConfig`, `CargoConfig`, `PipConfig`, `DockerConfig`
+- pip allowlist separated from npm allowlist (previously shared)
+- `AiFirewallConfig` gains `docker: DockerConfig` field
+- `SentinelConfig` gains `cargo: CargoConfig` and `pip: PipConfig` fields
+- Block messages now include `https://` URLs (clickable in terminals) and allowlist guidance for all ecosystems
 
 ## [0.3.0] - 2026-03-31
 

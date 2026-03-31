@@ -134,6 +134,10 @@ impl McpPolicy {
                     }
                 }
             }
+            // An explicit rule with no matching restrictions is an explicit allow.
+            // This prevents tools with configured (but empty) restricted_paths
+            // from falling through to a `deny` default policy.
+            return HookDecision::Allow;
         }
 
         // Phase 3: CEL expression rules (evaluated after glob matching).
@@ -384,6 +388,16 @@ fn extract_path_values(value: &serde_json::Value) -> Vec<String> {
 /// Maximum recursion depth for JSON traversal (defense against stack overflow).
 const MAX_JSON_DEPTH: usize = 32;
 
+/// Object keys whose values are source code (not file paths) and should not
+/// be scanned for path references.  Scanning source code for `/`-containing
+/// strings produces false positives because code naturally contains URL
+/// literals, regex patterns, and comments — none of which are file paths.
+///
+/// Applicable to sandboxed code-mode tools (e.g. Forgemax/Narsil) where the
+/// `code` parameter is JavaScript executed in a V8 isolate with no filesystem
+/// access.
+const CODE_VALUE_KEYS: &[&str] = &["code", "script", "expression", "source"];
+
 fn collect_path_strings(value: &serde_json::Value, out: &mut Vec<String>, depth: usize) {
     if depth > MAX_JSON_DEPTH {
         return;
@@ -401,7 +415,11 @@ fn collect_path_strings(value: &serde_json::Value, out: &mut Vec<String>, depth:
             }
         }
         serde_json::Value::Object(map) => {
-            for v in map.values() {
+            for (key, v) in map {
+                // Skip keys whose values are source code, not file paths.
+                if CODE_VALUE_KEYS.contains(&key.as_str()) {
+                    continue;
+                }
                 collect_path_strings(v, out, depth + 1);
             }
         }
@@ -1027,15 +1045,18 @@ mod tests {
     }
 
     #[test]
-    fn matched_tool_with_non_restricted_path_uses_default() {
-        // Glob rules define restricted paths (blocklist), they do NOT implicitly allow.
-        // When the path does not match any restricted pattern, the default policy applies.
+    fn matched_tool_with_non_restricted_path_is_allowed() {
+        // An explicit rule for a tool is an explicit allow for that tool.
+        // Paths matching restricted patterns are blocked; non-matching paths
+        // are allowed regardless of the default policy.  This enables the
+        // pattern: `default_mcp_policy = "deny"` + explicit rules for
+        // specific tools = "deny-by-default, allow configured tools."
         let policy = McpPolicy::from_config(vec![PolicyRule {
             tool: "read_file".to_owned(),
             restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
         }]);
 
-        // Path does NOT match restricted pattern — falls through to default (Deny).
+        // Path does NOT match restricted pattern — tool is explicitly configured → allow.
         let decision = policy.evaluate(
             "read_file",
             &json!({"path": "/home/user/project/main.rs"}),
@@ -1043,11 +1064,11 @@ mod tests {
         );
         assert_eq!(
             decision,
-            HookDecision::Block,
-            "non-restricted path should fall through to default deny"
+            HookDecision::Allow,
+            "non-restricted path on configured tool should be allowed"
         );
 
-        // Same scenario with Allow default — should be allowed.
+        // Same with Allow default — also allowed.
         let decision = policy.evaluate(
             "read_file",
             &json!({"path": "/home/user/project/main.rs"}),
@@ -1056,7 +1077,7 @@ mod tests {
         assert_eq!(
             decision,
             HookDecision::Allow,
-            "non-restricted path should fall through to default allow"
+            "non-restricted path should be allowed"
         );
 
         // Path DOES match restricted pattern — should be blocked regardless of default.
@@ -1180,6 +1201,33 @@ mod kani_proofs {
         let val = serde_json::json!({"name": "hello.txt"});
         let paths = extract_path_values(&val);
         assert!(paths.is_empty(), "normal filenames should not be extracted");
+    }
+
+    #[test]
+    fn extract_path_values_skips_code_key() {
+        // The "code" key contains JavaScript source code, not file paths.
+        // Scanning it for paths produces false positives from URL literals,
+        // regex patterns, and division operators.
+        let val = serde_json::json!({
+            "code": "async () => { return forge.callTool('narsil', 'scan', { path: '/Users/test/.ssh/id_rsa' }); }"
+        });
+        let paths = extract_path_values(&val);
+        assert!(
+            paths.is_empty(),
+            "code parameter should be skipped: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn extract_path_values_still_checks_non_code_keys() {
+        // Non-code keys containing paths should still be extracted
+        let val = serde_json::json!({
+            "file_path": "/home/user/.ssh/id_rsa",
+            "code": "async () => { return 42; }"
+        });
+        let paths = extract_path_values(&val);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "/home/user/.ssh/id_rsa");
     }
 
     #[test]

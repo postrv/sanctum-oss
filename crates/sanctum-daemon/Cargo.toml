@@ -15,10 +15,10 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-sanctum-types = { path = "../sanctum-types", version = "0.3.1" }
-sanctum-sentinel = { path = "../sanctum-sentinel", version = "0.3.1" }
-sanctum-notify = { path = "../sanctum-notify", version = "0.3.1" }
-sanctum-budget = { path = "../sanctum-budget", version = "0.3.1" }
+sanctum-types = { path = "../sanctum-types", version = "0.4.0" }
+sanctum-sentinel = { path = "../sanctum-sentinel", version = "0.4.0" }
+sanctum-notify = { path = "../sanctum-notify", version = "0.4.0" }
+sanctum-budget = { path = "../sanctum-budget", version = "0.4.0" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

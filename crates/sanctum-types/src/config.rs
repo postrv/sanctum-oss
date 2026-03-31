@@ -62,6 +62,12 @@ pub struct SentinelConfig {
     /// Go module ecosystem monitoring settings.
     #[serde(default)]
     pub go: GoConfig,
+    /// Rust/Cargo ecosystem monitoring settings.
+    #[serde(default)]
+    pub cargo: CargoConfig,
+    /// Python/pip ecosystem monitoring settings.
+    #[serde(default)]
+    pub pip: PipConfig,
 }
 
 impl Default for SentinelConfig {
@@ -77,6 +83,8 @@ impl Default for SentinelConfig {
             network: NetworkConfig::default(),
             npm: NpmConfig::default(),
             go: GoConfig::default(),
+            cargo: CargoConfig::default(),
+            pip: PipConfig::default(),
         }
     }
 }
@@ -186,6 +194,100 @@ pub fn default_go_trusted_prefixes() -> Vec<String> {
         "google.golang.org/".to_owned(),
         "cloud.google.com/go/".to_owned(),
         "github.com/golang/".to_owned(),
+    ]
+}
+
+/// Configuration for Rust/Cargo ecosystem monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CargoConfig {
+    /// Crate names that skip slopsquatting checks (exact match).
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+
+    /// Warn when cargo downloads new crates (build.rs may execute).
+    #[serde(default = "default_true")]
+    pub warn_build_scripts: bool,
+}
+
+impl Default for CargoConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            warn_build_scripts: true,
+        }
+    }
+}
+
+/// Configuration for Python/pip ecosystem monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PipConfig {
+    /// Package names that skip slopsquatting checks (exact match).
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+
+    /// Warn when pip install runs without `--only-binary :all:` (setup.py risk).
+    #[serde(default = "default_true")]
+    pub warn_source_installs: bool,
+
+    /// Block pip install commands that do not include `--only-binary :all:`.
+    #[serde(default)]
+    pub require_binary_only: bool,
+}
+
+impl Default for PipConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            warn_source_installs: true,
+            require_binary_only: false,
+        }
+    }
+}
+
+/// Configuration for Docker image safety checks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DockerConfig {
+    /// Docker registries considered trusted. Images from other registries
+    /// trigger warnings.
+    #[serde(default = "default_docker_trusted_registries")]
+    pub trusted_registries: Vec<String>,
+
+    /// Warn on `:latest` or untagged images in docker commands.
+    #[serde(default = "default_true")]
+    pub warn_latest: bool,
+
+    /// Warn on `ADD` with remote URLs in Dockerfiles (pre\_write).
+    #[serde(default = "default_true")]
+    pub warn_remote_add: bool,
+
+    /// Warn on `curl|sh` / `wget|bash` patterns in Dockerfile `RUN` instructions.
+    #[serde(default = "default_true")]
+    pub warn_pipe_install: bool,
+}
+
+impl Default for DockerConfig {
+    fn default() -> Self {
+        Self {
+            trusted_registries: default_docker_trusted_registries(),
+            warn_latest: true,
+            warn_remote_add: true,
+            warn_pipe_install: true,
+        }
+    }
+}
+
+/// Default trusted Docker registries.
+#[must_use]
+pub fn default_docker_trusted_registries() -> Vec<String> {
+    vec![
+        "docker.io".to_owned(),
+        "ghcr.io".to_owned(),
+        "gcr.io".to_owned(),
+        "public.ecr.aws".to_owned(),
+        "registry.k8s.io".to_owned(),
     ]
 }
 
@@ -388,6 +490,9 @@ pub struct AiFirewallConfig {
     /// Security floor: minimum 16.
     #[serde(default = "default_entropy_min_length")]
     pub entropy_min_length: usize,
+    /// Docker image safety configuration.
+    #[serde(default)]
+    pub docker: DockerConfig,
 }
 
 /// Default timeout for package registry lookups (3 seconds).
@@ -418,6 +523,7 @@ impl Default for AiFirewallConfig {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: default_entropy_threshold(),
             entropy_min_length: default_entropy_min_length(),
+            docker: DockerConfig::default(),
         }
     }
 }

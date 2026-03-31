@@ -11,9 +11,9 @@ description = "Transparent HTTP proxy for LLM API budget enforcement"
 workspace = true
 
 [dependencies]
-sanctum-types = { path = "../sanctum-types", version = "0.3.1" }
-sanctum-budget = { path = "../sanctum-budget", version = "0.3.1" }
-sanctum-firewall = { path = "../sanctum-firewall", version = "0.3.1" }
+sanctum-types = { path = "../sanctum-types", version = "0.4.0" }
+sanctum-budget = { path = "../sanctum-budget", version = "0.4.0" }
+sanctum-firewall = { path = "../sanctum-firewall", version = "0.4.0" }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }

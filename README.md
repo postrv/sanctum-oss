@@ -12,9 +12,13 @@ sanctum init
 
 ## Why this exists
 
-On March 24, 2026, a [supply chain attack on LiteLLM](https://github.com/BerriAI/litellm/issues/24512) (CVE-2026-33634, CVSS 9.4) injected a malicious `.pth` file (`litellm_init.pth`) into Python's `site-packages`. Every time the interpreter started -- even `python3 --version` -- it ran attacker code that stole SSH keys, cloud tokens, Kubernetes secrets, and `.env` files. MITRE ATT&CK classifies this as [T1546.018](https://attack.mitre.org/techniques/T1546/018/) and notes it "cannot be easily mitigated with preventive controls."
+In one week (March 24--31, 2026), three major supply chain attacks hit the ecosystems developers use every day:
 
-That attack worked because nothing was watching.
+- **LiteLLM** (March 24) -- Compromised PyPI credentials injected a malicious `.pth` file into Python's `site-packages`. Every time the interpreter started -- even `python3 --version` -- it ran attacker code that stole SSH keys, cloud tokens, and `.env` files. ([CVE-2026-33634](https://github.com/BerriAI/litellm/issues/24512), CVSS 9.4)
+- **Telnyx Python SDK** (March 27) -- Malicious PyPI versions used audio steganography (payload hidden in WAV files) for credential theft. Same threat actor (TeamPCP) leveraging CI/CD secrets stolen from an earlier Trivy compromise.
+- **Axios** (March 31) -- Maintainer account takeover on npm. Two malicious versions of the most popular HTTP client (~100M weekly downloads) added a phantom dependency whose `postinstall` script deployed a cross-platform RAT. Live for under 3 hours, but the blast radius was enormous. ([GHSA-fw8c-xr5c-95f9](https://github.com/advisories/GHSA-fw8c-xr5c-95f9))
+
+These attacks worked because nothing was watching at the moment code ran.
 
 Sanctum watches.
 
@@ -40,6 +44,21 @@ Actions:
   sanctum review --approve <ID>  — restore file to original location
   sanctum review --delete <ID>   — permanently remove quarantined file
 ```
+
+### Slopsquatting and install-time code execution
+
+AI coding assistants hallucinate package names. Sanctum checks every `npm install`, `pip install`, `go get`, and `cargo add` command against the real registry before execution. Non-existent packages are blocked -- stopping typosquatting and AI-hallucinated package installs before they run.
+
+Beyond existence checks, Sanctum enforces install-time safety across ecosystems:
+
+| Ecosystem | Protection |
+|-----------|-----------|
+| **npm** | Blocks installs without `--ignore-scripts` (the axios attack vector) |
+| **pip** | Warns/blocks installs without `--only-binary :all:` (prevents `setup.py` execution) |
+| **Cargo** | Warns when new crates with `build.rs` are downloaded at compile time |
+| **Docker** | Warns on `:latest`/untagged images, untrusted registries, and unsafe Dockerfile patterns |
+
+Shell-aware command splitting detects chained commands (`cd /tmp && npm install evil`) that would otherwise bypass detection.
 
 ### Credential leaks to AI tools
 
@@ -87,11 +106,11 @@ This installs five hook handlers:
 
 | Hook | What it does |
 |------|-------------|
-| `pre-bash` | Blocks credential access, env var exfiltration, dangerous commands |
-| `pre-write` | Prevents writes to sensitive paths, detects credential injection |
+| `pre-bash` | Blocks credential access, env var exfiltration, slopsquatting, dangerous commands, Docker image safety |
+| `pre-write` | Prevents writes to sensitive paths, detects credential injection, Dockerfile linting |
 | `pre-read` | Blocks reads of SSH keys, cloud credentials, private keys |
 | `pre-mcp` | Enforces MCP tool policies, audits all invocations |
-| `post-bash` | Scans command output for leaked credentials, extracts API spend |
+| `post-bash` | Scans command output for leaked credentials, cargo build.rs warnings, extracts API spend |
 
 A malicious repo config cannot disable these protections -- Sanctum enforces a security floor that project-local configs cannot lower.
 
@@ -137,14 +156,27 @@ watch_credentials = true
 watch_network = false             # network anomaly detection (opt-in)
 pth_response = "quarantine"       # quarantine | alert | log
 
+# [sentinel.cargo]
+# allowlist = ["my-internal-crate"]
+# warn_build_scripts = true       # warn on new crate downloads (build.rs risk)
+
+# [sentinel.pip]
+# warn_source_installs = true     # warn about setup.py execution risk
+# require_binary_only = false     # set true to block pip without --only-binary :all:
+
 [ai_firewall]
 redact_credentials = true
 claude_hooks = true
 mcp_audit = true
+check_package_existence = true    # slopsquatting detection (npm, pip, go, cargo)
 
 [[ai_firewall.mcp_rules]]
 tool = "filesystem_write"
 restricted_paths = ["/etc/*", "/usr/*", "~/.ssh/*"]
+
+[ai_firewall.docker]
+trusted_registries = ["docker.io", "ghcr.io", "gcr.io", "public.ecr.aws", "registry.k8s.io"]
+warn_latest = true                # warn on :latest or untagged images
 
 [budgets]
 default_session = "$50"
@@ -154,16 +186,16 @@ alert_at_percent = 75
 [budgets.providers.openai]
 session = "$30"
 daily = "$100"
-allowed_models = ["gpt-4o", "o3-mini"]
+allowed_models = ["gpt-5.4", "gpt-5.4-mini"]
 ```
 
 ### Exfiltration alerting
 
 ```toml
-[sentinel.exfiltration]
-warn_threshold_bytes = 5_242_880     # 5MB — desktop notification
-block_threshold_bytes = 20_971_520   # 20MB — block + audit event
-window_secs = 60                     # sliding window (1-3600s)
+[sentinel.network]
+exfiltration_warn_bytes = 5242880      # 5MB — desktop notification
+exfiltration_block_bytes = 20971520    # 20MB — block + audit event
+exfiltration_window_secs = 60          # sliding window (1-3600s)
 ```
 
 ### CEL policy rules
@@ -249,14 +281,14 @@ Sanctum does **not** require nono. Each tool provides independent value.
 
 ## Architecture
 
-8 crates, ~47,000 lines of Rust:
+8 crates, ~51,000 lines of Rust, 5 ecosystem integrations (npm, pip, Go, Cargo, Docker):
 
 | Crate | Purpose |
 |-------|---------|
 | `sanctum-cli` | CLI interface -- 14 commands via clap |
 | `sanctum-daemon` | Background daemon, IPC server (14 commands), event loop |
 | `sanctum-sentinel` | `.pth` monitoring, quarantine, credential watching, network anomaly detection |
-| `sanctum-firewall` | Credential redaction (37 patterns), Shannon entropy, MCP policy engine |
+| `sanctum-firewall` | Credential redaction (37 patterns), Shannon entropy, MCP policy engine, slopsquatting detection (4 registries), Docker image safety |
 | `sanctum-budget` | Spend tracking, 3 provider parsers (OpenAI, Anthropic, Google) |
 | `sanctum-proxy` | HTTP budget proxy with body limits, credential redaction, budget enforcement, SSRF prevention, and usage extraction |
 | `sanctum-types` | Shared types, config schema, threat model, platform paths |
@@ -272,7 +304,7 @@ Sanctum is a security tool. It holds itself to a higher standard than the code i
 - No `print!()` / `println!()` / `eprint!()` -- all output goes through structured channels
 
 **Testing**:
-- 1,800+ tests (unit, integration, end-to-end, loom concurrency)
+- 2,000+ tests (unit, integration, end-to-end, loom concurrency)
 - 9 Kani bounded model checking proofs (panic-freedom, state machine correctness, overflow safety)
 - 2 fuzz targets on security-critical parsers (CI runs 30s per target on PRs, 2.5h nightly)
 - 9 property-based tests verifying core invariants across random inputs

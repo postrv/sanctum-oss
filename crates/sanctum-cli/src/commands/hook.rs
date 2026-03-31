@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 
 use sanctum_firewall::hooks::claude;
-use sanctum_firewall::hooks::claude::{GoConfig, NpmConfig, PackageManagerConfigs};
+use sanctum_firewall::hooks::claude::{
+    CargoConfig, DockerConfig, GoConfig, NpmConfig, PackageManagerConfigs, PipConfig,
+};
 use sanctum_firewall::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use sanctum_firewall::mcp::audit::McpAuditLog;
 use sanctum_types::config::AiFirewallConfig;
@@ -38,6 +40,7 @@ fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
         mcp_cel_rules: Vec::new(),
         entropy_threshold: 5.0,
         entropy_min_length: 20,
+        docker: sanctum_types::config::DockerConfig::default(),
     }
 }
 
@@ -348,6 +351,292 @@ fn load_go_config() -> GoConfig {
     }
 }
 
+/// Load `CargoConfig` from the config file (best-effort).
+///
+/// Reads the `[sentinel.cargo]` section. Returns defaults if unavailable.
+/// Maximum allowlist size from project-local configs.
+/// Prevents a malicious `.sanctum/config.toml` from pre-allowlisting an
+/// arbitrary number of packages to bypass slopsquatting detection.
+const MAX_LOCAL_ALLOWLIST_SIZE: usize = 50;
+
+fn load_cargo_config() -> CargoConfig {
+    let config_path = {
+        let local = std::path::PathBuf::from(".sanctum/config.toml");
+        if local.exists() {
+            Some((local, true))
+        } else {
+            let paths = sanctum_types::paths::WellKnownPaths::default();
+            let global = paths.config_dir.join("config.toml");
+            if global.exists() {
+                Some((global, false))
+            } else {
+                None
+            }
+        }
+    };
+
+    let Some((path, is_local)) = config_path else {
+        return CargoConfig::default();
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to read Cargo config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            return CargoConfig::default();
+        }
+    };
+
+    match toml::from_str::<sanctum_types::config::SanctumConfig>(&content) {
+        Ok(cfg) => {
+            let mut allowlist: Vec<String> = cfg
+                .sentinel
+                .cargo
+                .allowlist
+                .into_iter()
+                .filter(|a| {
+                    let valid = !a.is_empty() && a.len() <= 64;
+                    if !valid {
+                        tracing::warn!(
+                            entry = %a,
+                            "ignoring invalid Cargo allowlist entry (must be non-empty, <= 64 chars)"
+                        );
+                    }
+                    valid
+                })
+                .collect();
+
+            // Security floor: project-local configs cannot weaken protections.
+            if is_local && allowlist.len() > MAX_LOCAL_ALLOWLIST_SIZE {
+                tracing::warn!(
+                    count = allowlist.len(),
+                    max = MAX_LOCAL_ALLOWLIST_SIZE,
+                    "project-local Cargo allowlist truncated to {MAX_LOCAL_ALLOWLIST_SIZE} entries"
+                );
+                allowlist.truncate(MAX_LOCAL_ALLOWLIST_SIZE);
+            }
+
+            CargoConfig {
+                allowlist,
+                // Security floor: project-local config cannot disable build script warnings.
+                warn_build_scripts: if is_local {
+                    true
+                } else {
+                    cfg.sentinel.cargo.warn_build_scripts
+                },
+            }
+        }
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to parse Cargo config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            CargoConfig::default()
+        }
+    }
+}
+
+/// Load `PipConfig` from the config file (best-effort).
+///
+/// Reads the `[sentinel.pip]` section. Returns defaults if unavailable.
+fn load_pip_config() -> PipConfig {
+    let config_path = {
+        let local = std::path::PathBuf::from(".sanctum/config.toml");
+        if local.exists() {
+            Some((local, true))
+        } else {
+            let paths = sanctum_types::paths::WellKnownPaths::default();
+            let global = paths.config_dir.join("config.toml");
+            if global.exists() {
+                Some((global, false))
+            } else {
+                None
+            }
+        }
+    };
+
+    let Some((path, is_local)) = config_path else {
+        return PipConfig::default();
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to read pip config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            return PipConfig::default();
+        }
+    };
+
+    match toml::from_str::<sanctum_types::config::SanctumConfig>(&content) {
+        Ok(cfg) => {
+            let mut allowlist: Vec<String> = cfg
+                .sentinel
+                .pip
+                .allowlist
+                .into_iter()
+                .filter(|a| {
+                    let valid = !a.is_empty() && a.len() <= 214;
+                    if !valid {
+                        tracing::warn!(
+                            entry = %a,
+                            "ignoring invalid pip allowlist entry (must be non-empty, <= 214 chars)"
+                        );
+                    }
+                    valid
+                })
+                .collect();
+
+            // Security floor: project-local configs cannot weaken protections.
+            if is_local && allowlist.len() > MAX_LOCAL_ALLOWLIST_SIZE {
+                tracing::warn!(
+                    count = allowlist.len(),
+                    max = MAX_LOCAL_ALLOWLIST_SIZE,
+                    "project-local pip allowlist truncated to {MAX_LOCAL_ALLOWLIST_SIZE} entries"
+                );
+                allowlist.truncate(MAX_LOCAL_ALLOWLIST_SIZE);
+            }
+
+            PipConfig {
+                allowlist,
+                // Security floor: project-local config cannot disable source install warnings.
+                warn_source_installs: if is_local {
+                    true
+                } else {
+                    cfg.sentinel.pip.warn_source_installs
+                },
+                require_binary_only: cfg.sentinel.pip.require_binary_only,
+            }
+        }
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to parse pip config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            PipConfig::default()
+        }
+    }
+}
+
+/// Load `DockerConfig` from the config file (best-effort).
+///
+/// Reads the `[ai_firewall.docker]` section. Returns defaults if unavailable.
+fn load_docker_config() -> DockerConfig {
+    let config_path = {
+        let local = std::path::PathBuf::from(".sanctum/config.toml");
+        if local.exists() {
+            Some((local, true))
+        } else {
+            let paths = sanctum_types::paths::WellKnownPaths::default();
+            let global = paths.config_dir.join("config.toml");
+            if global.exists() {
+                Some((global, false))
+            } else {
+                None
+            }
+        }
+    };
+
+    let Some((path, is_local)) = config_path else {
+        return DockerConfig::default();
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to read Docker config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            return DockerConfig::default();
+        }
+    };
+
+    match toml::from_str::<sanctum_types::config::SanctumConfig>(&content) {
+        Ok(cfg) => {
+            let mut trusted_registries: Vec<String> = cfg
+                .ai_firewall
+                .docker
+                .trusted_registries
+                .into_iter()
+                .filter(|r| {
+                    let valid = !r.is_empty() && r.len() <= 256;
+                    if !valid {
+                        tracing::warn!(
+                            entry = %r,
+                            "ignoring invalid Docker trusted registry (must be non-empty, <= 256 chars)"
+                        );
+                    }
+                    valid
+                })
+                .collect();
+
+            // Security floor: project-local configs cannot weaken Docker protections.
+            // Warning flags are pinned to `true` for project-local configs, and
+            // trusted_registries can only be a subset of + additions to defaults
+            // (but capped in size to prevent flooding).
+            if is_local && trusted_registries.len() > MAX_LOCAL_ALLOWLIST_SIZE {
+                tracing::warn!(
+                    count = trusted_registries.len(),
+                    max = MAX_LOCAL_ALLOWLIST_SIZE,
+                    "project-local Docker trusted_registries truncated to {MAX_LOCAL_ALLOWLIST_SIZE} entries"
+                );
+                trusted_registries.truncate(MAX_LOCAL_ALLOWLIST_SIZE);
+            }
+
+            DockerConfig {
+                trusted_registries,
+                // Security floor: project-local config cannot disable Docker warnings.
+                warn_latest: if is_local {
+                    true
+                } else {
+                    cfg.ai_firewall.docker.warn_latest
+                },
+                warn_remote_add: if is_local {
+                    true
+                } else {
+                    cfg.ai_firewall.docker.warn_remote_add
+                },
+                warn_pipe_install: if is_local {
+                    true
+                } else {
+                    cfg.ai_firewall.docker.warn_pipe_install
+                },
+            }
+        }
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to parse Docker config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            DockerConfig::default()
+        }
+    }
+}
+
 /// Infer the threat category from the hook action and decision message.
 ///
 /// This maps hook-level information to the threat model categories so that
@@ -609,9 +898,16 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
         "package manager config"
     );
 
+    let cargo_config = load_cargo_config();
+    let pip_config = load_pip_config();
+    let docker_config = load_docker_config();
+
     let pkg_configs = PackageManagerConfigs {
         npm: npm_config,
         go: go_config,
+        cargo: cargo_config,
+        pip: pip_config,
+        docker: docker_config,
     };
 
     tracing::debug!(%action, tool_name = %input.tool_name, "dispatching hook");
@@ -1056,6 +1352,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.claude_hooks);
@@ -1074,6 +1371,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(cfg.redact_credentials);
@@ -1092,6 +1390,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // mcp_audit is enforced by the floor, so it is forced to true.
@@ -1113,6 +1412,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // Local config cannot weaken MCP policy to Allow — forced to Deny
@@ -1135,6 +1435,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         // Warn maps to exit code 0, so it must be forced to Deny
@@ -1306,6 +1607,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert_eq!(
@@ -1328,6 +1630,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert_eq!(
@@ -1352,6 +1655,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(
@@ -1375,6 +1679,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 2.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(
@@ -1396,6 +1701,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 8,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(
@@ -1417,6 +1723,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 4.5,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(
@@ -1442,6 +1749,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 99.0,
             entropy_min_length: 20,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert!(
@@ -1464,6 +1772,7 @@ mod tests {
             mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 10000,
+            docker: sanctum_types::config::DockerConfig::default(),
         };
         enforce_ai_firewall_security_floor(&mut cfg);
         assert_eq!(

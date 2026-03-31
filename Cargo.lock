@@ -1965,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "sanctum-budget"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "loom",
@@ -1980,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "sanctum-cli"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -2005,7 +2005,7 @@ dependencies = [
 
 [[package]]
 name = "sanctum-daemon"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "nix",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "sanctum-firewall"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "base64",
  "cel",
@@ -2045,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "sanctum-notify"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "sanctum-types",
@@ -2054,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "sanctum-proxy"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "sanctum-sentinel"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "sanctum-types"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "criterion",

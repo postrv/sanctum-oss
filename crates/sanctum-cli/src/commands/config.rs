@@ -163,6 +163,15 @@ exfiltration_host_allowlist = []
 # Note: setting trusted_prefixes REPLACES the defaults; include the built-ins you want to keep.
 # trusted_prefixes = ["golang.org/x/", "google.golang.org/", "cloud.google.com/go/", "github.com/golang/", "github.com/my-org/"]
 
+# [sentinel.cargo]
+# allowlist = ["my-internal-crate"]
+# warn_build_scripts = true              # warn when cargo downloads new crates (build.rs risk)
+
+# [sentinel.pip]
+# allowlist = ["numpy", "pandas"]
+# warn_source_installs = true            # warn about setup.py execution risk
+# require_binary_only = false            # set true to block pip install without --only-binary :all:
+
 [ai_firewall]
 redact_credentials = true
 claude_hooks = true
@@ -192,6 +201,13 @@ restricted_paths = ["~/.ssh/id_*", "~/.aws/credentials"]
 # [[ai_firewall.mcp_cel_rules]]
 # expression = 'tool_name.startsWith("database_")'
 # action = "warn"
+
+[ai_firewall.docker]
+# Note: setting trusted_registries REPLACES the defaults; include the built-ins you want to keep.
+trusted_registries = ["docker.io", "ghcr.io", "gcr.io", "public.ecr.aws", "registry.k8s.io"]
+warn_latest = true                       # warn on :latest or untagged images
+warn_remote_add = true                   # warn on ADD with remote URLs in Dockerfiles
+warn_pipe_install = true                 # warn on curl|sh patterns in Dockerfile RUN
 
 [budgets]
 default_session = "$50"

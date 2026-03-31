@@ -11,7 +11,7 @@ description = "Cross-platform desktop notification abstraction for Sanctum"
 workspace = true
 
 [dependencies]
-sanctum-types = { path = "../sanctum-types", version = "0.3.1" }
+sanctum-types = { path = "../sanctum-types", version = "0.4.0" }
 tracing = { workspace = true }
 # NOTE: notify-rust temporarily disabled due to zbus/Rust edition
 # incompatibility upstream. Using shell fallback for now.

@@ -6,6 +6,19 @@ use crate::commands::colorize_level;
 use crate::ipc_client::{self, IpcCommand, IpcResponse, ThreatListItem};
 use crate::FixAction;
 
+/// Map legacy short category aliases to the canonical `ThreatCategory` Debug
+/// names that the daemon-side filter expects. Unknown values are passed
+/// through unchanged so the daemon can reject them gracefully.
+fn normalise_category(raw: &str) -> String {
+    match raw.to_ascii_lowercase().as_str() {
+        "pth" => "PthInjection".to_string(),
+        "credential" => "CredentialAccess".to_string(),
+        "mcp" => "McpViolation".to_string(),
+        "budget" => "BudgetOverrun".to_string(),
+        _ => raw.to_string(),
+    }
+}
+
 /// Run the fix command.
 pub fn run(action: Option<&FixAction>, json: bool, yes: bool) -> Result<(), CliError> {
     match action {
@@ -15,13 +28,15 @@ pub fn run(action: Option<&FixAction>, json: bool, yes: bool) -> Result<(), CliE
                 Some(FixAction::List { category, level }) => (category.clone(), level.clone()),
                 _ => (None, None),
             };
-            run_list(category, level, json)
+            run_list(category.map(|c| normalise_category(&c)), level, json)
         }
         Some(FixAction::Resolve {
             id,
             action: resolve_action,
         }) => run_resolve(id, resolve_action.as_deref(), yes),
-        Some(FixAction::All { category }) => run_all(category.as_deref(), yes),
+        Some(FixAction::All { category }) => {
+            run_all(category.as_deref().map(normalise_category).as_deref(), yes)
+        }
     }
 }
 

@@ -20,8 +20,9 @@ credential_allowlist = ["/usr/bin/git", "/usr/bin/ssh"]
 
 [sentinel.network]
 poll_interval_secs = 10
-transfer_threshold_bytes = 50000000
 process_allowlist = ["Dropbox", "rsync", "rclone"]
+exfiltration_warn_bytes = 5000000
+exfiltration_block_bytes = 20000000
 destination_blocklist = ["10.0.0.1"]
 safe_ports = [80, 443, 22, 53, 8080]
 

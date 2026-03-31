@@ -4,4 +4,5 @@
 //! rules that restrict which tools can access which paths.
 
 pub mod audit;
+pub mod cel;
 pub mod policy;

@@ -375,6 +375,7 @@ mod tests {
             ThreatCategory::McpViolation,
             ThreatCategory::BudgetOverrun,
             ThreatCategory::NpmLifecycleAttack,
+            ThreatCategory::DataExfiltration,
         ];
 
         for cat in &categories {
@@ -392,10 +393,10 @@ mod tests {
             assert!(result.is_ok(), "failed to write {cat:?} event");
         }
 
-        // Verify all 7 lines are present and parseable
+        // Verify all 8 lines are present and parseable
         let content = std::fs::read_to_string(&log_path).expect("read");
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 7, "should have one line per category");
+        assert_eq!(lines.len(), 8, "should have one line per category");
 
         for line in &lines {
             let parsed: ThreatEvent = serde_json::from_str(line).expect("parse line");

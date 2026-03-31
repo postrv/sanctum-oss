@@ -35,6 +35,7 @@ fn restrictive_ai_firewall_defaults() -> AiFirewallConfig {
         // Fail-closed: when config parsing fails, block unmatched MCP tools
         // rather than silently allowing them.
         default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+        mcp_cel_rules: Vec::new(),
         entropy_threshold: 5.0,
         entropy_min_length: 20,
     }
@@ -913,6 +914,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
         };
@@ -930,6 +932,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
         };
@@ -947,6 +950,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
         };
@@ -967,6 +971,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Allow,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
         };
@@ -988,6 +993,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Warn,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
         };
@@ -1158,6 +1164,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Warn,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
         };
@@ -1179,6 +1186,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
         };
@@ -1202,6 +1210,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 20,
         };
@@ -1224,6 +1233,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 2.0,
             entropy_min_length: 20,
         };
@@ -1244,6 +1254,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 8,
         };
@@ -1264,6 +1275,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 4.5,
             entropy_min_length: 20,
         };
@@ -1288,6 +1300,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 99.0,
             entropy_min_length: 20,
         };
@@ -1309,6 +1322,7 @@ mod tests {
             package_check_timeout_ms: 3000,
             mcp_rules: Vec::new(),
             default_mcp_policy: sanctum_types::config::McpDefaultPolicy::Deny,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: 5.0,
             entropy_min_length: 10000,
         };

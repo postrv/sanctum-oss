@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-31
+
+### Added
+- **Volume-based exfiltration alerting**: Per-host byte tracking with configurable thresholds (5MB warn / 20MB block / 60s window), alert suppression, 10K host cap
+- **`ThreatCategory::DataExfiltration`** threat category with desktop notifications and audit logging
+- **CEL (Common Expression Language) policy engine** for advanced MCP tool rules
+- **`[[ai_firewall.mcp_cel_rules]]`** config section with `expression` and `action` fields
+- **CEL context variables**: `tool_name`, `paths`, `payload_size`
+- **Kani proof for exfiltration counter overflow safety** (9 total proofs)
+- **`sanctum config --recommended`** includes CEL rule examples
+- **Exfiltration config validation**: window clamped to 1-3600s, warn/block thresholds auto-swapped if inverted
+
+### Fixed
+- **MCP default policy bypass**: `default_mcp_policy = "deny"` was silently overridden when CEL/glob rules existed but didn't match
+- **`sanctum fix list --category`** now accepts all 8 threat categories with backward-compatible short aliases
+- Removed stale RUSTSEC-2024-0384 advisory ignore (instant crate removed in v0.2.2)
+
+### Changed
+- `ExfiltrationTracker::record_bytes` returns accumulated total bytes (not per-connection estimate)
+- Warning alerts now suppressed within time window (matching Critical suppression behavior)
+- 1,837 tests (up from 1,811): exfiltration alerting, CEL policy engine, default policy fix
+
 ## [0.2.2] - 2026-03-31
 
 ### Added

@@ -80,8 +80,13 @@ Note: `notify-rust` is commented out due to upstream zbus/Rust edition incompati
 | `hex` | 0.4.x | Hex encoding for hash display | Trivial crate, no unsafe, no dependencies. |
 | `chrono` | 0.4.x | Timestamp handling | RustSec clean. Well-established. |
 | `reqwest` | 0.12.x | HTTP HEAD requests to npm/PyPI registries for slopsquatting detection | Uses rustls-tls (no OpenSSL). Fail-open: network errors allow install with warning. Adds ~50 transitive deps via hyper/rustls. RustSec clean. |
+| `cel` | 0.13.x | CEL expression compiler/evaluator for `[[ai_firewall.mcp_cel_rules]]` MCP policy rules | MIT licensed. Contains 1 unsafe block (type cast). Non-Turing-complete language: guaranteed termination, no side effects. Transitive deps include `antlr4rust` (parser generator). |
+| `antlr4rust` | 0.5.x | Parser generator used by cel crate for CEL grammar parsing | BSD-3-Clause licensed. Contains unsafe code for parser state management (9 unsafe blocks). |
+| `nom` | 7.x | Parser combinator, transitive via cel | MIT licensed. Well-established, widely audited. Core Rust parsing ecosystem crate. |
 
 Note: `sanctum-firewall` makes outbound HTTPS HEAD requests to `registry.npmjs.org` and `pypi.org` during `pre-bash` hook slopsquatting checks. These are fail-open with a configurable timeout (default 3s). No request bodies are sent; only HTTP status codes are inspected.
+
+Note: CEL expressions are evaluated in a sandboxed context with only three variables (`tool_name`, `paths`, `payload_size`). The cel crate adds ~27 transitive dependencies (parser, type system, runtime).
 
 ## Budget: sanctum-budget
 

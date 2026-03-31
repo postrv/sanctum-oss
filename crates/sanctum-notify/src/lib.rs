@@ -129,6 +129,7 @@ const fn category_display(event: &ThreatEvent) -> &'static str {
         sanctum_types::threat::ThreatCategory::NpmLifecycleAttack => {
             "Malicious npm lifecycle script"
         }
+        sanctum_types::threat::ThreatCategory::DataExfiltration => "Data exfiltration detected",
     }
 }
 
@@ -311,6 +312,7 @@ mod tests {
             ThreatCategory::McpViolation,
             ThreatCategory::BudgetOverrun,
             ThreatCategory::NpmLifecycleAttack,
+            ThreatCategory::DataExfiltration,
         ];
         for cat in &categories {
             let event = make_event(ThreatLevel::Info, *cat, "test", "/tmp/test");
@@ -332,6 +334,7 @@ mod tests {
             ThreatCategory::McpViolation,
             ThreatCategory::BudgetOverrun,
             ThreatCategory::NpmLifecycleAttack,
+            ThreatCategory::DataExfiltration,
         ];
         let displays: Vec<&str> = categories
             .iter()
@@ -433,6 +436,7 @@ mod tests {
             ThreatCategory::McpViolation,
             ThreatCategory::BudgetOverrun,
             ThreatCategory::NpmLifecycleAttack,
+            ThreatCategory::DataExfiltration,
         ];
         let actions = [
             Action::Logged,

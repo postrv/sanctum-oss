@@ -19,6 +19,7 @@ hex = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+cel = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 proptest = { workspace = true }

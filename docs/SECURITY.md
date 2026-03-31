@@ -4,7 +4,9 @@
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Current |
+| 0.3.x | Current |
+| 0.2.x | Supported |
+| 0.1.x | Supported |
 
 ## Reporting a vulnerability
 
@@ -72,12 +74,18 @@ Sanctum is a security tool with elevated filesystem access. We take its own secu
 - **Audit log with 0o600 permissions** -- append-only NDJSON format; audit logging failures are logged but never crash the daemon
 - **Budget state files persisted with 0o600 permissions**
 
+### CEL policy evaluation
+
+- **Non-Turing-complete**: CEL expressions used in `[[ai_firewall.mcp_cel_rules]]` are guaranteed to terminate -- the language has no loops or recursion
+- **No side effects**: CEL evaluation is pure; expressions cannot perform I/O, modify state, or access the filesystem
+- **Sandboxed context**: Only three variables are exposed to expressions: `tool_name` (string), `paths` (list of strings), `payload_size` (int)
+
 ### Testing
 
 - **~1,800 tests** covering all eight workspace crates (unit, integration, E2E, loom concurrency)
 - **Fuzz testing targets** for security-critical parsers (PTH file analyser, config parser) in `fuzz/fuzz_targets/`
 - **9 property-based tests** using proptest (6 sentinel + 3 budget) that verify invariants such as analyser totality, determinism, quarantine roundtrip identity, pricing overflow safety, and spend monotonicity
-- **8 Kani bounded model checking proofs** for core algorithms (analyser panic-freedom, path classification, exec detection, quarantine state machine, ID traversal rejection, ceiling cost overflow, Shannon entropy panic-freedom, glob exact-match correctness) — integrated as `#[cfg(kani)]` modules with CI enforcement
+- **9 Kani bounded model checking proofs** for core algorithms (analyser panic-freedom, path classification, exec detection, quarantine state machine, ID traversal rejection, ceiling cost overflow, Shannon entropy panic-freedom, glob exact-match correctness, exfiltration counter overflow safety) -- integrated as `#[cfg(kani)]` modules with CI enforcement
 
 ### Binary verification
 

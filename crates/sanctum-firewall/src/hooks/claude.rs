@@ -1838,13 +1838,30 @@ pub fn pre_mcp_tool_use(input: &HookInput, audit_log: Option<&mut McpAuditLog>) 
         }
     }
 
-    // Load MCP policy rules and default policy from config.
-    let (mcp_rules, default_mcp_policy) = input.config.as_ref().map_or_else(
-        || (Vec::new(), sanctum_types::config::McpDefaultPolicy::Deny),
-        |cfg| (cfg.mcp_rules.clone(), cfg.default_mcp_policy),
+    // Load MCP policy rules (glob + CEL) and default policy from config.
+    let (mcp_rules, cel_rules, default_mcp_policy) = input.config.as_ref().map_or_else(
+        || {
+            (
+                Vec::new(),
+                Vec::new(),
+                sanctum_types::config::McpDefaultPolicy::Deny,
+            )
+        },
+        |cfg| {
+            (
+                cfg.mcp_rules.clone(),
+                cfg.mcp_cel_rules.clone(),
+                cfg.default_mcp_policy,
+            )
+        },
     );
 
-    let policy = McpPolicy::from_config_rules(&mcp_rules);
+    // NOTE: CEL expressions are recompiled on each MCP tool invocation.
+    // This is acceptable because: (a) compilation is fast for typical expressions,
+    // (b) MCP tool calls are infrequent relative to bash/read/write hooks, and
+    // (c) caching would require shared mutable state across hook invocations.
+    // If profiling shows this is a bottleneck, consider caching the CelEvaluator.
+    let policy = McpPolicy::from_config_rules(&mcp_rules, &cel_rules);
     let decision = policy.evaluate(&input.tool_name, &input.tool_input, default_mcp_policy);
 
     let mcp_audit_enabled = input.config.as_ref().is_none_or(|cfg| cfg.mcp_audit);

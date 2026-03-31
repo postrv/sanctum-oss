@@ -167,6 +167,16 @@ where
     Ok(value.clamp(1, 3600))
 }
 
+/// Deserialise the exfiltration window, clamping to 1..=3600.
+/// A value of 0 would silently disable detection, so we enforce a minimum of 1.
+fn deserialize_exfil_window<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    Ok(value.clamp(1, 3600))
+}
+
 /// Network monitoring configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -174,15 +184,6 @@ pub struct NetworkConfig {
     /// Polling interval in seconds (clamped to 1..=3600).
     #[serde(deserialize_with = "deserialize_poll_interval")]
     pub poll_interval_secs: u64,
-    /// Outbound transfer alert threshold in bytes per hour.
-    ///
-    /// Reserved for future use. Volume-based alerting is planned but not yet
-    /// implemented. The field is retained so existing config files do not break
-    /// on upgrade.
-    #[deprecated(
-        note = "not yet implemented — volume-based alerting is planned for a future release"
-    )]
-    pub transfer_threshold_bytes: u64,
     /// Processes to exclude from monitoring.
     pub process_allowlist: Vec<String>,
     /// Known-safe destination IP addresses (CIDR ranges are not currently supported).
@@ -191,14 +192,25 @@ pub struct NetworkConfig {
     pub destination_blocklist: Vec<String>,
     /// Ports that should never trigger "unusual port" alerts.
     pub safe_ports: Vec<u16>,
+    /// Outbound bytes to a single host within `exfiltration_window_secs` that
+    /// trigger a **warning**-level exfiltration alert. Default: 5 MB.
+    pub exfiltration_warn_bytes: u64,
+    /// Outbound bytes to a single host within `exfiltration_window_secs` that
+    /// trigger a **critical**-level exfiltration alert. Default: 20 MB.
+    pub exfiltration_block_bytes: u64,
+    /// Time window in seconds over which per-host byte counters accumulate
+    /// before resetting (clamped to 1..=3600). Default: 60 seconds.
+    #[serde(deserialize_with = "deserialize_exfil_window")]
+    pub exfiltration_window_secs: u64,
+    /// Destination IPs exempt from exfiltration volume checks.
+    /// LLM API hosts, package registries, etc. should be listed here.
+    pub exfiltration_host_allowlist: Vec<String>,
 }
 
 impl Default for NetworkConfig {
-    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             poll_interval_secs: 30,
-            transfer_threshold_bytes: 100 * 1024 * 1024,
             process_allowlist: vec![
                 "Dropbox".to_owned(),
                 "rsync".to_owned(),
@@ -209,6 +221,10 @@ impl Default for NetworkConfig {
             destination_allowlist: Vec::new(),
             destination_blocklist: Vec::new(),
             safe_ports: vec![80, 443, 22, 53, 8080, 8443, 3000, 5000, 5432, 3306, 6379],
+            exfiltration_warn_bytes: 5 * 1024 * 1024, // 5 MB
+            exfiltration_block_bytes: 20 * 1024 * 1024, // 20 MB
+            exfiltration_window_secs: 60,
+            exfiltration_host_allowlist: Vec::new(),
         }
     }
 }
@@ -265,6 +281,35 @@ pub struct McpPolicyRuleConfig {
     pub restricted_paths: Vec<String>,
 }
 
+/// A CEL (Common Expression Language) policy rule for MCP tools.
+///
+/// CEL rules are evaluated **after** glob-based rules, providing more
+/// expressive policy logic (payload size checks, tool call counts, etc.).
+/// CEL is non-Turing-complete, so expressions always terminate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpCelRule {
+    /// A CEL expression that evaluates to a boolean.
+    /// Available variables: `tool_name` (string), `paths` (list of strings),
+    /// `payload_size` (int).
+    pub expression: String,
+    /// Action to take when the expression evaluates to `true`.
+    #[serde(default)]
+    pub action: CelRuleAction,
+}
+
+/// Action taken when a CEL rule expression matches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CelRuleAction {
+    /// Allow the MCP tool invocation.
+    Allow,
+    /// Block the MCP tool invocation.
+    #[default]
+    Deny,
+    /// Warn but allow the MCP tool invocation.
+    Warn,
+}
+
 /// AI Firewall configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -287,6 +332,11 @@ pub struct AiFirewallConfig {
     /// Default policy for MCP tools that do not match any explicit rule.
     #[serde(default)]
     pub default_mcp_policy: McpDefaultPolicy,
+    /// CEL expression rules for advanced MCP policy logic.
+    /// Evaluated after glob-based rules; CEL can express conditions that
+    /// globs cannot (payload size, tool call counts, multi-field logic).
+    #[serde(default)]
+    pub mcp_cel_rules: Vec<McpCelRule>,
     /// Shannon entropy threshold for high-entropy secret detection (bits/char).
     /// Higher values mean fewer false positives but may miss some secrets.
     /// Security floor: minimum 3.5.
@@ -323,6 +373,7 @@ impl Default for AiFirewallConfig {
             package_check_timeout_ms: default_package_check_timeout(),
             mcp_rules: Vec::new(),
             default_mcp_policy: McpDefaultPolicy::Deny,
+            mcp_cel_rules: Vec::new(),
             entropy_threshold: default_entropy_threshold(),
             entropy_min_length: default_entropy_min_length(),
         }
@@ -574,11 +625,9 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn network_config_defaults_are_correct() {
         let config = NetworkConfig::default();
         assert_eq!(config.poll_interval_secs, 30);
-        assert_eq!(config.transfer_threshold_bytes, 100 * 1024 * 1024);
         assert_eq!(config.process_allowlist.len(), 5);
         assert!(config.process_allowlist.contains(&"Dropbox".to_owned()));
         assert!(config.destination_allowlist.is_empty());
@@ -586,28 +635,40 @@ mod tests {
         assert_eq!(config.safe_ports.len(), 11);
         assert!(config.safe_ports.contains(&443));
         assert!(config.safe_ports.contains(&22));
+        assert_eq!(config.exfiltration_warn_bytes, 5 * 1024 * 1024);
+        assert_eq!(config.exfiltration_block_bytes, 20 * 1024 * 1024);
+        assert_eq!(config.exfiltration_window_secs, 60);
+        assert!(config.exfiltration_host_allowlist.is_empty());
     }
 
     #[test]
-    #[allow(deprecated)]
     fn network_config_deserialises_from_toml() {
         let toml_str = r#"
             [sentinel.network]
             poll_interval_secs = 10
-            transfer_threshold_bytes = 50000000
             process_allowlist = ["myapp"]
             destination_blocklist = ["10.0.0.1"]
             safe_ports = [80, 443]
+            exfiltration_warn_bytes = 1000000
+            exfiltration_block_bytes = 5000000
+            exfiltration_window_secs = 30
+            exfiltration_host_allowlist = ["1.2.3.4"]
         "#;
         let config: SanctumConfig = toml::from_str(toml_str).expect("network config should parse");
         assert_eq!(config.sentinel.network.poll_interval_secs, 10);
-        assert_eq!(config.sentinel.network.transfer_threshold_bytes, 50_000_000);
         assert_eq!(config.sentinel.network.process_allowlist, vec!["myapp"]);
         assert_eq!(
             config.sentinel.network.destination_blocklist,
             vec!["10.0.0.1"]
         );
         assert_eq!(config.sentinel.network.safe_ports, vec![80, 443]);
+        assert_eq!(config.sentinel.network.exfiltration_warn_bytes, 1_000_000);
+        assert_eq!(config.sentinel.network.exfiltration_block_bytes, 5_000_000);
+        assert_eq!(config.sentinel.network.exfiltration_window_secs, 30);
+        assert_eq!(
+            config.sentinel.network.exfiltration_host_allowlist,
+            vec!["1.2.3.4"]
+        );
     }
 
     #[test]
@@ -695,6 +756,50 @@ mod tests {
         assert_eq!(rule1.tool, "write_file");
         assert_eq!(rule1.restricted_paths.len(), 1);
         assert_eq!(rule1.restricted_paths[0], "**/*.pth");
+    }
+
+    #[test]
+    fn test_mcp_cel_rules_deserialize() {
+        let toml_str = r#"
+            [ai_firewall]
+            redact_credentials = true
+
+            [[ai_firewall.mcp_cel_rules]]
+            expression = 'tool_name == "write_file" && payload_size > 10240'
+            action = "deny"
+
+            [[ai_firewall.mcp_cel_rules]]
+            expression = 'tool_name.startsWith("database_")'
+            action = "warn"
+        "#;
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("mcp_cel_rules config should parse");
+        assert_eq!(config.ai_firewall.mcp_cel_rules.len(), 2);
+
+        let rule0 = &config.ai_firewall.mcp_cel_rules[0];
+        assert!(rule0.expression.contains("write_file"));
+        assert_eq!(rule0.action, CelRuleAction::Deny);
+
+        let rule1 = &config.ai_firewall.mcp_cel_rules[1];
+        assert!(rule1.expression.contains("database_"));
+        assert_eq!(rule1.action, CelRuleAction::Warn);
+    }
+
+    #[test]
+    fn cel_rule_action_defaults_to_deny() {
+        let toml_str = r#"
+            [ai_firewall]
+
+            [[ai_firewall.mcp_cel_rules]]
+            expression = 'tool_name == "test"'
+        "#;
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("cel rule without action should parse");
+        assert_eq!(config.ai_firewall.mcp_cel_rules.len(), 1);
+        assert_eq!(
+            config.ai_firewall.mcp_cel_rules[0].action,
+            CelRuleAction::Deny
+        );
     }
 
     #[test]
@@ -879,5 +984,31 @@ mod tests {
         assert!(allowlist.contains(&"esbuild".to_owned()));
         assert!(allowlist.contains(&"puppeteer".to_owned()));
         assert!(allowlist.contains(&"sharp".to_owned()));
+    }
+
+    #[test]
+    fn exfiltration_window_zero_clamped_to_one() {
+        let toml_str = r"
+            [sentinel.network]
+            exfiltration_window_secs = 0
+        ";
+        let config: SanctumConfig = toml::from_str(toml_str).expect("config should parse");
+        assert_eq!(
+            config.sentinel.network.exfiltration_window_secs, 1,
+            "exfiltration_window_secs = 0 should be clamped to 1"
+        );
+    }
+
+    #[test]
+    fn exfiltration_window_clamped_to_upper_bound() {
+        let toml_str = r"
+            [sentinel.network]
+            exfiltration_window_secs = 86400
+        ";
+        let config: SanctumConfig = toml::from_str(toml_str).expect("config should parse");
+        assert_eq!(
+            config.sentinel.network.exfiltration_window_secs, 3600,
+            "exfiltration_window_secs above 3600 should be clamped to 3600"
+        );
     }
 }

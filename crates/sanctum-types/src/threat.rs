@@ -40,6 +40,8 @@ pub enum ThreatCategory {
     BudgetOverrun,
     /// Malicious npm lifecycle script detected (preinstall/postinstall/install).
     NpmLifecycleAttack,
+    /// Excessive outbound data transfer to a single host (potential exfiltration).
+    DataExfiltration,
 }
 
 /// Action taken in response to a detected threat.
@@ -248,5 +250,13 @@ mod tests {
         let roundtripped: ThreatCategory =
             serde_json::from_str(&json).expect("deserialise NpmLifecycleAttack");
         assert_eq!(roundtripped, ThreatCategory::NpmLifecycleAttack);
+
+        // DataExfiltration
+        let json = serde_json::to_string(&ThreatCategory::DataExfiltration)
+            .expect("serialise DataExfiltration");
+        assert_eq!(json, "\"DataExfiltration\"");
+        let roundtripped: ThreatCategory =
+            serde_json::from_str(&json).expect("deserialise DataExfiltration");
+        assert_eq!(roundtripped, ThreatCategory::DataExfiltration);
     }
 }

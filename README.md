@@ -71,6 +71,10 @@ Monitors access to `~/.ssh`, `~/.aws/credentials`, `~/.kube/config`, and other s
 
 Detects outbound connections on unusual ports, to blocklisted destinations, or from unexpected processes. Uses configurable rules-based detection with safe port allowlists and process allowlists.
 
+### Data exfiltration volume detection
+
+Tracks cumulative bytes sent per destination host within a sliding time window. Configurable thresholds trigger warnings (default 5MB) or blocks (default 20MB) with desktop notifications and audit logging. Alert suppression prevents notification floods, and a 10K host cap bounds memory usage.
+
 ## Claude Code integration
 
 Sanctum provides pre- and post-tool hooks for [Claude Code](https://claude.ai/code):
@@ -153,6 +157,29 @@ daily = "$100"
 allowed_models = ["gpt-4o", "o3-mini"]
 ```
 
+### Exfiltration alerting
+
+```toml
+[sentinel.exfiltration]
+warn_threshold_bytes = 5_242_880     # 5MB — desktop notification
+block_threshold_bytes = 20_971_520   # 20MB — block + audit event
+window_secs = 60                     # sliding window (1-3600s)
+```
+
+### CEL policy rules
+
+```toml
+[[ai_firewall.mcp_cel_rules]]
+expression = 'tool_name == "filesystem_write" && paths.exists(p, p.startsWith("/etc"))'
+action = "deny"
+
+[[ai_firewall.mcp_cel_rules]]
+expression = 'payload_size > 1048576'
+action = "warn"
+```
+
+CEL expressions are non-Turing-complete and have no side effects. Available context variables: `tool_name` (string), `paths` (list of strings), `payload_size` (int).
+
 Generate a recommended starting config with `sanctum config --recommended`.
 
 Full configuration reference: see `sanctum config --recommended` for annotated defaults.
@@ -222,7 +249,7 @@ Sanctum does **not** require nono. Each tool provides independent value.
 
 ## Architecture
 
-8 crates, ~46,000 lines of Rust:
+8 crates, ~47,000 lines of Rust:
 
 | Crate | Purpose |
 |-------|---------|
@@ -246,13 +273,13 @@ Sanctum is a security tool. It holds itself to a higher standard than the code i
 
 **Testing**:
 - 1,800+ tests (unit, integration, end-to-end, loom concurrency)
-- 8 Kani bounded model checking proofs (panic-freedom, state machine correctness, overflow safety)
+- 9 Kani bounded model checking proofs (panic-freedom, state machine correctness, overflow safety)
 - 2 fuzz targets on security-critical parsers (CI runs 30s per target on PRs, 2.5h nightly)
 - 9 property-based tests verifying core invariants across random inputs
 - 0 clippy warnings (pedantic + nursery lints enabled)
 
 **Supply chain**:
-- All dependencies audited and version-pinned (317 crates in Cargo.lock)
+- All dependencies audited and version-pinned (344 crates in Cargo.lock)
 - `cargo-deny` enforces license policy and advisory database checks in CI
 - Sigstore-signed release binaries with SBOM and Rekor transparency log
 - Reproducible builds verified in CI (build twice, compare SHA-256)

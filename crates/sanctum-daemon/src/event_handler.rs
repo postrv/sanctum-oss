@@ -291,6 +291,22 @@ pub fn handle_credential_event(
 
 // ── Network event handling ─────────────────────────────────────────────────
 
+/// Describe a process for log messages: "name (PID 123)" or "unknown process".
+fn describe_process(pid: Option<u32>, process_name: Option<&str>) -> String {
+    match (pid, process_name) {
+        (Some(p), Some(name)) => format!("{name} (PID {p})"),
+        (Some(p), None) => format!("unknown (PID {p})"),
+        (None, Some(name)) => name.to_string(),
+        (None, None) => "unknown process".to_string(),
+    }
+}
+
+/// Emit a threat event: notify the user and append to the audit log.
+fn emit_threat(event: &sanctum_types::threat::ThreatEvent, audit_path: &Path) {
+    sanctum_notify::notify_threat(event);
+    crate::audit::append_audit_event(event, audit_path);
+}
+
 /// Handle a network anomaly event by creating a threat event and sending notification.
 pub fn handle_network_event(event: &sanctum_sentinel::network::NetworkEvent, audit_path: &Path) {
     match event {
@@ -301,36 +317,26 @@ pub fn handle_network_event(event: &sanctum_sentinel::network::NetworkEvent, aud
             anomaly,
             ..
         } => {
-            let process_desc = match (pid, process_name.as_deref()) {
-                (Some(p), Some(name)) => format!("{name} (PID {p})"),
-                (Some(p), None) => format!("unknown (PID {p})"),
-                (None, Some(name)) => name.to_string(),
-                (None, None) => "unknown process".to_string(),
-            };
+            let process_desc = describe_process(*pid, process_name.as_deref());
+            tracing::warn!(%remote_addr, process = %process_desc, anomaly = ?anomaly, "network anomaly detected");
 
-            tracing::warn!(
-                %remote_addr,
-                process = %process_desc,
-                anomaly = ?anomaly,
-                "network anomaly detected"
+            emit_threat(
+                &sanctum_types::threat::ThreatEvent {
+                    timestamp: chrono::Utc::now(),
+                    level: sanctum_types::threat::ThreatLevel::Warning,
+                    category: sanctum_types::threat::ThreatCategory::NetworkAnomaly,
+                    description: format!(
+                        "Anomalous connection to {remote_addr} by {process_desc}: {anomaly:?}"
+                    ),
+                    source_path: pid
+                        .map(|p| std::path::PathBuf::from(format!("pid:{p}")))
+                        .unwrap_or_default(),
+                    creator_pid: *pid,
+                    creator_exe: None,
+                    action_taken: sanctum_types::threat::Action::Alerted,
+                },
+                audit_path,
             );
-
-            let threat_event = sanctum_types::threat::ThreatEvent {
-                timestamp: chrono::Utc::now(),
-                level: sanctum_types::threat::ThreatLevel::Warning,
-                category: sanctum_types::threat::ThreatCategory::NetworkAnomaly,
-                description: format!(
-                    "Anomalous connection to {remote_addr} by {process_desc}: {anomaly:?}"
-                ),
-                source_path: pid
-                    .map(|p| std::path::PathBuf::from(format!("pid:{p}")))
-                    .unwrap_or_default(),
-                creator_pid: *pid,
-                creator_exe: None,
-                action_taken: sanctum_types::threat::Action::Alerted,
-            };
-            sanctum_notify::notify_threat(&threat_event);
-            crate::audit::append_audit_event(&threat_event, audit_path);
         }
         sanctum_sentinel::network::NetworkEvent::BlocklistedDestination {
             pid,
@@ -338,36 +344,60 @@ pub fn handle_network_event(event: &sanctum_sentinel::network::NetworkEvent, aud
             remote_addr,
             reason,
         } => {
-            let process_desc = match (pid, process_name.as_deref()) {
-                (Some(p), Some(name)) => format!("{name} (PID {p})"),
-                (Some(p), None) => format!("unknown (PID {p})"),
-                (None, Some(name)) => name.to_string(),
-                (None, None) => "unknown process".to_string(),
-            };
+            let process_desc = describe_process(*pid, process_name.as_deref());
+            tracing::error!(%remote_addr, process = %process_desc, reason = %reason, "blocklisted destination detected");
 
-            tracing::error!(
-                %remote_addr,
-                process = %process_desc,
-                reason = %reason,
-                "blocklisted destination detected"
+            emit_threat(
+                &sanctum_types::threat::ThreatEvent {
+                    timestamp: chrono::Utc::now(),
+                    level: sanctum_types::threat::ThreatLevel::Critical,
+                    category: sanctum_types::threat::ThreatCategory::NetworkAnomaly,
+                    description: format!(
+                        "Connection to blocklisted destination {remote_addr} by {process_desc}: {reason}"
+                    ),
+                    source_path: pid
+                        .map(|p| std::path::PathBuf::from(format!("pid:{p}")))
+                        .unwrap_or_default(),
+                    creator_pid: *pid,
+                    creator_exe: None,
+                    action_taken: sanctum_types::threat::Action::Alerted,
+                },
+                audit_path,
             );
-
-            let threat_event = sanctum_types::threat::ThreatEvent {
-                timestamp: chrono::Utc::now(),
-                level: sanctum_types::threat::ThreatLevel::Critical,
-                category: sanctum_types::threat::ThreatCategory::NetworkAnomaly,
-                description: format!(
-                    "Connection to blocklisted destination {remote_addr} by {process_desc}: {reason}"
-                ),
-                source_path: pid
-                    .map(|p| std::path::PathBuf::from(format!("pid:{p}")))
-                    .unwrap_or_default(),
-                creator_pid: *pid,
-                creator_exe: None,
-                action_taken: sanctum_types::threat::Action::Alerted,
+        }
+        sanctum_sentinel::network::NetworkEvent::DataExfiltration {
+            dest_ip,
+            total_bytes,
+            alert,
+        } => {
+            let (level, log_level) = match alert {
+                sanctum_sentinel::network::exfiltration::ExfiltrationAlert::Warning => {
+                    (sanctum_types::threat::ThreatLevel::Warning, "warn")
+                }
+                sanctum_sentinel::network::exfiltration::ExfiltrationAlert::Critical => {
+                    (sanctum_types::threat::ThreatLevel::Critical, "critical")
+                }
             };
-            sanctum_notify::notify_threat(&threat_event);
-            crate::audit::append_audit_event(&threat_event, audit_path);
+
+            #[allow(clippy::cast_precision_loss)] // MB display is approximate by nature
+            let bytes_mb = *total_bytes as f64 / (1024.0 * 1024.0);
+            tracing::warn!(dest = %dest_ip, total_bytes, severity = log_level, "data exfiltration detected: {bytes_mb:.2} MB to {dest_ip}");
+
+            emit_threat(
+                &sanctum_types::threat::ThreatEvent {
+                    timestamp: chrono::Utc::now(),
+                    level,
+                    category: sanctum_types::threat::ThreatCategory::DataExfiltration,
+                    description: format!(
+                        "Excessive outbound transfer to {dest_ip}: {bytes_mb:.2} MB ({log_level})"
+                    ),
+                    source_path: std::path::PathBuf::from(format!("net:{dest_ip}")),
+                    creator_pid: None,
+                    creator_exe: None,
+                    action_taken: sanctum_types::threat::Action::Alerted,
+                },
+                audit_path,
+            );
         }
     }
 }
@@ -1103,6 +1133,60 @@ mod tests {
         assert!(
             !audit_contents.contains("NpmLifecycleAttack"),
             "audit log should not contain NpmLifecycleAttack for safe package, got: {audit_contents}"
+        );
+    }
+
+    // ── Data exfiltration event tests ─────────────────────────────────────
+
+    #[test]
+    fn exfiltration_warning_creates_audit_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+
+        let event = sanctum_sentinel::network::NetworkEvent::DataExfiltration {
+            dest_ip: "93.184.216.34".parse().unwrap(),
+            total_bytes: 6_000_000,
+            alert: sanctum_sentinel::network::exfiltration::ExfiltrationAlert::Warning,
+        };
+
+        handle_network_event(&event, &audit_path);
+
+        let contents = std::fs::read_to_string(&audit_path).expect("read audit");
+        assert!(
+            contents.contains("DataExfiltration"),
+            "audit log should contain DataExfiltration, got: {contents}"
+        );
+        assert!(
+            contents.contains("93.184.216.34"),
+            "audit log should contain destination IP, got: {contents}"
+        );
+        assert!(
+            contents.contains("Warning"),
+            "audit log should record Warning level, got: {contents}"
+        );
+    }
+
+    #[test]
+    fn exfiltration_critical_creates_critical_audit_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.log");
+
+        let event = sanctum_sentinel::network::NetworkEvent::DataExfiltration {
+            dest_ip: "10.0.0.99".parse().unwrap(),
+            total_bytes: 25_000_000,
+            alert: sanctum_sentinel::network::exfiltration::ExfiltrationAlert::Critical,
+        };
+
+        handle_network_event(&event, &audit_path);
+
+        let contents = std::fs::read_to_string(&audit_path).expect("read audit");
+        assert!(
+            contents.contains("DataExfiltration"),
+            "audit log should contain DataExfiltration"
+        );
+        assert!(
+            contents.contains("Critical"),
+            "audit log should record Critical level, got: {contents}"
         );
     }
 }

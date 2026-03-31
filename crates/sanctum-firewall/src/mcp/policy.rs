@@ -4,9 +4,10 @@
 //! Rules use simple glob-style matching to restrict which paths a tool
 //! may access.
 
-use sanctum_types::config::McpDefaultPolicy;
+use sanctum_types::config::{McpCelRule, McpDefaultPolicy};
 use serde::{Deserialize, Serialize};
 
+use super::cel::{CelContext, CelDecision, CelEvaluator};
 use crate::hooks::protocol::HookDecision;
 
 /// A single policy rule that restricts a tool's access to certain paths.
@@ -21,9 +22,13 @@ pub struct PolicyRule {
 }
 
 /// MCP policy configuration.
-#[derive(Debug, Clone, Default)]
+///
+/// Combines glob-based rules (simple path restrictions) with optional
+/// CEL expression rules (advanced logic: payload sizes, tool name patterns, etc.).
+#[derive(Debug)]
 pub struct McpPolicy {
     rules: Vec<PolicyRule>,
+    cel_evaluator: CelEvaluator,
 }
 
 impl McpPolicy {
@@ -64,12 +69,16 @@ impl McpPolicy {
             .collect();
         Self {
             rules: validated_rules,
+            cel_evaluator: CelEvaluator::new(&[]),
         }
     }
 
-    /// Create an MCP policy from configuration rules.
+    /// Create an MCP policy from configuration rules, including optional CEL rules.
     #[must_use]
-    pub fn from_config_rules(rules: &[sanctum_types::config::McpPolicyRuleConfig]) -> Self {
+    pub fn from_config_rules(
+        rules: &[sanctum_types::config::McpPolicyRuleConfig],
+        cel_rules: &[McpCelRule],
+    ) -> Self {
         let policy_rules = rules
             .iter()
             .map(|r| PolicyRule {
@@ -77,7 +86,9 @@ impl McpPolicy {
                 restricted_paths: r.restricted_paths.clone(),
             })
             .collect();
-        Self::from_config(policy_rules)
+        let mut policy = Self::from_config(policy_rules);
+        policy.cel_evaluator = CelEvaluator::new(cel_rules);
+        policy
     }
 
     /// Evaluate a tool invocation against the policy.
@@ -108,29 +119,49 @@ impl McpPolicy {
             }
         }
 
-        // Phase 2: Check user-defined rules.
+        // Phase 2: Check user-defined glob rules.
         let applicable_rules: Vec<&PolicyRule> =
             self.rules.iter().filter(|r| r.tool == tool).collect();
 
-        if applicable_rules.is_empty() {
-            return match default_policy {
-                McpDefaultPolicy::Allow => HookDecision::Allow,
-                McpDefaultPolicy::Warn => HookDecision::Warn,
-                McpDefaultPolicy::Deny => HookDecision::Block,
-            };
-        }
-
-        for rule in &applicable_rules {
-            for path in &paths {
-                for pattern in &rule.restricted_paths {
-                    if glob_matches(pattern, path) {
-                        return HookDecision::Block;
+        // If glob rules exist for this tool, check them.
+        if !applicable_rules.is_empty() {
+            for rule in &applicable_rules {
+                for path in &paths {
+                    for pattern in &rule.restricted_paths {
+                        if glob_matches(pattern, path) {
+                            return HookDecision::Block;
+                        }
                     }
                 }
             }
         }
 
-        HookDecision::Allow
+        // Phase 3: CEL expression rules (evaluated after glob matching).
+        if !self.cel_evaluator.is_empty() {
+            let payload_size = serde_json::to_string(args)
+                .map(|s| i64::try_from(s.len()).unwrap_or(i64::MAX))
+                .unwrap_or(0);
+
+            let cel_ctx = CelContext {
+                tool_name: tool.to_owned(),
+                paths,
+                payload_size,
+            };
+
+            match self.cel_evaluator.evaluate(&cel_ctx) {
+                CelDecision::Deny => return HookDecision::Block,
+                CelDecision::Warn => return HookDecision::Warn,
+                CelDecision::Allow => return HookDecision::Allow,
+                CelDecision::NoMatch => {} // Fall through to default
+            }
+        }
+
+        // No glob or CEL rule produced a definitive match — apply default policy.
+        match default_policy {
+            McpDefaultPolicy::Allow => HookDecision::Allow,
+            McpDefaultPolicy::Warn => HookDecision::Warn,
+            McpDefaultPolicy::Deny => HookDecision::Block,
+        }
     }
 }
 
@@ -624,7 +655,7 @@ mod tests {
             },
         ];
 
-        let policy = McpPolicy::from_config_rules(&config_rules);
+        let policy = McpPolicy::from_config_rules(&config_rules, &[]);
 
         // read_file accessing .ssh should be blocked
         let decision = policy.evaluate(
@@ -996,15 +1027,15 @@ mod tests {
     }
 
     #[test]
-    fn matched_tool_respects_rules_regardless_of_default() {
-        // Tool matches a rule that allows it (path not restricted).
-        // Even with Deny default, the rule match should take precedence.
+    fn matched_tool_with_non_restricted_path_uses_default() {
+        // Glob rules define restricted paths (blocklist), they do NOT implicitly allow.
+        // When the path does not match any restricted pattern, the default policy applies.
         let policy = McpPolicy::from_config(vec![PolicyRule {
             tool: "read_file".to_owned(),
             restricted_paths: vec!["/home/user/.ssh/**".to_owned()],
         }]);
 
-        // Path does NOT match restricted pattern — should be allowed regardless of default.
+        // Path does NOT match restricted pattern — falls through to default (Deny).
         let decision = policy.evaluate(
             "read_file",
             &json!({"path": "/home/user/project/main.rs"}),
@@ -1012,8 +1043,20 @@ mod tests {
         );
         assert_eq!(
             decision,
+            HookDecision::Block,
+            "non-restricted path should fall through to default deny"
+        );
+
+        // Same scenario with Allow default — should be allowed.
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/project/main.rs"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(
+            decision,
             HookDecision::Allow,
-            "matched tool with non-restricted path should be allowed even with Deny default"
+            "non-restricted path should fall through to default allow"
         );
 
         // Path DOES match restricted pattern — should be blocked regardless of default.
@@ -1025,7 +1068,7 @@ mod tests {
         assert_eq!(
             decision,
             HookDecision::Block,
-            "matched tool with restricted path should be blocked even with Allow default"
+            "restricted path should be blocked even with Allow default"
         );
     }
 
@@ -1495,5 +1538,142 @@ mod expanded_policy_tests {
             "backslashes should be converted to forward slashes, got: {result}"
         );
         assert_eq!(result, "/.ssh/id_rsa");
+    }
+
+    // ── CEL policy integration tests ──────────────────────────────────────
+
+    #[test]
+    fn cel_rule_blocks_matching_tool() {
+        use sanctum_types::config::{CelRuleAction, McpCelRule};
+
+        let cel_rules = vec![McpCelRule {
+            expression: r#"tool_name == "dangerous_tool""#.to_owned(),
+            action: CelRuleAction::Deny,
+        }];
+        let policy = McpPolicy::from_config_rules(&[], &cel_rules);
+
+        let decision = policy.evaluate(
+            "dangerous_tool",
+            &json!({"path": "/tmp/file"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn cel_rule_allows_non_matching_tool() {
+        use sanctum_types::config::{CelRuleAction, McpCelRule};
+
+        let cel_rules = vec![McpCelRule {
+            expression: r#"tool_name == "dangerous_tool""#.to_owned(),
+            action: CelRuleAction::Deny,
+        }];
+        let policy = McpPolicy::from_config_rules(&[], &cel_rules);
+
+        let decision = policy.evaluate(
+            "safe_tool",
+            &json!({"path": "/tmp/file"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn cel_rule_warns_on_match() {
+        use sanctum_types::config::{CelRuleAction, McpCelRule};
+
+        let cel_rules = vec![McpCelRule {
+            expression: r#"tool_name.startsWith("database_")"#.to_owned(),
+            action: CelRuleAction::Warn,
+        }];
+        let policy = McpPolicy::from_config_rules(&[], &cel_rules);
+
+        let decision = policy.evaluate("database_query", &json!({}), McpDefaultPolicy::Allow);
+        assert_eq!(decision, HookDecision::Warn);
+    }
+
+    #[test]
+    fn cel_payload_size_blocks_large_payloads() {
+        use sanctum_types::config::{CelRuleAction, McpCelRule};
+
+        let cel_rules = vec![McpCelRule {
+            expression: "payload_size > 100".to_owned(),
+            action: CelRuleAction::Deny,
+        }];
+        let policy = McpPolicy::from_config_rules(&[], &cel_rules);
+
+        // Large payload should be blocked
+        let large_args = json!({"data": "x".repeat(200)});
+        let decision = policy.evaluate("any_tool", &large_args, McpDefaultPolicy::Allow);
+        assert_eq!(decision, HookDecision::Block);
+
+        // Small payload should be allowed
+        let small_args = json!({"data": "x"});
+        let decision = policy.evaluate("any_tool", &small_args, McpDefaultPolicy::Allow);
+        assert_eq!(decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn glob_rules_evaluated_before_cel_rules() {
+        use sanctum_types::config::{CelRuleAction, McpCelRule, McpPolicyRuleConfig};
+
+        let glob_rules = vec![McpPolicyRuleConfig {
+            tool: "write_file".to_owned(),
+            restricted_paths: vec!["**/*.pth".to_owned()],
+        }];
+        let cel_rules = vec![McpCelRule {
+            expression: r#"tool_name == "write_file""#.to_owned(),
+            action: CelRuleAction::Allow,
+        }];
+        let policy = McpPolicy::from_config_rules(&glob_rules, &cel_rules);
+
+        // Glob block should take priority over CEL allow
+        let decision = policy.evaluate(
+            "write_file",
+            &json!({"path": "/tmp/evil.pth"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn builtin_restrictions_override_cel_allow() {
+        use sanctum_types::config::{CelRuleAction, McpCelRule};
+
+        let cel_rules = vec![McpCelRule {
+            expression: r#"tool_name == "read_file""#.to_owned(),
+            action: CelRuleAction::Allow,
+        }];
+        let policy = McpPolicy::from_config_rules(&[], &cel_rules);
+
+        // Built-in .ssh block should override CEL allow
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/home/user/.ssh/id_rsa"}),
+            McpDefaultPolicy::Allow,
+        );
+        assert_eq!(decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn default_deny_applies_when_cel_rules_exist_but_dont_match() {
+        // Regression test for the policy bypass bug:
+        // Having CEL rules should NOT override the default deny policy
+        // for tools that don't match any rule.
+        use sanctum_types::config::{CelRuleAction, McpCelRule};
+
+        let cel_rules = vec![McpCelRule {
+            expression: r#"tool_name == "write_file""#.to_owned(),
+            action: CelRuleAction::Deny,
+        }];
+        let policy = McpPolicy::from_config_rules(&[], &cel_rules);
+
+        // "read_file" doesn't match the CEL rule -> should fall through to default
+        let decision = policy.evaluate(
+            "read_file",
+            &json!({"path": "/tmp/safe.txt"}),
+            McpDefaultPolicy::Deny,
+        );
+        assert_eq!(decision, HookDecision::Block); // Default deny should apply
     }
 }

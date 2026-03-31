@@ -153,7 +153,10 @@ pth_response = "quarantine"
 
 [sentinel.network]
 poll_interval_secs = 30
-transfer_threshold_bytes = 104857600  # 100 MB
+exfiltration_warn_bytes = 5242880       # 5 MB
+exfiltration_block_bytes = 20971520     # 20 MB
+exfiltration_window_secs = 60
+exfiltration_host_allowlist = []
 
 [ai_firewall]
 redact_credentials = true
@@ -167,6 +170,21 @@ restricted_paths = ["/etc/*", "/usr/*", "/System/*", "~/.ssh/*", "~/.aws/*"]
 [[ai_firewall.mcp_rules]]
 tool = "filesystem_read"
 restricted_paths = ["~/.ssh/id_*", "~/.aws/credentials"]
+
+# CEL expression rules for advanced MCP policy logic.
+# Evaluated after glob rules. Available variables:
+#   tool_name (string), paths (list of strings), payload_size (int)
+# Action: "deny" (default), "allow", or "warn"
+
+# Example: Block write_file for files larger than 100KB
+# [[ai_firewall.mcp_cel_rules]]
+# expression = 'tool_name == "write_file" && payload_size > 102400'
+# action = "deny"
+
+# Example: Warn on any database tool usage
+# [[ai_firewall.mcp_cel_rules]]
+# expression = 'tool_name.startsWith("database_")'
+# action = "warn"
 
 [budgets]
 default_session = "$50"

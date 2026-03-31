@@ -141,9 +141,7 @@ mod tests {
             NetworkEvent::AnomalousConnection { anomaly, .. } => {
                 assert_eq!(anomaly, AnomalyKind::UnusualPort);
             }
-            NetworkEvent::BlocklistedDestination { .. } => {
-                panic!("expected AnomalousConnection");
-            }
+            other => panic!("expected AnomalousConnection, got: {other:?}"),
         }
     }
 
@@ -167,9 +165,7 @@ mod tests {
                 assert!(reason.contains("10.0.0.99"));
                 assert!(reason.contains("blocklisted"));
             }
-            NetworkEvent::AnomalousConnection { .. } => {
-                panic!("expected BlocklistedDestination");
-            }
+            other => panic!("expected BlocklistedDestination, got: {other:?}"),
         }
     }
 
@@ -207,9 +203,7 @@ mod tests {
             NetworkEvent::AnomalousConnection { anomaly, .. } => {
                 assert_eq!(anomaly, AnomalyKind::UnusualPort);
             }
-            NetworkEvent::BlocklistedDestination { .. } => {
-                panic!("expected AnomalousConnection");
-            }
+            other => panic!("expected AnomalousConnection, got: {other:?}"),
         }
     }
 

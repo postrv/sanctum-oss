@@ -192,8 +192,11 @@ enum BudgetAction {
 pub enum FixAction {
     /// List all unresolved threats.
     List {
-        /// Filter by category (pth, credential, mcp, budget).
-        #[arg(long, value_parser = ["pth", "credential", "mcp", "budget"])]
+        /// Filter by category: `PthInjection`, `CredentialAccess`,
+        /// `McpViolation`, `BudgetOverrun`, `SiteCustomize`,
+        /// `NetworkAnomaly`, `NpmLifecycleAttack`, `DataExfiltration`.
+        /// Short aliases: pth, credential, mcp, budget.
+        #[arg(long)]
         category: Option<String>,
         /// Filter by threat level (info, warning, critical).
         #[arg(long, value_parser = ["info", "warning", "critical"])]
@@ -209,8 +212,11 @@ pub enum FixAction {
     },
     /// Batch-remediate all unresolved threats.
     All {
-        /// Only process threats of a specific category.
-        #[arg(long, value_parser = ["pth", "credential", "mcp", "budget"])]
+        /// Only process threats of a specific category: `PthInjection`,
+        /// `CredentialAccess`, `McpViolation`, `BudgetOverrun`,
+        /// `SiteCustomize`, `NetworkAnomaly`, `NpmLifecycleAttack`,
+        /// `DataExfiltration`. Short aliases: pth, credential, mcp, budget.
+        #[arg(long)]
         category: Option<String>,
     },
 }

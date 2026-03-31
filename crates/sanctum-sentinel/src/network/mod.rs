@@ -5,6 +5,7 @@
 
 pub mod collector;
 pub mod detector;
+pub mod exfiltration;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -14,6 +15,16 @@ use std::time::Duration;
 
 use sanctum_types::config::NetworkConfig;
 use tokio::sync::mpsc;
+
+/// Estimated bytes per new outbound connection for exfiltration tracking.
+///
+/// Since connection-level byte counts are not available from `/proc/net/tcp`
+/// snapshots or `lsof` output, each new connection is assigned a conservative
+/// fixed estimate. This catches high-connection-count exfiltration patterns
+/// (e.g., RAT beaconing). Precise byte-level tracking is deferred to eBPF
+/// integration (v0.5.0) or can be fed directly via `ExfiltrationTracker::record_bytes`
+/// from the proxy.
+const EXFIL_BYTES_PER_CONNECTION: u64 = 65_536; // 64 KB
 
 /// A detected network event.
 #[derive(Debug, Clone)]
@@ -41,6 +52,15 @@ pub enum NetworkEvent {
         remote_addr: SocketAddr,
         /// Reason the destination is blocklisted.
         reason: String,
+    },
+    /// Excessive outbound data transfer to a single host.
+    DataExfiltration {
+        /// Destination IP that exceeded the threshold.
+        dest_ip: std::net::IpAddr,
+        /// Total bytes accumulated in the current window.
+        total_bytes: u64,
+        /// Alert severity (warning or critical).
+        alert: exfiltration::ExfiltrationAlert,
     },
 }
 
@@ -77,7 +97,9 @@ impl NetworkWatcher {
     /// Start the network watcher.
     ///
     /// Spawns a background task that polls connections at the configured interval
-    /// and sends anomaly events through the provided channel.
+    /// and sends anomaly events through the provided channel. Includes
+    /// per-host exfiltration volume tracking that alerts when configurable
+    /// byte thresholds are exceeded within a time window.
     #[must_use]
     pub fn start(config: NetworkConfig, tx: mpsc::Sender<NetworkEvent>) -> Self {
         let alive = Arc::new(AtomicBool::new(true));
@@ -87,6 +109,9 @@ impl NetworkWatcher {
             let mut interval =
                 tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
             let mut previous_connections: HashSet<ConnectionInfo> = HashSet::new();
+            let mut exfil_tracker = exfiltration::ExfiltrationTracker::new(&config);
+            // Counter for periodic cleanup of expired exfiltration entries.
+            let mut poll_count: u64 = 0;
 
             loop {
                 interval.tick().await;
@@ -99,10 +124,28 @@ impl NetworkWatcher {
                 // Find new connections (not in previous snapshot)
                 for conn in &current {
                     if !previous_connections.contains(conn) {
-                        // Check for anomalies
+                        // Check for anomalies (blocklist, unusual ports)
                         if let Some(event) = detector::check(conn, &config) {
                             if tx.send(event).await.is_err() {
-                                // Receiver dropped, stop watching
+                                alive_clone.store(false, Ordering::Release);
+                                return;
+                            }
+                        }
+
+                        // Feed exfiltration tracker: each new connection contributes
+                        // an estimated byte count. This is a heuristic — actual byte
+                        // tracking requires deeper OS integration (eBPF, /proc/net/dev).
+                        // The estimate is conservative: 64KB per new connection observed.
+                        let dest_ip = conn.remote_addr.ip();
+                        if let Some((alert, accumulated)) =
+                            exfil_tracker.record_bytes(dest_ip, EXFIL_BYTES_PER_CONNECTION)
+                        {
+                            let event = NetworkEvent::DataExfiltration {
+                                dest_ip,
+                                total_bytes: accumulated,
+                                alert,
+                            };
+                            if tx.send(event).await.is_err() {
                                 alive_clone.store(false, Ordering::Release);
                                 return;
                             }
@@ -111,6 +154,14 @@ impl NetworkWatcher {
                 }
 
                 previous_connections = current;
+
+                // Periodically clean up expired exfiltration entries to prevent
+                // unbounded memory growth. Every 10 polls (~5 minutes at default
+                // 30-second interval).
+                poll_count = poll_count.wrapping_add(1);
+                if poll_count.is_multiple_of(10) {
+                    exfil_tracker.cleanup_expired();
+                }
             }
         });
 

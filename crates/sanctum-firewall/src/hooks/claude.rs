@@ -569,6 +569,8 @@ fn parse_package_args(args: &str, registry: &Registry) -> Vec<(String, Registry)
                 "--find-links",
                 "-e",
                 "--editable",
+                "--only-binary",
+                "--no-binary",
             ];
             if value_flags.contains(&token) {
                 skip_next = true;

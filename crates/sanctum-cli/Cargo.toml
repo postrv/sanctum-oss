@@ -15,11 +15,11 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-sanctum-types = { path = "../sanctum-types", version = "0.4.0" }
-sanctum-firewall = { path = "../sanctum-firewall", version = "0.4.0" }
-sanctum-budget = { path = "../sanctum-budget", version = "0.4.0" }
-sanctum-proxy = { path = "../sanctum-proxy", version = "0.4.0" }
-sanctum-sentinel = { path = "../sanctum-sentinel", version = "0.4.0" }
+sanctum-types = { path = "../sanctum-types", version = "0.4.1" }
+sanctum-firewall = { path = "../sanctum-firewall", version = "0.4.1" }
+sanctum-budget = { path = "../sanctum-budget", version = "0.4.1" }
+sanctum-proxy = { path = "../sanctum-proxy", version = "0.4.1" }
+sanctum-sentinel = { path = "../sanctum-sentinel", version = "0.4.1" }
 clap = { version = "4", features = ["derive"] }
 tokio = { workspace = true }
 serde = { workspace = true }

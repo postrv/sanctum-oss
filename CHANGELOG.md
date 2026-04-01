@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-03-31
+
+### Fixed
+- **pip `--only-binary`/`--no-binary` extracted as package names**: These flags take a value argument (e.g., `:all:`) that was being treated as a package name and failing registry validation. Added to `value_flags` list so the argument is correctly consumed.
+
 ## [0.4.0] - 2026-03-31
 
 ### Added

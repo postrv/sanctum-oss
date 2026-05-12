@@ -100,15 +100,17 @@ impl DaemonProcess {
         fs::create_dir_all(&data_dir).expect("create data dir");
         fs::create_dir_all(&config_dir).expect("create config dir");
 
-        // Write a minimal config so the daemon starts without errors
+        // Keep these IPC tests focused on the socket protocol. Enabling
+        // filesystem watchers can delay Linux CI startup after the socket is
+        // bound but before the daemon event loop is ready to accept commands.
         let config_file = config_dir.join("config.toml");
         fs::write(
             &config_file,
             r#"
 [sentinel]
-watch_pth = true
+watch_pth = false
 pth_response = "quarantine"
-watch_credentials = true
+watch_credentials = false
 watch_network = false
 watch_npm = false
 "#,

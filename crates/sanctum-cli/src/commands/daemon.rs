@@ -64,7 +64,9 @@ fn install_service() -> Result<(), CliError> {
         .map_err(CliError::Io)?;
     if status.success() {
         #[allow(clippy::print_stdout)]
-        println!("Sanctum Windows service installed.");
+        {
+            println!("Sanctum Windows service installed.");
+        }
         Ok(())
     } else {
         Err(CliError::CommandFailed(format!(
@@ -88,7 +90,9 @@ fn uninstall_service() -> Result<(), CliError> {
         .map_err(CliError::Io)?;
     if status.success() {
         #[allow(clippy::print_stdout)]
-        println!("Sanctum Windows service uninstalled.");
+        {
+            println!("Sanctum Windows service uninstalled.");
+        }
         Ok(())
     } else {
         Err(CliError::CommandFailed(format!(

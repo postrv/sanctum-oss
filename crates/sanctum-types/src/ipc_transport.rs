@@ -83,9 +83,9 @@ impl<T> SyncIpcStream for T where T: std::io::Read + std::io::Write + Send {}
 /// Platform listener wrapper.
 pub struct IpcListener {
     endpoint: IpcEndpoint,
-    #[cfg(unix)]
+    #[cfg(all(unix, not(loom)))]
     listener: tokio::net::UnixListener,
-    #[cfg(windows)]
+    #[cfg(all(windows, not(loom)))]
     first_server: tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>,
 }
 
@@ -109,13 +109,13 @@ impl IpcListener {
     ///
     /// Returns an error if the listener cannot accept a client connection.
     pub async fn accept(&self) -> io::Result<Box<dyn AsyncIpcStream>> {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(loom)))]
         {
             let (stream, _) = self.listener.accept().await?;
             Ok(Box::new(stream))
         }
 
-        #[cfg(windows)]
+        #[cfg(all(windows, not(loom)))]
         {
             let server = {
                 let mut guard = self.first_server.lock().await;
@@ -140,7 +140,7 @@ impl IpcListener {
             Ok(Box::new(server))
         }
 
-        #[cfg(not(any(unix, windows)))]
+        #[cfg(any(loom, not(any(unix, windows))))]
         {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -165,11 +165,11 @@ impl IpcListener {
 pub async fn connect_async(endpoint: &IpcEndpoint) -> io::Result<Box<dyn AsyncIpcStream>> {
     match endpoint {
         IpcEndpoint::Unix(path) => {
-            #[cfg(unix)]
+            #[cfg(all(unix, not(loom)))]
             {
                 Ok(Box::new(tokio::net::UnixStream::connect(path).await?))
             }
-            #[cfg(not(unix))]
+            #[cfg(any(loom, not(unix)))]
             {
                 let _ = path;
                 Err(io::Error::new(
@@ -179,14 +179,14 @@ pub async fn connect_async(endpoint: &IpcEndpoint) -> io::Result<Box<dyn AsyncIp
             }
         }
         IpcEndpoint::NamedPipe(name) => {
-            #[cfg(windows)]
+            #[cfg(all(windows, not(loom)))]
             {
                 let path = format!(r"\\.\pipe\{name}");
                 Ok(Box::new(
                     tokio::net::windows::named_pipe::ClientOptions::new().open(path)?,
                 ))
             }
-            #[cfg(not(windows))]
+            #[cfg(any(loom, not(windows)))]
             {
                 let _ = name;
                 Err(io::Error::new(
@@ -243,7 +243,7 @@ pub fn connect_sync(endpoint: &IpcEndpoint) -> io::Result<Box<dyn SyncIpcStream>
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(loom)))]
 fn bind_unix(path: &Path, endpoint: &IpcEndpoint) -> io::Result<IpcListener> {
     match std::fs::remove_file(path) {
         Ok(()) => {}
@@ -257,7 +257,7 @@ fn bind_unix(path: &Path, endpoint: &IpcEndpoint) -> io::Result<IpcListener> {
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(any(loom, not(unix)))]
 fn bind_unix(path: &Path, _endpoint: &IpcEndpoint) -> io::Result<IpcListener> {
     let _ = path;
     Err(io::Error::new(
@@ -266,7 +266,7 @@ fn bind_unix(path: &Path, _endpoint: &IpcEndpoint) -> io::Result<IpcListener> {
     ))
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(loom)))]
 fn bind_named_pipe(name: &str, endpoint: &IpcEndpoint) -> io::Result<IpcListener> {
     let server = create_named_pipe_server(name, true)?;
     Ok(IpcListener {
@@ -275,7 +275,7 @@ fn bind_named_pipe(name: &str, endpoint: &IpcEndpoint) -> io::Result<IpcListener
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(any(loom, not(windows)))]
 fn bind_named_pipe(name: &str, _endpoint: &IpcEndpoint) -> io::Result<IpcListener> {
     let _ = name;
     Err(io::Error::new(
@@ -284,7 +284,7 @@ fn bind_named_pipe(name: &str, _endpoint: &IpcEndpoint) -> io::Result<IpcListene
     ))
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(loom)))]
 fn create_named_pipe_server(
     name: &str,
     first_instance: bool,
@@ -296,7 +296,7 @@ fn create_named_pipe_server(
     create_named_pipe_server_with_current_user_dacl(&options, name)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(loom)))]
 #[allow(unsafe_code)]
 fn create_named_pipe_server_with_current_user_dacl(
     options: &tokio::net::windows::named_pipe::ServerOptions,

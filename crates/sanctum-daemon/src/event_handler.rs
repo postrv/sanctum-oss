@@ -875,11 +875,13 @@ mod tests {
         let mut config = SanctumConfig::default();
         config.sentinel.pth_response = PthResponse::Quarantine;
 
-        // Use a quarantine directory that is not writable (nonexistent parent
-        // with a long path that cannot be created to provoke failure).
-        let quarantine = sanctum_sentinel::pth::quarantine::Quarantine::new(
-            std::path::PathBuf::from("/dev/null/impossible/quarantine"),
-        );
+        // Use an existing regular file as the quarantine root. Creating a
+        // quarantined child under this path fails deterministically on Unix and
+        // Windows, unlike permission-based setups that can vary by runner.
+        let blocked_quarantine_root = dir.path().join("quarantine-blocker");
+        std::fs::write(&blocked_quarantine_root, b"not a directory").expect("write blocker file");
+        let quarantine =
+            sanctum_sentinel::pth::quarantine::Quarantine::new(blocked_quarantine_root);
 
         let event = WatchEvent {
             path: pth_path,

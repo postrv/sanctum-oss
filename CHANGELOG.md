@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-05-12
+
+### Security
+- Updated `rand` and `rustls-webpki` to clear the current RustSec advisory set.
+
+### Added
+- Homebrew install-time protection: official formula/cask existence checks, untrusted tap warnings, Brewfile warnings, `--no-quarantine` warnings, direct URL/path formula blocking, and post-install persistence hints.
+
 ## [0.4.1] - 2026-03-31
 
 ### Fixed

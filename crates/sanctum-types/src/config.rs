@@ -68,6 +68,9 @@ pub struct SentinelConfig {
     /// Python/pip ecosystem monitoring settings.
     #[serde(default)]
     pub pip: PipConfig,
+    /// Homebrew ecosystem monitoring settings.
+    #[serde(default)]
+    pub homebrew: HomebrewConfig,
 }
 
 impl Default for SentinelConfig {
@@ -85,6 +88,7 @@ impl Default for SentinelConfig {
             go: GoConfig::default(),
             cargo: CargoConfig::default(),
             pip: PipConfig::default(),
+            homebrew: HomebrewConfig::default(),
         }
     }
 }
@@ -244,6 +248,60 @@ impl Default for PipConfig {
             require_binary_only: false,
         }
     }
+}
+
+/// Configuration for Homebrew ecosystem monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct HomebrewConfig {
+    /// Formula or cask names that skip official Homebrew API existence checks.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+
+    /// Taps considered trusted when installing tap-qualified packages.
+    #[serde(default = "default_homebrew_trusted_taps")]
+    pub trusted_taps: Vec<String>,
+
+    /// Warn when `brew tap` or tap-qualified installs reference untrusted taps.
+    #[serde(default = "default_true")]
+    pub warn_untrusted_taps: bool,
+
+    /// Warn when cask quarantine is bypassed with `--no-quarantine`.
+    #[serde(default = "default_true")]
+    pub warn_no_quarantine: bool,
+
+    /// Block direct installs from URL/path formula files.
+    #[serde(default = "default_true")]
+    pub block_external_formula_installs: bool,
+
+    /// Warn when `brew bundle` reads an unaudited Brewfile.
+    #[serde(default = "default_true")]
+    pub warn_brewfile: bool,
+}
+
+impl Default for HomebrewConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            trusted_taps: default_homebrew_trusted_taps(),
+            warn_untrusted_taps: true,
+            warn_no_quarantine: true,
+            block_external_formula_installs: true,
+            warn_brewfile: true,
+        }
+    }
+}
+
+/// Default Homebrew taps considered trusted.
+#[must_use]
+pub fn default_homebrew_trusted_taps() -> Vec<String> {
+    vec![
+        "homebrew/core".to_owned(),
+        "homebrew/cask".to_owned(),
+        "homebrew/services".to_owned(),
+        "homebrew/bundle".to_owned(),
+    ]
 }
 
 /// Configuration for Docker image safety checks.
@@ -1132,6 +1190,42 @@ mod tests {
         assert!(allowlist.contains(&"esbuild".to_owned()));
         assert!(allowlist.contains(&"puppeteer".to_owned()));
         assert!(allowlist.contains(&"sharp".to_owned()));
+    }
+
+    #[test]
+    fn homebrew_config_default() {
+        let homebrew = HomebrewConfig::default();
+        assert!(homebrew.allowlist.is_empty());
+        assert!(homebrew.trusted_taps.contains(&"homebrew/core".to_owned()));
+        assert!(homebrew.trusted_taps.contains(&"homebrew/cask".to_owned()));
+        assert!(homebrew.warn_untrusted_taps);
+        assert!(homebrew.warn_no_quarantine);
+        assert!(homebrew.block_external_formula_installs);
+        assert!(homebrew.warn_brewfile);
+    }
+
+    #[test]
+    fn config_with_homebrew_section_deserializes() {
+        let toml_str = r#"
+            [sentinel.homebrew]
+            allowlist = ["internal-tool"]
+            trusted_taps = ["homebrew/core", "my-org/tap"]
+            warn_untrusted_taps = false
+            warn_no_quarantine = false
+            block_external_formula_installs = false
+            warn_brewfile = false
+        "#;
+        let config: SanctumConfig =
+            toml::from_str(toml_str).expect("config with Homebrew should parse");
+        assert_eq!(config.sentinel.homebrew.allowlist, vec!["internal-tool"]);
+        assert_eq!(
+            config.sentinel.homebrew.trusted_taps,
+            vec!["homebrew/core", "my-org/tap"]
+        );
+        assert!(!config.sentinel.homebrew.warn_untrusted_taps);
+        assert!(!config.sentinel.homebrew.warn_no_quarantine);
+        assert!(!config.sentinel.homebrew.block_external_formula_installs);
+        assert!(!config.sentinel.homebrew.warn_brewfile);
     }
 
     #[test]

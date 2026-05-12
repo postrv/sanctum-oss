@@ -172,6 +172,15 @@ exfiltration_host_allowlist = []
 # warn_source_installs = true            # warn about setup.py execution risk
 # require_binary_only = false            # set true to block pip install without --only-binary :all:
 
+[sentinel.homebrew]
+# Formula/cask names in allowlist skip official Homebrew API existence checks.
+allowlist = []
+trusted_taps = ["homebrew/core", "homebrew/cask", "homebrew/services", "homebrew/bundle"]
+warn_untrusted_taps = true               # warn on brew tap or owner/repo/formula outside trusted_taps
+warn_no_quarantine = true                # warn on cask --no-quarantine
+block_external_formula_installs = true   # block brew install URL/path formula files
+warn_brewfile = true                     # warn on brew bundle/Brewfile installs
+
 [ai_firewall]
 redact_credentials = true
 claude_hooks = true

@@ -140,6 +140,13 @@ watch_network = false  # opt-in: monitors outbound connections, may need tuning
 watch_npm = false
 pth_response = "quarantine"
 
+[sentinel.homebrew]
+trusted_taps = ["homebrew/core", "homebrew/cask", "homebrew/services", "homebrew/bundle"]
+warn_untrusted_taps = true
+warn_no_quarantine = true
+block_external_formula_installs = true
+warn_brewfile = true
+
 [ai_firewall]
 redact_credentials = true
 claude_hooks = true

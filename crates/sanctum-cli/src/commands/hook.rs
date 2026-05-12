@@ -12,7 +12,8 @@ use std::path::PathBuf;
 
 use sanctum_firewall::hooks::claude;
 use sanctum_firewall::hooks::claude::{
-    CargoConfig, DockerConfig, GoConfig, NpmConfig, PackageManagerConfigs, PipConfig,
+    CargoConfig, DockerConfig, GoConfig, HomebrewConfig, NpmConfig, PackageManagerConfigs,
+    PipConfig,
 };
 use sanctum_firewall::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use sanctum_firewall::mcp::audit::McpAuditLog;
@@ -535,6 +536,168 @@ fn load_pip_config() -> PipConfig {
     }
 }
 
+/// Load `HomebrewConfig` from the config file (best-effort).
+///
+/// Reads the `[sentinel.homebrew]` section. Returns defaults if unavailable.
+#[allow(clippy::too_many_lines)]
+fn load_homebrew_config() -> HomebrewConfig {
+    let config_path = {
+        let local = std::path::PathBuf::from(".sanctum/config.toml");
+        if local.exists() {
+            Some((local, true))
+        } else {
+            let paths = sanctum_types::paths::WellKnownPaths::default();
+            let global = paths.config_dir.join("config.toml");
+            if global.exists() {
+                Some((global, false))
+            } else {
+                None
+            }
+        }
+    };
+
+    let Some((path, is_local)) = config_path else {
+        return HomebrewConfig::default();
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to read Homebrew config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            return HomebrewConfig::default();
+        }
+    };
+
+    match toml::from_str::<sanctum_types::config::SanctumConfig>(&content) {
+        Ok(cfg) => {
+            let mut allowlist: Vec<String> = cfg
+                .sentinel
+                .homebrew
+                .allowlist
+                .into_iter()
+                .filter(|a| {
+                    let valid = is_valid_homebrew_config_name(a);
+                    if !valid {
+                        tracing::warn!(
+                            entry = %a,
+                            "ignoring invalid Homebrew allowlist entry"
+                        );
+                    }
+                    valid
+                })
+                .collect();
+
+            let mut trusted_taps: Vec<String> = cfg
+                .sentinel
+                .homebrew
+                .trusted_taps
+                .into_iter()
+                .filter(|tap| {
+                    let valid = is_valid_homebrew_tap_name(tap);
+                    if !valid {
+                        tracing::warn!(
+                            tap = %tap,
+                            "ignoring invalid Homebrew trusted tap"
+                        );
+                    }
+                    valid
+                })
+                .collect();
+
+            if is_local && allowlist.len() > MAX_LOCAL_ALLOWLIST_SIZE {
+                tracing::warn!(
+                    count = allowlist.len(),
+                    max = MAX_LOCAL_ALLOWLIST_SIZE,
+                    "project-local Homebrew allowlist truncated to {MAX_LOCAL_ALLOWLIST_SIZE} entries"
+                );
+                allowlist.truncate(MAX_LOCAL_ALLOWLIST_SIZE);
+            }
+            if is_local && trusted_taps.len() > MAX_LOCAL_ALLOWLIST_SIZE {
+                tracing::warn!(
+                    count = trusted_taps.len(),
+                    max = MAX_LOCAL_ALLOWLIST_SIZE,
+                    "project-local Homebrew trusted_taps truncated to {MAX_LOCAL_ALLOWLIST_SIZE} entries"
+                );
+                trusted_taps.truncate(MAX_LOCAL_ALLOWLIST_SIZE);
+            }
+
+            HomebrewConfig {
+                allowlist,
+                trusted_taps,
+                warn_untrusted_taps: if is_local {
+                    true
+                } else {
+                    cfg.sentinel.homebrew.warn_untrusted_taps
+                },
+                warn_no_quarantine: if is_local {
+                    true
+                } else {
+                    cfg.sentinel.homebrew.warn_no_quarantine
+                },
+                block_external_formula_installs: if is_local {
+                    true
+                } else {
+                    cfg.sentinel.homebrew.block_external_formula_installs
+                },
+                warn_brewfile: if is_local {
+                    true
+                } else {
+                    cfg.sentinel.homebrew.warn_brewfile
+                },
+            }
+        }
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to parse Homebrew config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            HomebrewConfig::default()
+        }
+    }
+}
+
+fn is_valid_homebrew_config_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && !name.starts_with('.')
+        && !name.starts_with('-')
+        && !name.contains("..")
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || b == b'-'
+                || b == b'_'
+                || b == b'.'
+                || b == b'@'
+                || b == b'+'
+        })
+}
+
+fn is_valid_homebrew_tap_name(tap: &str) -> bool {
+    let mut parts = tap.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(repo) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() || owner.is_empty() || repo.is_empty() {
+        return false;
+    }
+    tap.len() <= 256
+        && tap
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'/')
+}
+
 /// Load `DockerConfig` from the config file (best-effort).
 ///
 /// Reads the `[ai_firewall.docker]` section. Returns defaults if unavailable.
@@ -900,6 +1063,7 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
 
     let cargo_config = load_cargo_config();
     let pip_config = load_pip_config();
+    let homebrew_config = load_homebrew_config();
     let docker_config = load_docker_config();
 
     let pkg_configs = PackageManagerConfigs {
@@ -907,6 +1071,7 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
         go: go_config,
         cargo: cargo_config,
         pip: pip_config,
+        homebrew: homebrew_config,
         docker: docker_config,
     };
 

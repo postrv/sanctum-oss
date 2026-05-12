@@ -47,7 +47,7 @@ Actions:
 
 ### Slopsquatting and install-time code execution
 
-AI coding assistants hallucinate package names. Sanctum checks every `npm install`, `pip install`, `go get`, and `cargo add` command against the real registry before execution. Non-existent packages are blocked -- stopping typosquatting and AI-hallucinated package installs before they run.
+AI coding assistants hallucinate package names. Sanctum checks every `npm install`, `pip install`, `go get`, `cargo add`, and `brew install` command against the real registry before execution. Non-existent packages are blocked -- stopping typosquatting and AI-hallucinated package installs before they run.
 
 Beyond existence checks, Sanctum enforces install-time safety across ecosystems:
 
@@ -56,6 +56,7 @@ Beyond existence checks, Sanctum enforces install-time safety across ecosystems:
 | **npm** | Blocks installs without `--ignore-scripts` (the axios attack vector) |
 | **pip** | Warns/blocks installs without `--only-binary :all:` (prevents `setup.py` execution) |
 | **Cargo** | Warns when new crates with `build.rs` are downloaded at compile time |
+| **Homebrew** | Verifies official formulae/casks, warns on untrusted taps and Brewfiles, blocks direct URL/path formula installs |
 | **Docker** | Warns on `:latest`/untagged images, untrusted registries, and unsafe Dockerfile patterns |
 
 Shell-aware command splitting detects chained commands (`cd /tmp && npm install evil`) that would otherwise bypass detection.
@@ -106,7 +107,7 @@ This installs five hook handlers:
 
 | Hook | What it does |
 |------|-------------|
-| `pre-bash` | Blocks credential access, env var exfiltration, slopsquatting, dangerous commands, Docker image safety |
+| `pre-bash` | Blocks credential access, env var exfiltration, slopsquatting, dangerous package-manager patterns, Docker image safety |
 | `pre-write` | Prevents writes to sensitive paths, detects credential injection, Dockerfile linting |
 | `pre-read` | Blocks reads of SSH keys, cloud credentials, private keys |
 | `pre-mcp` | Enforces MCP tool policies, audits all invocations |
@@ -164,11 +165,18 @@ pth_response = "quarantine"       # quarantine | alert | log
 # warn_source_installs = true     # warn about setup.py execution risk
 # require_binary_only = false     # set true to block pip without --only-binary :all:
 
+[sentinel.homebrew]
+trusted_taps = ["homebrew/core", "homebrew/cask", "homebrew/services", "homebrew/bundle"]
+warn_untrusted_taps = true        # warn on brew tap or owner/repo/formula outside trusted_taps
+warn_no_quarantine = true         # warn on cask --no-quarantine
+block_external_formula_installs = true
+warn_brewfile = true              # warn on brew bundle/Brewfile installs
+
 [ai_firewall]
 redact_credentials = true
 claude_hooks = true
 mcp_audit = true
-check_package_existence = true    # slopsquatting detection (npm, pip, go, cargo)
+check_package_existence = true    # slopsquatting detection (npm, pip, go, cargo, brew)
 
 [[ai_firewall.mcp_rules]]
 tool = "filesystem_write"
@@ -281,14 +289,14 @@ Sanctum does **not** require nono. Each tool provides independent value.
 
 ## Architecture
 
-8 crates, ~51,000 lines of Rust, 5 ecosystem integrations (npm, pip, Go, Cargo, Docker):
+8 crates, ~51,000 lines of Rust, 6 ecosystem integrations (npm, pip, Go, Cargo, Homebrew, Docker):
 
 | Crate | Purpose |
 |-------|---------|
 | `sanctum-cli` | CLI interface -- 14 commands via clap |
 | `sanctum-daemon` | Background daemon, IPC server (14 commands), event loop |
 | `sanctum-sentinel` | `.pth` monitoring, quarantine, credential watching, network anomaly detection |
-| `sanctum-firewall` | Credential redaction (37 patterns), Shannon entropy, MCP policy engine, slopsquatting detection (4 registries), Docker image safety |
+| `sanctum-firewall` | Credential redaction (37 patterns), Shannon entropy, MCP policy engine, slopsquatting detection (5 registries), package-manager safety checks |
 | `sanctum-budget` | Spend tracking, 3 provider parsers (OpenAI, Anthropic, Google) |
 | `sanctum-proxy` | HTTP budget proxy with body limits, credential redaction, budget enforcement, SSRF prevention, and usage extraction |
 | `sanctum-types` | Shared types, config schema, threat model, platform paths |

@@ -123,16 +123,18 @@
 +----------------------------------------------------------+
 | TRUSTED: Sanctum CLI / hook processes                    |
 |  - Short-lived processes invoked per tool call            |
-|  - pre-bash makes HTTPS HEAD requests to npm/PyPI        |
-|    registries for slopsquatting detection (fail-open)     |
+|  - pre-bash makes HTTPS HEAD requests to package         |
+|    registries/APIs for slopsquatting detection           |
+|    (fail-open)                                           |
 |  - Communicate with daemon via local Unix socket          |
 |  - Write audit events directly to NDJSON log             |
 |  - Uses reqwest with rustls-tls (no system OpenSSL)      |
 +----------------------------------------------------------+
 
 +----------------------------------------------------------+
-| UNTRUSTED: Packages installed via pip/npm/etc            |
+| UNTRUSTED: Packages installed via pip/npm/brew/etc       |
 |  - May contain malicious .pth files                      |
+|  - May execute install/post-install scripts              |
 |  - May attempt credential exfiltration                   |
 |  - May create persistent backdoors                       |
 +----------------------------------------------------------+
@@ -156,4 +158,8 @@
 
 ### Residual risk: hook fail-open behavior
 
-The pre-bash hook makes HTTPS HEAD requests to npm and PyPI registries to verify package existence before install (slopsquatting detection). These checks are fail-open by design: if the registry is unreachable (DNS poisoning, network blocking, timeout), the install proceeds with a warning. An attacker who can influence DNS resolution or block outbound HTTPS to registry.npmjs.org/pypi.org can force all checks to fail open, effectively disabling slopsquatting protection. The reqwest dependency (with rustls-tls) adds to the supply chain attack surface — audited in DEPENDENCY_AUDIT.md.
+The pre-bash hook makes HTTPS HEAD requests to npm, PyPI, Go, crates.io, and Homebrew formula/cask APIs to verify package existence before install (slopsquatting detection). These checks are fail-open by design: if the registry is unreachable (DNS poisoning, network blocking, timeout), the install proceeds with a warning. An attacker who can influence DNS resolution or block outbound HTTPS to registry.npmjs.org, pypi.org, proxy.golang.org, index.crates.io, or formulae.brew.sh can force checks to fail open, reducing slopsquatting protection. The reqwest dependency (with rustls-tls) adds to the supply chain attack surface -- audited in DEPENDENCY_AUDIT.md.
+
+### Residual risk: Homebrew formula and cask execution
+
+Homebrew formulae and casks are Ruby definitions that may run install and post-install logic. Sanctum's hook layer verifies official core/cask tokens through the Homebrew API, warns on untrusted taps, warns when `--no-quarantine` bypasses macOS quarantine for casks, warns on `brew bundle` because Brewfiles can add taps and packages in bulk, and blocks direct URL/path formula installs by default. This is not a Homebrew sandbox: a malicious formula from a trusted tap or a compromised upstream bottle can still execute with the user's privileges once the developer chooses to proceed.

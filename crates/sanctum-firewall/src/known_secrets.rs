@@ -20,7 +20,9 @@ pub const HMAC_KEY_FILE: &str = "hmac_key";
 const HMAC_KEY_BYTES: usize = 32;
 const MAX_DENYLIST_ENTRIES: usize = 10_000;
 const MAX_DENYLIST_BYTES: u64 = 1_048_576;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const KEYRING_SERVICE: &str = "sanctum";
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const KEYRING_USER: &str = "hmac-key";
 
 type HmacSha256 = Hmac<Sha256>;

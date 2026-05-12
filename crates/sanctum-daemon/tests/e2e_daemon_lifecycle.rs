@@ -258,8 +258,7 @@ mod sanctum_daemon_test_helpers {
         }
         #[cfg(not(unix))]
         {
-            let _ = pid;
-            false
+            pid == std::process::id()
         }
     }
 }

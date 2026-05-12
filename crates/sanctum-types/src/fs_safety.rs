@@ -180,6 +180,9 @@ fn fchmod_mode(file: &File, mode: u32) -> io::Result<()> {
     {
         use std::os::unix::io::AsRawFd;
 
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let mode_bits = mode;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let mode_bits = mode.try_into().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "file mode is out of range")
         })?;

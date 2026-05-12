@@ -428,7 +428,7 @@ fn run_powershell_json(script: &str, timeout: std::time::Duration) -> Option<Str
     }
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn parse_windows_process_json(json: &str) -> Option<ProcessInfo> {
     let value: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
     if value.is_null() {

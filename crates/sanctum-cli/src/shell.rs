@@ -11,6 +11,8 @@ pub enum Shell {
     Bash,
     Zsh,
     Fish,
+    #[allow(clippy::enum_variant_names)]
+    PowerShell,
 }
 
 /// Generate the shell hook for the given shell.
@@ -20,6 +22,7 @@ pub fn generate_shell_hook(shell: Shell) -> String {
         Shell::Zsh => generate_zsh_hook(),
         Shell::Bash => generate_bash_hook(),
         Shell::Fish => generate_fish_hook(),
+        Shell::PowerShell => generate_powershell_hook(),
     }
 }
 
@@ -79,6 +82,21 @@ end
     .to_string()
 }
 
+fn generate_powershell_hook() -> String {
+    r"# Sanctum PowerShell hook — add to $PROFILE:
+#   sanctum init --shell powershell | Invoke-Expression
+
+if (-not $env:SANCTUM_ACTIVE) {
+    $null = sanctum daemon status 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Start-Process -WindowStyle Hidden sanctum -ArgumentList @('daemon', 'start') | Out-Null
+    }
+    $env:SANCTUM_ACTIVE = '1'
+}
+"
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +123,13 @@ mod tests {
     fn fish_hook_contains_daemon_auto_start() {
         let hook = generate_shell_hook(Shell::Fish);
         assert!(hook.contains("sanctum daemon start"));
+    }
+
+    #[test]
+    fn powershell_hook_contains_daemon_auto_start() {
+        let hook = generate_shell_hook(Shell::PowerShell);
+        assert!(hook.contains("sanctum daemon status"));
+        assert!(hook.contains("Start-Process"));
+        assert!(hook.contains("SANCTUM_ACTIVE"));
     }
 }

@@ -7,11 +7,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use tokio::net::UnixStream;
-
 use sanctum_types::errors::CliError;
 use sanctum_types::ipc::IpcMessage;
 pub use sanctum_types::ipc::{IpcCommand, IpcResponse, ProviderBudgetInfo, ThreatListItem};
+use sanctum_types::ipc_transport::{self, IpcEndpoint};
 
 /// Maximum time to wait for a complete IPC round-trip (connect + write + read).
 const IPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -28,14 +27,37 @@ const IPC_TIMEOUT: Duration = Duration::from_secs(10);
 /// Returns `CliError::ConnectionFailed` on communication errors.
 pub fn send_command(command: &IpcCommand) -> Result<IpcResponse, CliError> {
     let paths = sanctum_types::paths::WellKnownPaths::default();
-    let socket_path = &paths.socket_path;
+    send_command_to_endpoint(&paths.ipc_endpoint(), command)
+}
 
-    if !socket_path.exists() {
+/// Like [`send_command`], but connects to an explicit socket path instead of
+/// the default well-known location.  Useful for testing without depending on
+/// whether the real daemon is running.
+#[allow(dead_code)]
+pub fn send_command_to_path(
+    socket_path: &Path,
+    command: &IpcCommand,
+) -> Result<IpcResponse, CliError> {
+    send_command_to_endpoint(&IpcEndpoint::Unix(socket_path.to_path_buf()), command)
+}
+
+/// Like [`send_command`], but connects to an explicit endpoint.
+pub fn send_command_to_endpoint(
+    endpoint: &IpcEndpoint,
+    command: &IpcCommand,
+) -> Result<IpcResponse, CliError> {
+    if endpoint
+        .as_unix_path()
+        .is_some_and(|socket_path| !socket_path.exists())
+    {
         return Err(CliError::DaemonNotRunning);
     }
 
-    // Read auth token if the command requires authentication
+    // Read auth token if the command requires authentication.
+    // When using a custom path the token lookup still uses the default data dir;
+    // this keeps the public API simple while covering the production path.
     let auth_token = if command.requires_auth() {
+        let paths = sanctum_types::paths::WellKnownPaths::default();
         match sanctum_types::auth::read_token(&paths.data_dir) {
             Ok(token) => Some(token),
             Err(e) => {
@@ -53,7 +75,7 @@ pub fn send_command(command: &IpcCommand) -> Result<IpcResponse, CliError> {
     runtime.block_on(async {
         tokio::time::timeout(
             IPC_TIMEOUT,
-            send_command_async(socket_path, command, auth_token),
+            send_command_async(endpoint, command, auth_token),
         )
         .await
         .map_err(|_| CliError::ConnectionFailed("IPC operation timed out after 10s".to_owned()))?
@@ -61,11 +83,11 @@ pub fn send_command(command: &IpcCommand) -> Result<IpcResponse, CliError> {
 }
 
 async fn send_command_async(
-    socket_path: &Path,
+    endpoint: &IpcEndpoint,
     command: &IpcCommand,
     auth_token: Option<String>,
 ) -> Result<IpcResponse, CliError> {
-    let mut stream = UnixStream::connect(socket_path)
+    let mut stream = ipc_transport::connect_async(endpoint)
         .await
         .map_err(|e| CliError::ConnectionFailed(format!("failed to connect to daemon: {e}")))?;
 

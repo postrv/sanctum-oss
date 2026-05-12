@@ -13,8 +13,11 @@
 //! - **MCP audit and policy**: Logs and enforces policy on MCP tool invocations.
 
 pub mod allowlist;
+pub mod dummy_registry;
 pub mod entropy;
 pub mod hooks;
+pub mod known_secrets;
 pub mod mcp;
+pub mod package_policy;
 pub mod patterns;
 pub mod redaction;

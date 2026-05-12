@@ -2,7 +2,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use sanctum_firewall::hooks::claude::{post_bash, pre_bash, pre_read, pre_write};
-use sanctum_firewall::hooks::protocol::HookInput;
+use sanctum_firewall::hooks::protocol::{HookInput, SecretPolicyContext};
 
 fn make_hook_input(tool_name: &str, tool_input: serde_json::Value) -> HookInput {
     HookInput {
@@ -10,6 +10,7 @@ fn make_hook_input(tool_name: &str, tool_input: serde_json::Value) -> HookInput 
         tool_input,
         config: None,
         entropy_allowlist: Vec::new(),
+        secret_policy: SecretPolicyContext::default(),
     }
 }
 

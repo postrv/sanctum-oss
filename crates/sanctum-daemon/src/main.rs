@@ -29,7 +29,8 @@ mod ipc;
 
 use context::EventLoopContext;
 use ipc::{
-    IpcCommand, IpcResponse, IpcServer, ProviderBudgetInfo, QuarantineListItem, ThreatListItem,
+    DummyListItem, IpcCommand, IpcResponse, IpcServer, ProviderBudgetInfo, QuarantineListItem,
+    ThreatListItem,
 };
 use sanctum_types::auth;
 
@@ -281,30 +282,11 @@ async fn run_daemon(
         });
     }
 
-    // Register signal handlers
-    let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(%e, "failed to register SIGTERM handler");
-            return ExitCode::FAILURE;
-        }
-    };
-    let mut sigint = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-    {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(%e, "failed to register SIGINT handler");
-            return ExitCode::FAILURE;
-        }
-    };
-    let mut sighup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(%e, "failed to register SIGHUP handler");
-            return ExitCode::FAILURE;
-        }
-    };
+    // Register signal handlers into platform-neutral channels.
+    let (sigterm_tx, mut sigterm) = tokio::sync::mpsc::channel(1);
+    let (sigint_tx, mut sigint) = tokio::sync::mpsc::channel(1);
+    let (sighup_tx, mut sighup) = tokio::sync::mpsc::channel(1);
+    register_signal_forwarders(sigterm_tx, sigint_tx, sighup_tx);
 
     let ipc_semaphore = Arc::new(Semaphore::new(MAX_IPC_CONNECTIONS));
 
@@ -348,6 +330,51 @@ async fn run_daemon(
     save_budget_state(&shared_budget, &paths.data_dir, &budget_state_path).await;
 
     ExitCode::SUCCESS
+}
+
+fn register_signal_forwarders(
+    sigterm_tx: tokio::sync::mpsc::Sender<()>,
+    sigint_tx: tokio::sync::mpsc::Sender<()>,
+    sighup_tx: tokio::sync::mpsc::Sender<()>,
+) {
+    #[cfg(unix)]
+    {
+        tokio::spawn(async move {
+            if let Ok(mut signal) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                let _ = signal.recv().await;
+                let _ = sigterm_tx.send(()).await;
+            }
+        });
+        tokio::spawn(async move {
+            if let Ok(mut signal) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            {
+                let _ = signal.recv().await;
+                let _ = sigint_tx.send(()).await;
+            }
+        });
+        tokio::spawn(async move {
+            if let Ok(mut signal) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            {
+                let _ = signal.recv().await;
+                let _ = sighup_tx.send(()).await;
+            }
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = sigterm_tx;
+        let _ = sighup_tx;
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = sigint_tx.send(()).await;
+            }
+        });
+    }
 }
 
 /// Discover site-packages directories and start the .pth file watcher.
@@ -809,6 +836,24 @@ async fn handle_ipc_command(
                 }
             }
         }
+        IpcCommand::DummyMint {
+            provider,
+            label,
+            hash,
+            allowed_paths,
+            require_marker,
+        } => handle_dummy_mint(
+            &paths,
+            &provider,
+            &label,
+            &hash,
+            allowed_paths,
+            require_marker,
+        ),
+        IpcCommand::DummyList => handle_dummy_list(&paths),
+        IpcCommand::DummyRevoke { label, hash_prefix } => {
+            handle_dummy_revoke(&paths, label.as_deref(), hash_prefix.as_deref())
+        }
     };
 
     conn.send_response(&response).await?;
@@ -823,6 +868,94 @@ async fn handle_ipc_command(
     }
 
     Ok(())
+}
+
+fn handle_dummy_mint(
+    paths: &WellKnownPaths,
+    provider: &str,
+    label: &str,
+    hash: &str,
+    allowed_paths: Vec<String>,
+    require_marker: bool,
+) -> IpcResponse {
+    let path = sanctum_firewall::dummy_registry::registry_path(&paths.data_dir);
+    let mut registry = match sanctum_firewall::dummy_registry::load_registry(&path) {
+        Ok(registry) => registry,
+        Err(e) => {
+            return IpcResponse::Error {
+                message: format!("failed to load dummy registry: {e}"),
+            };
+        }
+    };
+    match registry.insert_hash(hash, provider, label, allowed_paths, require_marker) {
+        Ok(entry) => match sanctum_firewall::dummy_registry::save_registry(&path, &registry) {
+            Ok(()) => IpcResponse::Ok {
+                message: format!(
+                    "dummy secret '{}' registered (hash {})",
+                    entry.label,
+                    entry.hash_prefix()
+                ),
+            },
+            Err(e) => IpcResponse::Error {
+                message: format!("failed to save dummy registry: {e}"),
+            },
+        },
+        Err(e) => IpcResponse::Error {
+            message: format!("failed to register dummy secret: {e}"),
+        },
+    }
+}
+
+fn handle_dummy_list(paths: &WellKnownPaths) -> IpcResponse {
+    let path = sanctum_firewall::dummy_registry::registry_path(&paths.data_dir);
+    match sanctum_firewall::dummy_registry::load_registry(&path) {
+        Ok(registry) => IpcResponse::DummyList {
+            items: registry
+                .entries
+                .iter()
+                .map(|entry| DummyListItem {
+                    label: entry.label.clone(),
+                    provider: entry.provider.clone(),
+                    hash_prefix: entry.hash_prefix().to_owned(),
+                    allowed_paths: entry.allowed_paths.clone(),
+                    require_marker: entry.require_marker,
+                })
+                .collect(),
+        },
+        Err(e) => IpcResponse::Error {
+            message: format!("failed to load dummy registry: {e}"),
+        },
+    }
+}
+
+fn handle_dummy_revoke(
+    paths: &WellKnownPaths,
+    label: Option<&str>,
+    hash_prefix: Option<&str>,
+) -> IpcResponse {
+    if label.is_none() && hash_prefix.is_none() {
+        return IpcResponse::Error {
+            message: "dummy revoke requires label or hash prefix".to_owned(),
+        };
+    }
+    let path = sanctum_firewall::dummy_registry::registry_path(&paths.data_dir);
+    let mut registry = match sanctum_firewall::dummy_registry::load_registry(&path) {
+        Ok(registry) => registry,
+        Err(e) => {
+            return IpcResponse::Error {
+                message: format!("failed to load dummy registry: {e}"),
+            };
+        }
+    };
+    let removed = registry.revoke(label, hash_prefix);
+    match sanctum_firewall::dummy_registry::save_registry(&path, &registry) {
+        Ok(()) => IpcResponse::Ok {
+            message: format!("removed {removed} dummy secret entries"),
+        },
+        Err(e) => IpcResponse::Error {
+            message: format!("failed to save dummy registry: {e}"),
+        },
+    }
 }
 
 /// List quarantine entries and return the IPC response.
@@ -1363,21 +1496,24 @@ async fn reload_shared_config(shared_config: &Arc<RwLock<SanctumConfig>>) {
 fn handle_stop(paths: &WellKnownPaths) -> ExitCode {
     let manager = daemon::DaemonManager::new(paths.pid_file.clone());
     match manager.check_existing() {
-        Ok(Some(pid)) => {
-            let Ok(raw_pid) = i32::try_from(pid) else {
-                tracing::error!(pid, "PID exceeds i32::MAX, cannot send signal");
-                return ExitCode::FAILURE;
-            };
-            tracing::info!(pid, "sending SIGTERM to daemon");
-            #[cfg(unix)]
-            {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(raw_pid),
-                    nix::sys::signal::Signal::SIGTERM,
-                );
+        Ok(Some(pid)) => match send_control_command(paths, IpcCommand::Shutdown) {
+            Ok(IpcResponse::Ok { message }) => {
+                tracing::info!(pid, %message, "daemon accepted graceful shutdown");
+                ExitCode::SUCCESS
             }
-            ExitCode::SUCCESS
-        }
+            Ok(response) => {
+                tracing::warn!(
+                    pid,
+                    ?response,
+                    "daemon rejected graceful shutdown; falling back to process termination"
+                );
+                terminate_daemon_process(pid)
+            }
+            Err(e) => {
+                tracing::warn!(pid, %e, "failed to request graceful shutdown; falling back to process termination");
+                terminate_daemon_process(pid)
+            }
+        },
         Ok(None) => {
             tracing::info!("no daemon is running");
             ExitCode::SUCCESS
@@ -1398,21 +1534,24 @@ const MAX_IPC_CONNECTIONS: usize = 64;
 fn handle_reload(paths: &WellKnownPaths) -> ExitCode {
     let manager = daemon::DaemonManager::new(paths.pid_file.clone());
     match manager.check_existing() {
-        Ok(Some(pid)) => {
-            let Ok(raw_pid) = i32::try_from(pid) else {
-                tracing::error!(pid, "PID exceeds i32::MAX, cannot send signal");
-                return ExitCode::FAILURE;
-            };
-            tracing::info!(pid, "sending SIGHUP to daemon");
-            #[cfg(unix)]
-            {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(raw_pid),
-                    nix::sys::signal::Signal::SIGHUP,
-                );
+        Ok(Some(pid)) => match send_control_command(paths, IpcCommand::ReloadConfig) {
+            Ok(IpcResponse::Ok { message }) => {
+                tracing::info!(pid, %message, "daemon reloaded configuration via IPC");
+                ExitCode::SUCCESS
             }
-            ExitCode::SUCCESS
-        }
+            Ok(response) => {
+                tracing::warn!(
+                    pid,
+                    ?response,
+                    "daemon rejected IPC reload; trying platform fallback"
+                );
+                reload_daemon_process(pid)
+            }
+            Err(e) => {
+                tracing::warn!(pid, %e, "failed to request IPC reload; trying platform fallback");
+                reload_daemon_process(pid)
+            }
+        },
         Ok(None) => {
             tracing::error!("no daemon is running");
             ExitCode::FAILURE
@@ -1421,6 +1560,122 @@ fn handle_reload(paths: &WellKnownPaths) -> ExitCode {
             tracing::error!(%e, "failed to check daemon status");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn send_control_command(
+    paths: &WellKnownPaths,
+    command: IpcCommand,
+) -> Result<IpcResponse, String> {
+    let auth_token = if command.requires_auth() {
+        Some(auth::read_token(&paths.data_dir).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let endpoint = paths.ipc_endpoint();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async move {
+        let mut stream = sanctum_types::ipc_transport::connect_async(&endpoint)
+            .await
+            .map_err(|e| e.to_string())?;
+        let message = sanctum_types::ipc::IpcMessage {
+            command,
+            auth_token,
+        };
+        let payload = serde_json::to_vec(&message).map_err(|e| e.to_string())?;
+        sanctum_types::ipc::write_frame(&mut stream, &payload)
+            .await
+            .map_err(|e| e.to_string())?;
+        let response_payload = sanctum_types::ipc::read_frame(&mut stream)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::from_slice(&response_payload).map_err(|e| e.to_string())
+    })
+}
+
+fn terminate_daemon_process(pid: u32) -> ExitCode {
+    #[cfg(unix)]
+    {
+        let Ok(raw_pid) = i32::try_from(pid) else {
+            tracing::error!(pid, "PID exceeds i32::MAX, cannot send signal");
+            return ExitCode::FAILURE;
+        };
+        tracing::info!(pid, "sending SIGTERM to daemon");
+        match nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(raw_pid),
+            nix::sys::signal::Signal::SIGTERM,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(pid, %e, "failed to send SIGTERM to daemon");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        tracing::info!(pid, "stopping daemon process with taskkill fallback");
+        match std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .status()
+        {
+            Ok(status) if status.success() => ExitCode::SUCCESS,
+            Ok(status) => {
+                tracing::error!(pid, %status, "taskkill failed");
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                tracing::error!(pid, %e, "failed to run taskkill");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        tracing::error!("process termination is unsupported on this platform");
+        ExitCode::FAILURE
+    }
+}
+
+fn reload_daemon_process(pid: u32) -> ExitCode {
+    #[cfg(unix)]
+    {
+        let Ok(raw_pid) = i32::try_from(pid) else {
+            tracing::error!(pid, "PID exceeds i32::MAX, cannot send signal");
+            return ExitCode::FAILURE;
+        };
+        tracing::info!(pid, "sending SIGHUP to daemon");
+        match nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(raw_pid),
+            nix::sys::signal::Signal::SIGHUP,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                tracing::error!(pid, %e, "failed to send SIGHUP to daemon");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        tracing::error!("daemon reload on Windows requires IPC; no signal fallback is available");
+        ExitCode::FAILURE
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        tracing::error!("daemon reload is unsupported on this platform");
+        ExitCode::FAILURE
     }
 }
 

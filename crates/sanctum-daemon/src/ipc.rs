@@ -9,14 +9,14 @@
 //! [4 bytes big-endian length][JSON payload]
 //! ```
 
-use std::path::{Path, PathBuf};
-
-use tokio::net::{UnixListener, UnixStream};
+use std::path::Path;
 
 use sanctum_types::errors::DaemonError;
 pub use sanctum_types::ipc::{
-    IpcCommand, IpcMessage, IpcResponse, ProviderBudgetInfo, QuarantineListItem, ThreatListItem,
+    DummyListItem, IpcCommand, IpcMessage, IpcResponse, ProviderBudgetInfo, QuarantineListItem,
+    ThreatListItem,
 };
+use sanctum_types::ipc_transport::{AsyncIpcStream, IpcEndpoint, IpcListener};
 
 // ============================================================
 // Rate limiter (per-connection token bucket)
@@ -93,8 +93,8 @@ impl RateLimiter {
 
 /// IPC server that listens for commands from the CLI.
 pub struct IpcServer {
-    listener: UnixListener,
-    socket_path: PathBuf,
+    listener: IpcListener,
+    endpoint: IpcEndpoint,
 }
 
 impl IpcServer {
@@ -106,20 +106,10 @@ impl IpcServer {
     ///
     /// Returns an error if the socket cannot be bound.
     pub fn bind(socket_path: &Path) -> Result<Self, DaemonError> {
-        // Remove stale socket file if it exists (atomic try-remove avoids TOCTOU)
-        match std::fs::remove_file(socket_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(DaemonError::Ipc(format!(
-                    "failed to remove stale socket {}: {e}",
-                    socket_path.display()
-                )));
-            }
-        }
+        let endpoint = IpcEndpoint::platform_default(socket_path.to_path_buf());
 
         // Ensure parent directory exists
-        if let Some(parent) = socket_path.parent() {
+        if let Some(parent) = endpoint.as_unix_path().and_then(Path::parent) {
             std::fs::create_dir_all(parent).map_err(|e| {
                 DaemonError::Ipc(format!(
                     "failed to create socket directory {}: {e}",
@@ -137,34 +127,29 @@ impl IpcServer {
             }
         }
 
-        let listener = UnixListener::bind(socket_path).map_err(|e| {
-            DaemonError::Ipc(format!(
-                "failed to bind socket {}: {e}",
-                socket_path.display()
-            ))
-        })?;
+        let listener = IpcListener::bind(&endpoint)
+            .map_err(|e| DaemonError::Ipc(format!("failed to bind IPC {endpoint}: {e}")))?;
 
         // Set owner-only permissions on the socket file
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(e) =
-                std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
-            {
-                tracing::warn!(
-                    path = %socket_path.display(),
-                    %e,
-                    "failed to set socket permissions"
-                );
+            if let Some(path) = endpoint.as_unix_path() {
+                if let Err(e) =
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %e,
+                        "failed to set socket permissions"
+                    );
+                }
             }
         }
 
-        tracing::info!(path = %socket_path.display(), "IPC server listening");
+        tracing::info!(endpoint = %listener.local_addr_display(), "IPC server listening");
 
-        Ok(Self {
-            listener,
-            socket_path: socket_path.to_path_buf(),
-        })
+        Ok(Self { listener, endpoint })
     }
 
     /// Accept the next incoming connection.
@@ -173,7 +158,7 @@ impl IpcServer {
     ///
     /// Returns an error if accept fails.
     pub async fn accept(&self) -> Result<IpcConnection, DaemonError> {
-        let (stream, _) = self
+        let stream = self
             .listener
             .accept()
             .await
@@ -187,13 +172,15 @@ impl IpcServer {
 
 impl Drop for IpcServer {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket_path);
+        if let Some(path) = self.endpoint.as_unix_path() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
 /// A single IPC connection (one CLI client).
 pub struct IpcConnection {
-    stream: UnixStream,
+    stream: Box<dyn AsyncIpcStream>,
     rate_limiter: RateLimiter,
 }
 
@@ -231,12 +218,13 @@ impl IpcConnection {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use sanctum_types::ipc::MAX_MESSAGE_SIZE;
     use tokio::io::AsyncWriteExt;
+    use tokio::net::UnixStream;
 
     #[tokio::test]
     async fn ipc_roundtrip_status_command() {

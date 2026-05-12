@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-13
+
+### Security
+- Added a three-tier secret policy for known-real, registered dummy, and unknown-suspicious credentials so real local secrets always block while marked test fixtures can pass safely.
+- Added HMAC-SHA256 known-secret denylist support with explicit opt-in population and secure local key storage.
+- Hardened Windows IPC with first-instance named pipes, current-user DACLs, authenticated shutdown, and private token-file ACLs.
+- Added Java/.NET ecosystem protection for NuGet, Maven, and Gradle package resolution risks.
+
+### Added
+- Windows platform foundation: named-pipe IPC, PowerShell shell hooks, Windows service lifecycle commands, Windows paths, and Windows CI/release artifacts.
+- Dummy secret registry and `sanctum dummy` CLI for generating, minting, listing, and revoking approved fixture credentials.
+- Mockable package-policy engine with NuGet, Maven, Gradle, npm/pnpm/yarn/bun, pip, Go, Cargo, Homebrew, and Docker regression coverage.
+- Windows sentinel backends for process lineage and network collection using bounded PowerShell parsing.
+
+### Fixed
+- Prevented entropy allowlists from bypassing regex-pattern credential matches.
+- Replaced shell `curl` registry checks with cross-platform HTTP checkers and test doubles.
+- Added fail-closed parsing and persistence hardening for dummy-secret and known-secret stores.
+
 ## [0.4.2] - 2026-05-12
 
 ### Security

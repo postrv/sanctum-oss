@@ -19,1059 +19,15 @@
 
 use std::collections::HashSet;
 
-use crate::hooks::protocol::{HookDecision, HookInput, HookOutput};
+use crate::hooks::protocol::{HookDecision, HookInput, HookOutput, SecretPolicyContext};
 use crate::mcp::audit::McpAuditLog;
 use crate::mcp::policy::McpPolicy;
+#[allow(clippy::wildcard_imports)]
+use crate::package_policy::*;
 use crate::redaction::{
-    redact_credentials_with_config, DEFAULT_ENTROPY_MIN_LENGTH, DEFAULT_ENTROPY_THRESHOLD,
+    detect_credentials_with_config, redact_credentials_with_config, DEFAULT_ENTROPY_MIN_LENGTH,
+    DEFAULT_ENTROPY_THRESHOLD,
 };
-
-/// Npm/JS package manager configuration for hook behaviour.
-///
-/// Loaded from the `[npm]` section of the config file. When unavailable,
-/// all protections default to enabled.
-#[derive(Debug, Clone)]
-pub struct NpmConfig {
-    /// Whether to warn about npm lifecycle script risks in post-bash.
-    pub watch_lifecycle: bool,
-    /// Whether to suggest `--ignore-scripts` in pre-bash npm install warnings.
-    pub ignore_scripts_warning: bool,
-    /// Whether to BLOCK npm/yarn/pnpm/bun install commands that lack `--ignore-scripts`.
-    pub ignore_scripts_required: bool,
-    /// Package names that skip slopsquatting checks (known-good packages).
-    pub allowlist: Vec<String>,
-}
-
-impl Default for NpmConfig {
-    fn default() -> Self {
-        Self {
-            watch_lifecycle: true,
-            ignore_scripts_warning: true,
-            ignore_scripts_required: false,
-            allowlist: Vec::new(),
-        }
-    }
-}
-
-/// Go module ecosystem configuration for hook behaviour.
-///
-/// Loaded from the `[sentinel.go]` section of the config file. When
-/// unavailable, all protections default to enabled with standard trusted
-/// prefixes.
-#[derive(Debug, Clone)]
-pub struct GoConfig {
-    /// Module paths that skip slopsquatting checks (exact match).
-    pub allowlist: Vec<String>,
-    /// Trusted module path prefixes that skip checks (e.g., `"golang.org/x/"`).
-    pub trusted_prefixes: Vec<String>,
-}
-
-impl Default for GoConfig {
-    fn default() -> Self {
-        Self {
-            allowlist: Vec::new(),
-            trusted_prefixes: default_go_trusted_prefixes(),
-        }
-    }
-}
-
-/// Default trusted Go module path prefixes.
-///
-/// First-party and well-known module paths considered trusted. Standard
-/// library packages are not fetched via `go get` so they are not listed.
-#[must_use]
-pub fn default_go_trusted_prefixes() -> Vec<String> {
-    vec![
-        "golang.org/x/".to_owned(),
-        "google.golang.org/".to_owned(),
-        "cloud.google.com/go/".to_owned(),
-        "github.com/golang/".to_owned(),
-    ]
-}
-
-/// Rust/Cargo ecosystem configuration for hook behaviour.
-///
-/// Loaded from the `[sentinel.cargo]` section of the config file. When
-/// unavailable, all protections default to enabled.
-#[derive(Debug, Clone)]
-pub struct CargoConfig {
-    /// Crate names that skip slopsquatting checks (exact match).
-    pub allowlist: Vec<String>,
-    /// Warn when cargo downloads new crates (build.rs may execute).
-    pub warn_build_scripts: bool,
-}
-
-impl Default for CargoConfig {
-    fn default() -> Self {
-        Self {
-            allowlist: Vec::new(),
-            warn_build_scripts: true,
-        }
-    }
-}
-
-/// Python/pip ecosystem configuration for hook behaviour.
-///
-/// Loaded from the `[sentinel.pip]` section of the config file. When
-/// unavailable, all protections default to enabled.
-#[derive(Debug, Clone)]
-pub struct PipConfig {
-    /// Package names that skip slopsquatting checks (exact match).
-    pub allowlist: Vec<String>,
-    /// Warn when pip install runs without `--only-binary :all:`.
-    pub warn_source_installs: bool,
-    /// Block pip install commands without `--only-binary :all:`.
-    pub require_binary_only: bool,
-}
-
-impl Default for PipConfig {
-    fn default() -> Self {
-        Self {
-            allowlist: Vec::new(),
-            warn_source_installs: true,
-            require_binary_only: false,
-        }
-    }
-}
-
-/// Homebrew ecosystem configuration for hook behaviour.
-///
-/// Loaded from the `[sentinel.homebrew]` section of the config file. When
-/// unavailable, protections default to enabled with official Homebrew taps
-/// trusted.
-#[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct HomebrewConfig {
-    /// Formula or cask names that skip official Homebrew API existence checks.
-    pub allowlist: Vec<String>,
-    /// Taps considered trusted for tap-qualified package installs.
-    pub trusted_taps: Vec<String>,
-    /// Warn when commands reference untrusted taps.
-    pub warn_untrusted_taps: bool,
-    /// Warn when cask quarantine is bypassed.
-    pub warn_no_quarantine: bool,
-    /// Block direct installs from URL/path formula files.
-    pub block_external_formula_installs: bool,
-    /// Warn when `brew bundle` reads a Brewfile.
-    pub warn_brewfile: bool,
-}
-
-impl Default for HomebrewConfig {
-    fn default() -> Self {
-        Self {
-            allowlist: Vec::new(),
-            trusted_taps: vec![
-                "homebrew/core".to_owned(),
-                "homebrew/cask".to_owned(),
-                "homebrew/services".to_owned(),
-                "homebrew/bundle".to_owned(),
-            ],
-            warn_untrusted_taps: true,
-            warn_no_quarantine: true,
-            block_external_formula_installs: true,
-            warn_brewfile: true,
-        }
-    }
-}
-
-/// Docker image safety configuration for hook behaviour.
-///
-/// Loaded from the `[ai_firewall.docker]` section of the config file.
-/// When unavailable, all protections default to enabled with standard
-/// trusted registries.
-#[derive(Debug, Clone)]
-pub struct DockerConfig {
-    /// Docker registries considered trusted.
-    pub trusted_registries: Vec<String>,
-    /// Warn on `:latest` or untagged images.
-    pub warn_latest: bool,
-    /// Warn on `ADD` with remote URLs in Dockerfiles.
-    pub warn_remote_add: bool,
-    /// Warn on `curl|sh` / `wget|bash` patterns in Dockerfile `RUN`.
-    pub warn_pipe_install: bool,
-}
-
-impl Default for DockerConfig {
-    fn default() -> Self {
-        Self {
-            trusted_registries: vec![
-                "docker.io".to_owned(),
-                "ghcr.io".to_owned(),
-                "gcr.io".to_owned(),
-                "public.ecr.aws".to_owned(),
-                "registry.k8s.io".to_owned(),
-            ],
-            warn_latest: true,
-            warn_remote_add: true,
-            warn_pipe_install: true,
-        }
-    }
-}
-
-/// Bundle of per-ecosystem package manager configurations.
-///
-/// Passed to hook handlers to control allowlisting and ecosystem-specific
-/// behaviour.
-#[derive(Debug, Clone, Default)]
-pub struct PackageManagerConfigs {
-    /// npm/JS package manager configuration.
-    pub npm: NpmConfig,
-    /// Go module ecosystem configuration.
-    pub go: GoConfig,
-    /// Rust/Cargo ecosystem configuration.
-    pub cargo: CargoConfig,
-    /// Python/pip ecosystem configuration.
-    pub pip: PipConfig,
-    /// Homebrew ecosystem configuration.
-    pub homebrew: HomebrewConfig,
-    /// Docker image safety configuration.
-    pub docker: DockerConfig,
-}
-
-/// Result of checking whether a package exists on a registry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PackageCheckResult {
-    /// Package exists on the registry.
-    Exists,
-    /// Package does NOT exist on the registry.
-    NotFound,
-    /// The check could not be completed (network error, timeout, etc.).
-    CheckFailed(String),
-}
-
-/// Known package registry type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Registry {
-    Npm,
-    PyPI,
-    Go,
-    CratesIo,
-    Homebrew,
-}
-
-impl std::fmt::Display for Registry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Npm => write!(f, "npm"),
-            Self::PyPI => write!(f, "PyPI"),
-            Self::Go => write!(f, "Go"),
-            Self::CratesIo => write!(f, "crates.io"),
-            Self::Homebrew => write!(f, "Homebrew"),
-        }
-    }
-}
-
-/// Split a compound shell string into individual command fragments.
-///
-/// Splits on `&&`, `||`, `;`, `|`, `\n`, backtick boundaries, and `$(`.
-/// Tracks single/double-quote state so that `echo "foo && bar"` is NOT
-/// split on the inner `&&`. Over-splitting is acceptable in a security
-/// context: more checks are always safer than fewer.
-///
-/// **Unmatched-quote safety (S1):** If the input has unmatched quotes
-/// (e.g. `npm install 'foo && pip install evil`), the quote-tracking
-/// loop would swallow the `&&` separator and hide the chained command.
-/// To prevent this bypass, when the loop ends with a quote still open we
-/// fall back to `split_shell_commands_unquoted`, which ignores all quote
-/// state and splits purely on operators. Over-splitting is the safe
-/// direction.
-fn split_shell_commands(input: &str) -> Vec<&str> {
-    let mut commands = Vec::new();
-    let mut start = 0;
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-
-    while i < len {
-        let b = bytes[i];
-
-        // Track quote state
-        if b == b'\'' && !in_double_quote {
-            in_single_quote = !in_single_quote;
-            i += 1;
-            continue;
-        }
-        if b == b'"' && !in_single_quote {
-            in_double_quote = !in_double_quote;
-            i += 1;
-            continue;
-        }
-        // Backslash escape (outside single quotes)
-        if b == b'\\' && !in_single_quote && i + 1 < len {
-            i += 2;
-            continue;
-        }
-
-        // Only split when outside quotes
-        if !in_single_quote && !in_double_quote {
-            // && or ||
-            if i + 1 < len
-                && ((b == b'&' && bytes[i + 1] == b'&') || (b == b'|' && bytes[i + 1] == b'|'))
-            {
-                let fragment = &input[start..i];
-                if !fragment.trim().is_empty() {
-                    commands.push(fragment.trim());
-                }
-                i += 2;
-                start = i;
-                continue;
-            }
-            // ; or \n or backtick
-            if b == b';' || b == b'\n' || b == b'`' {
-                let fragment = &input[start..i];
-                if !fragment.trim().is_empty() {
-                    commands.push(fragment.trim());
-                }
-                i += 1;
-                start = i;
-                continue;
-            }
-            // Single | (pipe) — already excluded || above
-            if b == b'|' {
-                let fragment = &input[start..i];
-                if !fragment.trim().is_empty() {
-                    commands.push(fragment.trim());
-                }
-                i += 1;
-                start = i;
-                continue;
-            }
-            // $( subshell
-            if b == b'$' && i + 1 < len && bytes[i + 1] == b'(' {
-                let fragment = &input[start..i];
-                if !fragment.trim().is_empty() {
-                    commands.push(fragment.trim());
-                }
-                i += 2;
-                start = i;
-                continue;
-            }
-        }
-        i += 1;
-    }
-
-    // S1: If quotes are still open the input has unmatched quotes.
-    // Fall back to quote-unaware splitting so chained commands hidden
-    // inside the "quoted" region are still detected.
-    if in_single_quote || in_double_quote {
-        return split_shell_commands_unquoted(input);
-    }
-
-    // Final fragment
-    let fragment = &input[start..];
-    if !fragment.trim().is_empty() {
-        commands.push(fragment.trim());
-    }
-    commands
-}
-
-/// Quote-unaware fallback for [`split_shell_commands`].
-///
-/// Splits on the same operators but completely ignores quote characters.
-/// Used when the input has unmatched quotes, where over-splitting is the
-/// conservative (safe) choice.
-fn split_shell_commands_unquoted(input: &str) -> Vec<&str> {
-    let mut commands = Vec::new();
-    let mut start = 0;
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        let b = bytes[i];
-
-        // && or ||
-        if i + 1 < len
-            && ((b == b'&' && bytes[i + 1] == b'&') || (b == b'|' && bytes[i + 1] == b'|'))
-        {
-            let fragment = &input[start..i];
-            if !fragment.trim().is_empty() {
-                commands.push(fragment.trim());
-            }
-            i += 2;
-            start = i;
-            continue;
-        }
-        // ; or \n or backtick
-        if b == b';' || b == b'\n' || b == b'`' {
-            let fragment = &input[start..i];
-            if !fragment.trim().is_empty() {
-                commands.push(fragment.trim());
-            }
-            i += 1;
-            start = i;
-            continue;
-        }
-        // Single | (pipe) — already excluded || above
-        if b == b'|' {
-            let fragment = &input[start..i];
-            if !fragment.trim().is_empty() {
-                commands.push(fragment.trim());
-            }
-            i += 1;
-            start = i;
-            continue;
-        }
-        // $( subshell
-        if b == b'$' && i + 1 < len && bytes[i + 1] == b'(' {
-            let fragment = &input[start..i];
-            if !fragment.trim().is_empty() {
-                commands.push(fragment.trim());
-            }
-            i += 2;
-            start = i;
-            continue;
-        }
-        i += 1;
-    }
-
-    // Final fragment
-    let fragment = &input[start..];
-    if !fragment.trim().is_empty() {
-        commands.push(fragment.trim());
-    }
-    commands
-}
-
-/// Extract all package names from a (possibly compound) command string.
-///
-/// Splits compound commands on shell operators (`&&`, `||`, `;`, `|`, etc.)
-/// and extracts packages from each sub-command independently. This prevents
-/// chained commands like `cd /tmp && npm install evil` from bypassing
-/// extraction.
-///
-/// Parses commands like:
-/// - `npm install foo bar` -> `[("foo", Npm), ("bar", Npm)]`
-/// - `pip install requests flask` -> `[("requests", PyPI), ("flask", PyPI)]`
-/// - `npm install --save-dev foo -g bar` -> `[("foo", Npm), ("bar", Npm)]`
-/// - `npx prettier .` -> `[("prettier", Npm)]`
-/// - `npx --package=cowsay -- cowsay hello` -> `[("cowsay", Npm)]`
-/// - `cd /tmp && npm install evil` -> `[("evil", Npm)]`
-///
-/// Returns an empty vec if no packages are found (e.g., bare `npm install`
-/// from lockfile, or `npm ci` which installs from lockfile).
-fn extract_all_packages(command: &str) -> Vec<(String, Registry)> {
-    let mut all_packages = Vec::new();
-
-    for fragment in split_shell_commands(command) {
-        all_packages.extend(extract_packages_from_fragment(fragment));
-    }
-
-    all_packages
-}
-
-/// Extract packages from a single (non-compound) command fragment.
-fn extract_packages_from_fragment(fragment: &str) -> Vec<(String, Registry)> {
-    let normalised = fragment.replace('\t', " ");
-    let trimmed = normalised.trim();
-
-    // npm/pnpm/yarn/bun install patterns
-    let npm_prefixes: &[&str] = &[
-        "npm install ",
-        "npm i ",
-        "npm ci ",
-        "pnpm install ",
-        "pnpm add ",
-        "pnpm i ",
-        "yarn add ",
-        "bun install ",
-        "bun add ",
-        "bun i ",
-    ];
-    for prefix in npm_prefixes {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            // npm ci takes no package arguments — it installs from lockfile
-            if *prefix == "npm ci " {
-                return Vec::new();
-            }
-            return parse_package_args(rest, &Registry::Npm);
-        }
-    }
-
-    // Bare commands without trailing args (e.g., `npm ci`, `npm install`)
-    if trimmed == "npm ci" {
-        return Vec::new();
-    }
-
-    // npx: extract the package being executed
-    if let Some(rest) = trimmed.strip_prefix("npx ") {
-        return extract_npx_package(rest);
-    }
-
-    // pip/pip3 install patterns
-    let pip_prefixes: &[&str] = &["pip install ", "pip3 install ", "uv pip install "];
-    for prefix in pip_prefixes {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return parse_package_args(rest, &Registry::PyPI);
-        }
-    }
-
-    // go get / go install patterns
-    let go_prefixes: &[&str] = &["go get ", "go install "];
-    for prefix in go_prefixes {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return parse_go_module_args(rest);
-        }
-    }
-
-    // cargo add / cargo install patterns
-    let cargo_prefixes: &[&str] = &["cargo add ", "cargo install "];
-    for prefix in cargo_prefixes {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return parse_cargo_args(rest);
-        }
-    }
-
-    // Homebrew install/reinstall/upgrade patterns. `brew upgrade` with no
-    // package args is handled separately as a broad-risk warning.
-    let homebrew_prefixes: &[&str] = &["brew install ", "brew reinstall ", "brew upgrade "];
-    for prefix in homebrew_prefixes {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return parse_homebrew_args(rest);
-        }
-    }
-
-    Vec::new()
-}
-
-/// Extract the package name from an `npx` command's arguments.
-///
-/// `npx` can be invoked as:
-/// - `npx <package> [args...]` — runs the package, first positional arg is the package
-/// - `npx -y <package> [args...]` — auto-confirm install
-/// - `npx --package=<pkg> -- <cmd>` — explicit package specification
-/// - `npx --package <pkg> -- <cmd>` — explicit package with space separator
-///
-/// Only the package name is extracted (not the command's own arguments).
-fn extract_npx_package(args: &str) -> Vec<(String, Registry)> {
-    let mut tokens = args.split_whitespace().peekable();
-    let mut skip_next = false;
-
-    while let Some(token) = tokens.next() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-
-        // Stop at `--` separator — package must come before it or via --package
-        if token == "--" {
-            break;
-        }
-
-        // Handle --package=<pkg>
-        if let Some(pkg) = token.strip_prefix("--package=") {
-            let name = extract_pkg_name_from_token(pkg);
-            if !name.is_empty() {
-                return vec![(name.to_owned(), Registry::Npm)];
-            }
-            continue;
-        }
-
-        // Handle --package <pkg> (space-separated)
-        if token == "--package" || token == "-p" {
-            if let Some(&next) = tokens.peek() {
-                let name = extract_pkg_name_from_token(next);
-                if !name.is_empty() {
-                    return vec![(name.to_owned(), Registry::Npm)];
-                }
-            }
-            skip_next = true;
-            continue;
-        }
-
-        // Skip known npx flags
-        if token.starts_with('-') {
-            continue;
-        }
-
-        // First positional argument is the package
-        let name = extract_pkg_name_from_token(token);
-        if !name.is_empty() {
-            return vec![(name.to_owned(), Registry::Npm)];
-        }
-    }
-
-    Vec::new()
-}
-
-/// Parse package arguments from the portion after `install`, filtering flags.
-fn parse_package_args(args: &str, registry: &Registry) -> Vec<(String, Registry)> {
-    let mut packages = Vec::new();
-    let mut skip_next = false;
-
-    for token in args.split_whitespace() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        // Skip flags
-        if token.starts_with('-') {
-            // Known long flags that take a value argument: skip next token.
-            let value_flags: &[&str] = &[
-                "--registry",
-                "--cache",
-                "--prefix",
-                "--tag",
-                "--target",
-                "--index-url",
-                "--extra-index-url",
-                "--constraint",
-                "--requirement",
-                "--find-links",
-                "-e",
-                "--editable",
-                "--only-binary",
-                "--no-binary",
-            ];
-            if value_flags.contains(&token) {
-                skip_next = true;
-            }
-            continue;
-        }
-        // Extract package name, stripping version specifiers (e.g., foo@1.0.0 -> "foo")
-        let name = extract_pkg_name_from_token(token);
-
-        if !name.is_empty() {
-            packages.push((name.to_owned(), registry.clone()));
-        }
-    }
-    packages
-}
-
-/// Extract a package name from an install token, handling version specifiers
-/// and scoped packages (e.g., `@scope/name@version`).
-fn extract_pkg_name_from_token(token: &str) -> &str {
-    token.strip_prefix('@').map_or_else(
-        // Unscoped: foo or foo@1.0.0
-        || token.find('@').map_or(token, |at_pos| &token[..at_pos]),
-        // Scoped: @scope/name or @scope/name@version
-        |after_at| {
-            after_at
-                .find('@')
-                .map_or(token, |second_at| &token[..=second_at])
-        },
-    )
-}
-
-/// Validate that a package name is safe for URL interpolation.
-///
-/// Rejects empty names, names starting with `.` or `-`, names longer than 214
-/// characters (npm limit), and names containing characters outside the
-/// `[a-zA-Z0-9@/_.-]` allowlist.
-fn is_valid_curl_package_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 214 {
-        return false;
-    }
-    if name.starts_with('.') || name.starts_with('-') {
-        return false;
-    }
-    // Reject path traversal sequences
-    if name.contains("..") {
-        return false;
-    }
-    name.bytes().all(|b| {
-        b.is_ascii_alphanumeric() || b == b'@' || b == b'/' || b == b'_' || b == b'.' || b == b'-'
-    })
-}
-
-/// Parse Go module arguments from the portion after `go get` or `go install`.
-///
-/// Go commands use flags like `-u`, `-d`, `-t`, `-v`, and support multiple
-/// module paths. Relative paths (`./...`, `../...`) and the keyword `all`
-/// are filtered out since they refer to local packages, not remote modules.
-///
-/// Version suffixes like `@v1.8.0` and `@latest` are stripped.
-fn parse_go_module_args(args: &str) -> Vec<(String, Registry)> {
-    let mut modules = Vec::new();
-
-    for token in args.split_whitespace() {
-        // Skip flags (-u, -d, -t, -v, -insecure, etc.)
-        if token.starts_with('-') {
-            continue;
-        }
-
-        // Skip relative paths (./..., ../..., ./cmd/foo)
-        if token.starts_with("./") || token.starts_with("../") || token == "." || token == ".." {
-            continue;
-        }
-
-        // Skip the "all" keyword (refers to all packages in the module)
-        if token == "all" {
-            continue;
-        }
-
-        // Strip version suffix: github.com/gorilla/mux@v1.8.0 -> github.com/gorilla/mux
-        let module_path = token.find('@').map_or(token, |at| &token[..at]);
-
-        // Strip trailing /... wildcard (go get github.com/user/repo/...)
-        let module_path = module_path.strip_suffix("/...").unwrap_or(module_path);
-
-        // Validate it looks like a Go module path (has a domain)
-        if is_valid_go_module_path(module_path) {
-            modules.push((module_path.to_owned(), Registry::Go));
-        }
-    }
-
-    modules
-}
-
-/// Parse crate names from `cargo add` or `cargo install` arguments.
-///
-/// Skips flags and their value arguments. Strips version pinning
-/// (`serde@1.0.210` → `serde`). Skips path-like tokens and `--git`/`--path`
-/// sources (those reference local or git sources, not crates.io).
-fn parse_cargo_args(args: &str) -> Vec<(String, Registry)> {
-    // Flags that consume the next whitespace-separated token as a value.
-    const VALUE_FLAGS: &[&str] = &[
-        "--features",
-        "-F",
-        "--registry",
-        "--version",
-        "--branch",
-        "--tag",
-        "--rev",
-        "--path",
-        "--git",
-        "--target-dir",
-        "--root",
-        "--index",
-        "--rename",
-    ];
-
-    let mut crates = Vec::new();
-    let mut skip_next = false;
-
-    for token in args.split_whitespace() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-
-        // Skip flags; consume following value for flags that take one.
-        if token.starts_with('-') {
-            // Handle --flag=value (no next-token consumption needed)
-            if token.contains('=') {
-                continue;
-            }
-            if VALUE_FLAGS.contains(&token) {
-                skip_next = true;
-            }
-            continue;
-        }
-
-        // Skip path-like tokens (local source, not a crate name)
-        if token.contains('/') || token.starts_with('.') {
-            continue;
-        }
-
-        // Strip version pin: serde@1.0.210 -> serde
-        let name = token.find('@').map_or(token, |at| &token[..at]);
-
-        if is_valid_crate_name(name) {
-            crates.push((name.to_owned(), Registry::CratesIo));
-        }
-    }
-
-    crates
-}
-
-/// Parse formula/cask names from `brew install`, `brew reinstall`, or
-/// `brew upgrade` arguments.
-///
-/// Tap-qualified names (`owner/repo/name`) and direct URL/path formula
-/// installs are inspected by dedicated Homebrew checks and skipped here
-/// because the official formulae API only covers official formulae/casks.
-fn parse_homebrew_args(args: &str) -> Vec<(String, Registry)> {
-    const VALUE_FLAGS: &[&str] = &[
-        "--appdir",
-        "--audio-unit-plugindir",
-        "--branch",
-        "--cc",
-        "--colorpickerdir",
-        "--dictionarydir",
-        "--env",
-        "--fontdir",
-        "--input-methoddir",
-        "--internet-plugindir",
-        "--language",
-        "--mdimporterdir",
-        "--prefpanedir",
-        "--qlplugindir",
-        "--screen-saverdir",
-        "--vst-plugindir",
-        "--vst3-plugindir",
-    ];
-
-    let mut packages = Vec::new();
-    let mut skip_next = false;
-
-    for token in args.split_whitespace() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-
-        if token == "--" {
-            continue;
-        }
-
-        if token.starts_with('-') {
-            if token.contains('=') {
-                continue;
-            }
-            if VALUE_FLAGS.contains(&token) {
-                skip_next = true;
-            }
-            continue;
-        }
-
-        if is_homebrew_external_formula_ref(token) || homebrew_tap_from_package(token).is_some() {
-            continue;
-        }
-
-        if is_valid_homebrew_token(token) {
-            packages.push((token.to_owned(), Registry::Homebrew));
-        }
-    }
-
-    packages
-}
-
-/// Validate that a string looks like a Go module path.
-///
-/// Go module paths must start with a domain (contain a `.` in the first
-/// path segment), contain at least one `/`, and not start or end with `/`.
-/// Examples: `github.com/gorilla/mux`, `golang.org/x/crypto`.
-fn is_valid_go_module_path(path: &str) -> bool {
-    if path.is_empty() || path.starts_with('/') || path.ends_with('/') {
-        return false;
-    }
-
-    // Must have at least one slash (domain/path)
-    let Some(first_slash) = path.find('/') else {
-        return false;
-    };
-
-    // First segment must contain a dot (domain name)
-    let domain = &path[..first_slash];
-    if !domain.contains('.') {
-        return false;
-    }
-
-    // All characters must be valid for Go module paths.
-    // Character set matches is_valid_curl_package_name (minus @) to ensure
-    // paths that pass validation here also pass the curl URL validator.
-    path.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'_' || b == b'.' || b == b'-')
-}
-
-/// Encode a Go module path for the module proxy URL.
-///
-/// The Go module proxy uses "case-encoding" where uppercase ASCII letters
-/// are replaced with `!` followed by the lowercase letter.
-/// E.g., `github.com/Azure/azure-sdk` -> `github.com/!azure/azure-sdk`.
-fn go_module_case_encode(module: &str) -> String {
-    let mut encoded = String::with_capacity(module.len() + 8);
-    for ch in module.chars() {
-        if ch.is_ascii_uppercase() {
-            encoded.push('!');
-            encoded.push(ch.to_ascii_lowercase());
-        } else {
-            encoded.push(ch);
-        }
-    }
-    encoded
-}
-
-/// Compute the sparse index URL path for a crate name.
-///
-/// Crate names are case-insensitive on crates.io; we lowercase for the
-/// index lookup. Path structure per RFC 2789:
-/// - 1 char:  `1/{name}`
-/// - 2 chars: `2/{name}`
-/// - 3 chars: `3/{first_char}/{name}`
-/// - 4+ chars: `{first_two}/{next_two}/{name}`
-fn crate_sparse_index_path(name: &str) -> String {
-    let lower = name.to_ascii_lowercase();
-    match lower.len() {
-        0 => String::new(), // validated before call
-        1 => format!("1/{lower}"),
-        2 => format!("2/{lower}"),
-        3 => format!("3/{}/{lower}", &lower[..1]),
-        _ => format!("{}/{}/{lower}", &lower[..2], &lower[2..4]),
-    }
-}
-
-/// Validate that a string is a valid Cargo crate name.
-///
-/// Crate names on crates.io: 1-64 ASCII chars, alphanumeric plus `-` and `_`.
-/// Must start with an ASCII letter. Hyphens and underscores are interchangeable
-/// for lookup purposes (but we validate the raw name as given).
-fn is_valid_crate_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 64 {
-        return false;
-    }
-    let first = name.as_bytes()[0];
-    if !first.is_ascii_alphabetic() {
-        return false;
-    }
-    name.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-/// Validate a Homebrew formula/cask token for API URL interpolation.
-fn is_valid_homebrew_token(name: &str) -> bool {
-    if name.is_empty() || name.len() > 256 {
-        return false;
-    }
-    if name.starts_with('.') || name.starts_with('-') || name.contains("..") {
-        return false;
-    }
-    name.bytes().all(|b| {
-        b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'@' || b == b'+'
-    })
-}
-
-/// Return true for direct Homebrew formula references that execute Ruby from
-/// outside the audited tap flow.
-fn is_homebrew_external_formula_ref(token: &str) -> bool {
-    token.starts_with("http://")
-        || token.starts_with("https://")
-        || token.starts_with("file://")
-        || std::path::Path::new(token)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("rb"))
-        || token.starts_with("./")
-        || token.starts_with("../")
-        || token.starts_with('/')
-}
-
-/// Extract `owner/repo` from a tap-qualified Homebrew package name.
-fn homebrew_tap_from_package(token: &str) -> Option<String> {
-    let mut parts = token.split('/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    let formula = parts.next()?;
-    if parts.next().is_some() || owner.is_empty() || repo.is_empty() || formula.is_empty() {
-        return None;
-    }
-    Some(format!("{owner}/{repo}"))
-}
-
-/// Check whether a package exists on its registry using a synchronous HTTP
-/// HEAD request via `curl`.
-///
-/// This is a best-effort check with a short timeout. Returns `CheckFailed`
-/// on any network error rather than panicking. Uses `curl` as a subprocess
-/// because we don't have TLS libraries in our dependency tree.
-#[cfg(test)]
-fn check_package_exists(name: &str, registry: &Registry) -> PackageCheckResult {
-    check_package_exists_with_timeout(name, registry, 5)
-}
-
-/// Check whether a package exists on its registry using a synchronous HTTP
-/// HEAD request via `curl`, with a configurable timeout in seconds.
-fn check_package_exists_with_timeout(
-    name: &str,
-    registry: &Registry,
-    timeout_secs: u64,
-) -> PackageCheckResult {
-    // Validate package name before URL construction to prevent injection.
-    // CratesIo uses its own validator; others share is_valid_curl_package_name.
-    match registry {
-        Registry::CratesIo => {
-            if !is_valid_crate_name(name) {
-                return PackageCheckResult::CheckFailed(format!("invalid crate name: {name}"));
-            }
-        }
-        Registry::Homebrew => {
-            if !is_valid_homebrew_token(name) {
-                return PackageCheckResult::CheckFailed(format!(
-                    "invalid Homebrew formula/cask name: {name}"
-                ));
-            }
-        }
-        _ => {
-            if !is_valid_curl_package_name(name) {
-                return PackageCheckResult::CheckFailed(format!("invalid package name: {name}"));
-            }
-        }
-    }
-
-    let url = match registry {
-        Registry::Npm => format!("https://registry.npmjs.org/{name}"),
-        Registry::PyPI => format!("https://pypi.org/pypi/{name}/json"),
-        Registry::Go => {
-            let encoded = go_module_case_encode(name);
-            format!("https://proxy.golang.org/{encoded}/@latest")
-        }
-        Registry::CratesIo => {
-            // Use sparse index: no rate limits, no User-Agent requirement, CDN-backed.
-            let path = crate_sparse_index_path(name);
-            format!("https://index.crates.io/{path}")
-        }
-        Registry::Homebrew => format!("https://formulae.brew.sh/api/formula/{name}.json"),
-    };
-
-    let result = curl_head_status(&url, timeout_secs);
-
-    let status = match result {
-        Ok(output) => {
-            let code = String::from_utf8_lossy(&output.stdout);
-            let code = code.trim();
-            match code {
-                "200" => return PackageCheckResult::Exists,
-                // 404 = not found, 410 = gone/retracted, 451 = legal removal (crates.io)
-                "404" | "410" | "451" => PackageCheckResult::NotFound,
-                _ => PackageCheckResult::CheckFailed(format!("registry returned HTTP {code}")),
-            }
-        }
-        Err(e) => PackageCheckResult::CheckFailed(format!("curl not available: {e}")),
-    };
-
-    if registry == &Registry::Homebrew && status == PackageCheckResult::NotFound {
-        let cask_url = format!("https://formulae.brew.sh/api/cask/{name}.json");
-        return match curl_head_status(&cask_url, timeout_secs) {
-            Ok(output) => {
-                let code = String::from_utf8_lossy(&output.stdout);
-                match code.trim() {
-                    "200" => PackageCheckResult::Exists,
-                    "404" | "410" | "451" => PackageCheckResult::NotFound,
-                    other => PackageCheckResult::CheckFailed(format!(
-                        "Homebrew cask API returned HTTP {other}"
-                    )),
-                }
-            }
-            Err(e) => PackageCheckResult::CheckFailed(format!("curl not available: {e}")),
-        };
-    }
-
-    status
-}
-
-/// Perform a bounded `curl --head` request and return the process output.
-fn curl_head_status(url: &str, timeout_secs: u64) -> std::io::Result<std::process::Output> {
-    let timeout_str = timeout_secs.to_string();
-    std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "--head",
-            "--max-time",
-            &timeout_str,
-            "--connect-timeout",
-            "3",
-            "--max-redirs",
-            "0",
-            url,
-        ])
-        .output()
-}
 
 /// Commands that only inspect file metadata (not content) and should be exempt
 /// from D7 credential path blocking.
@@ -1195,6 +151,38 @@ fn expand_home(path: &str) -> String {
     }
 
     path.to_owned()
+}
+
+/// Check whether a path is a Claude Code working file that should be allowed
+/// even though it lives under `~/.claude/`.
+///
+/// Claude Code stores project memory, instructions, and plan files under
+/// `~/.claude/projects/` and `~/.claude/plans/`. These are NOT secrets — they
+/// are user-authored content that Claude needs to read and write to function.
+///
+/// Paths that remain blocked (settings, credentials, commands):
+/// - `.claude/settings.json`
+/// - `.claude/settings.local.json`
+/// - `.claude/commands/`
+/// - `.claude/credentials`
+fn is_claude_working_file(path_lower: &str) -> bool {
+    // Allow MEMORY.md and memory files under .claude/projects/*/memory/
+    if path_lower.ends_with("/memory.md") && path_lower.contains("/.claude/") {
+        return true;
+    }
+    if path_lower.contains("/.claude/") && path_lower.contains("/memory/") {
+        // Allow any file under a memory/ directory within .claude/projects/
+        return path_lower.contains("/projects/");
+    }
+    // Allow CLAUDE.md project instruction files
+    if path_lower.ends_with("/claude.md") && path_lower.contains("/.claude/") {
+        return true;
+    }
+    // Allow plan files under .claude/plans/
+    if path_lower.contains("/.claude/plans/") {
+        return true;
+    }
+    false
 }
 
 /// Sensitive file path prefixes that should never be read.
@@ -2010,219 +998,6 @@ fn is_env_dump(command: &str) -> bool {
     false
 }
 
-/// Package manager install command patterns for npm/pnpm/yarn/bun.
-///
-/// Each pattern is matched with a trailing space OR at end-of-string,
-/// so bare `npm i` (install from lockfile) is detected too.
-/// Includes `npm ci` (clean-install from lockfile) and `npx` (execute package).
-const NPM_INSTALL_PATTERNS: &[&str] = &[
-    "npm install ",
-    "npm i ",
-    "npm ci ",
-    "npx ",
-    "pnpm install ",
-    "pnpm add ",
-    "pnpm i ",
-    "yarn add ",
-    "bun install ",
-    "bun add ",
-    "bun i ",
-];
-
-/// Return `true` if any sub-command (after shell-operator splitting) matches
-/// an npm-family install pattern. Uses `split_shell_commands()` so that
-/// detection is consistent with extraction.
-fn is_npm_install_command(command: &str) -> bool {
-    split_shell_commands(command).iter().any(|frag| {
-        let normalised = frag.replace('\t', " ");
-        let trimmed = normalised.trim();
-        NPM_INSTALL_PATTERNS
-            .iter()
-            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
-    })
-}
-
-/// Return `true` if any sub-command matches a pip/pip3 install pattern.
-fn is_pip_install_command(command: &str) -> bool {
-    let pip_patterns: &[&str] = &["pip install ", "pip3 install ", "uv pip install "];
-    split_shell_commands(command).iter().any(|frag| {
-        let normalised = frag.replace('\t', " ");
-        let trimmed = normalised.trim();
-        pip_patterns
-            .iter()
-            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
-    })
-}
-
-/// Go install command patterns.
-const GO_INSTALL_PATTERNS: &[&str] = &["go get ", "go install "];
-
-/// Return `true` if any sub-command matches a Go get/install pattern.
-fn is_go_install_command(command: &str) -> bool {
-    split_shell_commands(command).iter().any(|frag| {
-        let normalised = frag.replace('\t', " ");
-        let trimmed = normalised.trim();
-        GO_INSTALL_PATTERNS
-            .iter()
-            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
-    })
-}
-
-/// Cargo add/install command patterns.
-const CARGO_ADD_INSTALL_PATTERNS: &[&str] = &["cargo add ", "cargo install "];
-
-/// Return `true` if any sub-command matches a Cargo add/install pattern.
-fn is_cargo_add_or_install_command(command: &str) -> bool {
-    split_shell_commands(command).iter().any(|frag| {
-        let normalised = frag.replace('\t', " ");
-        let trimmed = normalised.trim();
-        CARGO_ADD_INSTALL_PATTERNS
-            .iter()
-            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
-    })
-}
-
-/// Homebrew commands that can introduce or execute package code.
-const HOMEBREW_COMMAND_PATTERNS: &[&str] = &[
-    "brew install ",
-    "brew reinstall ",
-    "brew upgrade ",
-    "brew tap ",
-    "brew bundle ",
-];
-
-/// Return `true` if any sub-command matches a Homebrew install/tap/bundle
-/// pattern. Uses shell splitting so chained commands are inspected.
-fn is_homebrew_command(command: &str) -> bool {
-    split_shell_commands(command).iter().any(|frag| {
-        let normalised = frag.replace('\t', " ");
-        let trimmed = normalised.trim();
-        HOMEBREW_COMMAND_PATTERNS
-            .iter()
-            .any(|pat| trimmed.starts_with(pat) || trimmed == pat.trim_end())
-    })
-}
-
-/// Extract direct URL/path formula references from Homebrew install commands.
-fn extract_homebrew_external_formula_refs(command: &str) -> Vec<String> {
-    let mut refs = Vec::new();
-    for fragment in split_shell_commands(command) {
-        let normalised = fragment.replace('\t', " ");
-        let trimmed = normalised.trim();
-        let rest = trimmed
-            .strip_prefix("brew install ")
-            .or_else(|| trimmed.strip_prefix("brew reinstall "));
-        let Some(rest) = rest else {
-            continue;
-        };
-        for token in rest.split_whitespace() {
-            if is_homebrew_external_formula_ref(token) {
-                refs.push(token.to_owned());
-            }
-        }
-    }
-    refs
-}
-
-/// Extract taps referenced by `brew tap owner/repo` commands.
-fn extract_homebrew_taps(command: &str) -> Vec<String> {
-    let mut taps = Vec::new();
-    for fragment in split_shell_commands(command) {
-        let normalised = fragment.replace('\t', " ");
-        let trimmed = normalised.trim();
-        let Some(rest) = trimmed.strip_prefix("brew tap ") else {
-            continue;
-        };
-        for token in rest.split_whitespace() {
-            if token.starts_with('-') || token.contains("://") {
-                continue;
-            }
-            if token.matches('/').count() == 1 {
-                taps.push(token.to_owned());
-                break;
-            }
-        }
-    }
-    taps
-}
-
-/// Extract explicit Git/HTTP URLs passed to `brew tap owner/repo URL`.
-fn extract_homebrew_tap_urls(command: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    for fragment in split_shell_commands(command) {
-        let normalised = fragment.replace('\t', " ");
-        let trimmed = normalised.trim();
-        let Some(rest) = trimmed.strip_prefix("brew tap ") else {
-            continue;
-        };
-        for token in rest.split_whitespace() {
-            if token.contains("://") || token.starts_with("git@") {
-                urls.push(token.to_owned());
-            }
-        }
-    }
-    urls
-}
-
-/// Extract taps from tap-qualified packages in Homebrew install/upgrade args.
-fn extract_homebrew_package_taps(command: &str) -> Vec<String> {
-    let mut taps = Vec::new();
-    for fragment in split_shell_commands(command) {
-        let normalised = fragment.replace('\t', " ");
-        let trimmed = normalised.trim();
-        let rest = trimmed
-            .strip_prefix("brew install ")
-            .or_else(|| trimmed.strip_prefix("brew reinstall "))
-            .or_else(|| trimmed.strip_prefix("brew upgrade "));
-        let Some(rest) = rest else {
-            continue;
-        };
-        for token in rest.split_whitespace() {
-            if token.starts_with('-') {
-                continue;
-            }
-            if let Some(tap) = homebrew_tap_from_package(token) {
-                taps.push(tap);
-            }
-        }
-    }
-    taps
-}
-
-/// Return true for `brew upgrade` without explicit package names.
-fn is_bare_homebrew_upgrade(command: &str) -> bool {
-    split_shell_commands(command).iter().any(|frag| {
-        let normalised = frag.replace('\t', " ");
-        let trimmed = normalised.trim();
-        let Some(rest) = trimmed.strip_prefix("brew upgrade") else {
-            return false;
-        };
-        rest.split_whitespace().all(|token| token.starts_with('-'))
-    })
-}
-
-/// Return true for `brew bundle` commands that read a Brewfile.
-fn is_homebrew_bundle_command(command: &str) -> bool {
-    split_shell_commands(command).iter().any(|frag| {
-        let normalised = frag.replace('\t', " ");
-        let trimmed = normalised.trim();
-        let Some(rest) = trimmed.strip_prefix("brew bundle") else {
-            return false;
-        };
-        let rest = rest.trim();
-        if rest.is_empty() {
-            return true;
-        }
-        for token in rest.split_whitespace() {
-            if token.starts_with('-') {
-                continue;
-            }
-            return token == "install";
-        }
-        true
-    })
-}
-
 /// Docker/Podman command patterns that may pull or run images.
 const DOCKER_COMMAND_PATTERNS: &[&str] = &[
     "docker pull ",
@@ -2427,8 +1202,6 @@ pub fn pre_bash_with_npm_config(input: &HookInput, npm_config: &NpmConfig) -> Ho
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs) -> HookOutput {
-    let npm_config = &configs.npm;
-    let go_config = &configs.go;
     if let Some(ref cfg) = input.config {
         if !cfg.claude_hooks {
             return HookOutput::allow();
@@ -2553,242 +1326,22 @@ pub fn pre_bash_with_configs(input: &HookInput, configs: &PackageManagerConfigs)
         }
     }
 
-    // --- Package manager install checks (slopsquatting) ---
-    // H4: Check ALL packages in multi-package install commands.
-    // M16: After successful check, do NOT emit extra pip install warning.
-    // M3: Use npm/go allowlist to suppress checks for allowlisted packages.
-    // M7: Warn on CheckFailed rather than silently allowing.
-    let is_npm_install = is_npm_install_command(command);
-    let is_pip_install = is_pip_install_command(command);
-    let is_go_install = is_go_install_command(command);
-    let is_cargo_add_install = is_cargo_add_or_install_command(command);
-    let is_homebrew = is_homebrew_command(command);
-
-    // Read package existence check config: default to enabled with 5s timeout
     let check_pkg_existence = input
         .config
         .as_ref()
         .is_none_or(|cfg| cfg.check_package_existence);
-    let pkg_timeout_secs = input.config.as_ref().map_or(5, |cfg| {
-        // Convert ms to seconds, minimum 1 second
-        (cfg.package_check_timeout_ms / 1000).max(1)
-    });
+    let pkg_timeout_secs = input
+        .config
+        .as_ref()
+        .map_or(5, |cfg| (cfg.package_check_timeout_ms / 1000).max(1));
 
-    // Accumulates warnings across package manager + Docker checks so that
-    // chained commands (e.g. `pip install foo && docker pull evil`) evaluate
-    // all stages before returning.
-    #[allow(clippy::useless_let_if_seq)]
+    let checker = HttpPackageChecker::new(pkg_timeout_secs);
     let mut pkg_warnings: Vec<String> = Vec::new();
-
-    if is_npm_install || is_pip_install || is_go_install || is_cargo_add_install || is_homebrew {
-        let packages = extract_all_packages(command);
-        let mut warnings: Vec<String> = Vec::new();
-
-        for (name, registry) in &packages {
-            // Skip allowlisted packages (per-registry allowlist)
-            let is_allowlisted = match registry {
-                Registry::Npm => npm_config.allowlist.iter().any(|a| a == name),
-                Registry::PyPI => configs.pip.allowlist.iter().any(|a| a == name),
-                Registry::Go => {
-                    go_config.allowlist.iter().any(|a| a == name)
-                        || go_config
-                            .trusted_prefixes
-                            .iter()
-                            .any(|prefix| name.starts_with(prefix.as_str()))
-                }
-                Registry::CratesIo => configs.cargo.allowlist.iter().any(|a| a == name),
-                Registry::Homebrew => configs.homebrew.allowlist.iter().any(|a| a == name),
-            };
-            if is_allowlisted {
-                continue;
-            }
-
-            // Skip package existence check if disabled in config
-            if !check_pkg_existence {
-                continue;
-            }
-
-            let result = check_package_exists_with_timeout(name, registry, pkg_timeout_secs);
-            match result {
-                PackageCheckResult::Exists => {
-                    // Package verified — no action needed (M16: no extra warning)
-                }
-                PackageCheckResult::NotFound => {
-                    // H4: Block if ANY package doesn't exist
-                    let msg = match registry {
-                        Registry::Go => format!(
-                            "Blocked: module '{name}' not found on Go \
-                             (possible typosquatting/slopsquatting)\n\
-                             To proceed: verify at https://pkg.go.dev/{name}, add to \
-                             [sentinel.go] allowlist, or run directly in your terminal"
-                        ),
-                        Registry::CratesIo => format!(
-                            "Blocked: crate '{name}' not found on crates.io \
-                             (possible typosquatting/slopsquatting)\n\
-                             To proceed: verify at https://crates.io/crates/{name}, add to \
-                             [sentinel.cargo] allowlist, or run directly in your terminal"
-                        ),
-                        Registry::Npm => format!(
-                            "Blocked: package '{name}' not found on npm \
-                             (possible typosquatting/slopsquatting)\n\
-                             To proceed: verify at https://www.npmjs.com/package/{name}, add to \
-                             [sentinel.npm] allowlist, or run directly in your terminal"
-                        ),
-                        Registry::PyPI => format!(
-                            "Blocked: package '{name}' not found on PyPI \
-                             (possible typosquatting/slopsquatting)\n\
-                             To proceed: verify at https://pypi.org/project/{name}, add to \
-                             [sentinel.pip] allowlist, or run directly in your terminal"
-                        ),
-                        Registry::Homebrew => format!(
-                            "Blocked: formula/cask '{name}' not found in Homebrew core/cask \
-                             (possible typosquatting/slopsquatting)\n\
-                             To proceed: verify at https://formulae.brew.sh/search?term={name}, add to \
-                             [sentinel.homebrew] allowlist, or run directly in your terminal"
-                        ),
-                    };
-                    return HookOutput::block(msg);
-                }
-                PackageCheckResult::CheckFailed(ref reason) => {
-                    // M7: Warn on CheckFailed rather than silently proceeding
-                    warnings.push(format!(
-                        "Could not verify package '{name}' on {registry}: {reason}. \
-                         Install will proceed, but package legitimacy is unconfirmed. \
-                         If this persists, check your internet connection or adjust \
-                         package_check_timeout_ms in your Sanctum config."
-                    ));
-                }
-            }
-        }
-
-        if is_homebrew {
-            let homebrew_config = &configs.homebrew;
-
-            if homebrew_config.block_external_formula_installs {
-                let external_refs = extract_homebrew_external_formula_refs(command);
-                if !external_refs.is_empty() {
-                    return HookOutput::block(format!(
-                        "Blocked: Homebrew install from direct formula URL/path ({}) is not permitted by policy\n\
-                         Formula files are Ruby code executed during install. Use a trusted tap, or run directly in your terminal after review.",
-                        external_refs.join(", ")
-                    ));
-                }
-            }
-
-            if homebrew_config.warn_untrusted_taps {
-                let mut taps = extract_homebrew_taps(command);
-                taps.extend(extract_homebrew_package_taps(command));
-                taps.sort();
-                taps.dedup();
-                for tap in taps {
-                    if !homebrew_config
-                        .trusted_taps
-                        .iter()
-                        .any(|trusted| trusted == &tap)
-                    {
-                        warnings.push(format!(
-                            "Warning: Homebrew tap '{tap}' is not in [sentinel.homebrew] trusted_taps. \
-                             Formulae/casks from taps can execute install and post-install code."
-                        ));
-                    }
-                }
-
-                let tap_urls = extract_homebrew_tap_urls(command);
-                for tap_url in tap_urls {
-                    warnings.push(format!(
-                        "Warning: brew tap uses explicit remote URL '{tap_url}'. \
-                         Verify the repository before trusting formulae or casks from this tap."
-                    ));
-                }
-            }
-
-            if homebrew_config.warn_no_quarantine && normalised.contains("--no-quarantine") {
-                warnings.push(
-                    "Warning: brew --no-quarantine disables macOS quarantine checks for casks. \
-                     Avoid it unless you have independently verified the app."
-                        .to_owned(),
-                );
-            }
-
-            if is_bare_homebrew_upgrade(command) {
-                warnings.push(
-                    "Warning: brew upgrade may execute formula/cask install or post-install steps \
-                     for every outdated package. Review `brew outdated` first on sensitive machines."
-                        .to_owned(),
-                );
-            }
-
-            if homebrew_config.warn_brewfile && is_homebrew_bundle_command(command) {
-                warnings.push(
-                    "Warning: brew bundle installs from a Brewfile, including taps and casks. \
-                     Review the Brewfile before running it in a trusted environment."
-                        .to_owned(),
-                );
-            }
-        }
-
-        // Block npm install commands without --ignore-scripts when required by policy.
-        if is_npm_install
-            && npm_config.ignore_scripts_required
-            && !normalised.contains("--ignore-scripts")
-        {
-            return HookOutput::block(
-                "Blocked: npm install without --ignore-scripts is not permitted by policy\n\
-                 To proceed: add --ignore-scripts to the command, or disable \
-                 ignore_scripts_required in your Sanctum config"
-                    .to_owned(),
-            );
-        }
-
-        // Block pip install without --only-binary when required by policy.
-        // setup.py in source distributions executes arbitrary code (like npm postinstall).
-        if is_pip_install
-            && configs.pip.require_binary_only
-            && !normalised.contains("--only-binary :all:")
-            && !normalised.contains("--only-binary=:all:")
-        {
-            return HookOutput::block(
-                "Blocked: pip install without --only-binary :all: allows setup.py code execution \
-                 (source distributions can run arbitrary code during install, similar to npm postinstall scripts)\n\
-                 To proceed: add --only-binary :all: to the command, or disable \
-                 require_binary_only in your Sanctum config [sentinel.pip]"
-                    .to_owned(),
-            );
-        }
-
-        // If we got here with no packages extracted, it might be a bare install
-        // from lockfile (e.g., `npm install`, `pip install .`), or packages
-        // were all allowlisted. Just check for ignore-scripts suggestion.
-        if is_npm_install
-            && npm_config.ignore_scripts_warning
-            && !packages.is_empty()
-            && !normalised.contains("--ignore-scripts")
-        {
-            warnings.push(
-                "Tip: consider using --ignore-scripts to prevent lifecycle script execution"
-                    .to_owned(),
-            );
-        }
-
-        // Warn about pip source install risk.
-        if is_pip_install
-            && configs.pip.warn_source_installs
-            && !normalised.contains("--only-binary :all:")
-            && !normalised.contains("--only-binary=:all:")
-            && !packages.is_empty()
-        {
-            warnings.push(
-                "Tip: consider --only-binary :all: to prevent setup.py execution during install. \
-                 Source distributions can execute arbitrary code (like npm postinstall scripts)."
-                    .to_owned(),
-            );
-        }
-
-        // Collect package manager warnings but do NOT return yet — fall through
-        // to Docker checks so chained commands like
-        // `pip install foo && docker pull evil.com/malware` are fully evaluated.
-        pkg_warnings = warnings;
+    let package_outcome = evaluate_command_policy(command, configs, &checker, check_pkg_existence);
+    if let Some(message) = package_outcome.block {
+        return HookOutput::block(message);
     }
+    pkg_warnings.extend(package_outcome.warnings);
 
     // --- Docker image safety checks ---
     let docker_config = &configs.docker;
@@ -2920,6 +1473,9 @@ fn collect_credential_types(
     out: &mut Vec<String>,
     depth: usize,
     allowlist: &HashSet<String>,
+    secret_policy: &SecretPolicyContext,
+    file_path: &str,
+    marker_context: &str,
 ) {
     if depth > MAX_CREDENTIAL_SCAN_DEPTH {
         return;
@@ -2927,23 +1483,37 @@ fn collect_credential_types(
     match value {
         serde_json::Value::String(s) => {
             if !s.is_empty() {
-                let (_, events) = redact_credentials_with_config(
+                let detections = detect_credentials_with_config(
                     s,
                     DEFAULT_ENTROPY_THRESHOLD,
                     DEFAULT_ENTROPY_MIN_LENGTH,
                     allowlist,
                 );
-                for event in &events {
-                    let ctype = event.credential_type.as_str().to_owned();
-                    if !out.contains(&ctype) {
-                        out.push(ctype);
+                for detection in &detections {
+                    if let Some(ctype) = classify_secret_detection(
+                        detection,
+                        secret_policy,
+                        file_path,
+                        marker_context,
+                    ) {
+                        if !out.contains(&ctype) {
+                            out.push(ctype);
+                        }
                     }
                 }
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_credential_types(item, out, depth + 1, allowlist);
+                collect_credential_types(
+                    item,
+                    out,
+                    depth + 1,
+                    allowlist,
+                    secret_policy,
+                    file_path,
+                    marker_context,
+                );
             }
         }
         serde_json::Value::Object(map) => {
@@ -2954,10 +1524,65 @@ fn collect_credential_types(
                 if SKIP_KEYS.contains(&key.as_str()) {
                     continue;
                 }
-                collect_credential_types(val, out, depth + 1, allowlist);
+                collect_credential_types(
+                    val,
+                    out,
+                    depth + 1,
+                    allowlist,
+                    secret_policy,
+                    file_path,
+                    marker_context,
+                );
             }
         }
         _ => {}
+    }
+}
+
+fn classify_secret_detection(
+    detection: &crate::redaction::CredentialDetection,
+    secret_policy: &SecretPolicyContext,
+    file_path: &str,
+    marker_context: &str,
+) -> Option<String> {
+    if let Some(ref key) = secret_policy.hmac_key {
+        if secret_policy
+            .known_secrets
+            .contains_value(key, &detection.matched_text)
+        {
+            return Some("Known Real Secret".to_owned());
+        }
+    }
+
+    if let Some(entry) = secret_policy
+        .dummy_registry
+        .find_by_value(&detection.matched_text)
+    {
+        if entry.is_allowed_in_context(file_path, marker_context) {
+            return None;
+        }
+        return Some(format!(
+            "Dummy Secret '{}' outside allowed context",
+            entry.label
+        ));
+    }
+
+    Some(detection.credential_type.clone())
+}
+
+fn json_value_contains_text(value: &serde_json::Value, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    match value {
+        serde_json::Value::String(value) => value.contains(needle),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_contains_text(value, needle)),
+        serde_json::Value::Object(map) => map
+            .values()
+            .any(|value| json_value_contains_text(value, needle)),
+        _ => false,
     }
 }
 
@@ -2996,6 +1621,13 @@ fn join_dockerfile_continuations(content: &str) -> String {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn pre_write(input: &HookInput) -> HookOutput {
+    pre_write_with_configs(input, &PackageManagerConfigs::default())
+}
+
+/// Evaluate a pre-write hook with explicit package-manager configs.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn pre_write_with_configs(input: &HookInput, configs: &PackageManagerConfigs) -> HookOutput {
     if let Some(ref cfg) = input.config {
         if !cfg.claude_hooks {
             return HookOutput::allow();
@@ -3046,7 +1678,23 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
     {
         let allowlist: HashSet<String> = input.entropy_allowlist.iter().cloned().collect();
         let mut credential_types = Vec::new();
-        collect_credential_types(&input.tool_input, &mut credential_types, 0, &allowlist);
+        let marker_context = if json_value_contains_text(
+            &input.tool_input,
+            crate::dummy_registry::DUMMY_SECRET_MARKER,
+        ) {
+            crate::dummy_registry::DUMMY_SECRET_MARKER
+        } else {
+            ""
+        };
+        collect_credential_types(
+            &input.tool_input,
+            &mut credential_types,
+            0,
+            &allowlist,
+            &input.secret_policy,
+            &file_path,
+            marker_context,
+        );
         if !credential_types.is_empty() {
             return HookOutput::block(format!(
                 "Blocked: file content contains detected credentials: {}\n\
@@ -3144,6 +1792,30 @@ pub fn pre_write(input: &HookInput) -> HookOutput {
         }
     }
 
+    let content = input
+        .tool_input
+        .get("content")
+        .or_else(|| input.tool_input.get("new_string"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let check_pkg_existence = input
+        .config
+        .as_ref()
+        .is_none_or(|cfg| cfg.check_package_existence);
+    let pkg_timeout_secs = input
+        .config
+        .as_ref()
+        .map_or(5, |cfg| (cfg.package_check_timeout_ms / 1000).max(1));
+    let checker = HttpPackageChecker::new(pkg_timeout_secs);
+    let package_file_outcome =
+        evaluate_project_file_policy(&file_path, content, configs, &checker, check_pkg_existence);
+    if let Some(message) = package_file_outcome.block {
+        return HookOutput::block(message);
+    }
+    if !package_file_outcome.warnings.is_empty() {
+        return HookOutput::warn(package_file_outcome.warnings.join("\n"));
+    }
+
     // Block writes to high-risk persistence paths (SSH persistence,
     // scheduled execution, boot persistence).
     for pattern in HIGH_RISK_WRITE_PATHS {
@@ -3190,6 +1862,12 @@ pub fn pre_read(input: &HookInput) -> HookOutput {
 
     // Case-insensitive matching for macOS APFS (case-preserving filesystem)
     let path_lower = file_path.to_lowercase();
+
+    // Allow Claude Code's own working files that live under ~/.claude/ but
+    // are NOT secrets — project memory, instructions, and plan files.
+    if is_claude_working_file(&path_lower) {
+        return HookOutput::allow();
+    }
 
     // Block reading sensitive directory paths
     for prefix in SENSITIVE_READ_PATHS {
@@ -3761,6 +2439,7 @@ mod tests {
             tool_input,
             config: None,
             entropy_allowlist: Vec::new(),
+            secret_policy: SecretPolicyContext::default(),
         }
     }
 
@@ -4399,6 +3078,123 @@ mod tests {
     }
 
     #[test]
+    fn pre_write_allows_registered_dummy_with_path_and_marker() {
+        let dummy = "sk-proj-dummyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut input = make_input(
+            "write",
+            json!({
+                "file_path": "/repo/tests/router_test.rs",
+                "content": format!("// {}\nconst API_KEY: &str = \"{}\";", crate::dummy_registry::DUMMY_SECRET_MARKER, dummy)
+            }),
+        );
+        input
+            .secret_policy
+            .dummy_registry
+            .mint(
+                dummy,
+                "openai",
+                "router-tests",
+                vec!["**/tests/**".to_owned()],
+                true,
+            )
+            .expect("register dummy");
+
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_write_blocks_registered_dummy_in_src_file() {
+        let dummy = "sk-proj-dummyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut input = make_input(
+            "write",
+            json!({
+                "file_path": "/repo/src/router.rs",
+                "content": format!("// {}\nconst API_KEY: &str = \"{}\";", crate::dummy_registry::DUMMY_SECRET_MARKER, dummy)
+            }),
+        );
+        input
+            .secret_policy
+            .dummy_registry
+            .mint(
+                dummy,
+                "openai",
+                "router-tests",
+                vec!["**/tests/**".to_owned()],
+                true,
+            )
+            .expect("register dummy");
+
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("outside allowed context"));
+    }
+
+    #[test]
+    fn pre_write_blocks_registered_dummy_without_marker() {
+        let dummy = "sk-proj-dummyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut input = make_input(
+            "write",
+            json!({
+                "file_path": "/repo/tests/router_test.rs",
+                "content": format!("const API_KEY: &str = \"{}\";", dummy)
+            }),
+        );
+        input
+            .secret_policy
+            .dummy_registry
+            .mint(
+                dummy,
+                "openai",
+                "router-tests",
+                vec!["**/tests/**".to_owned()],
+                true,
+            )
+            .expect("register dummy");
+
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_write_known_real_wins_over_dummy_registry() {
+        let dummy = "sk-proj-dummyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let key = zeroize::Zeroizing::new(vec![9_u8; 32]);
+        let mut input = make_input(
+            "write",
+            json!({
+                "file_path": "/repo/tests/router_test.rs",
+                "content": format!("// {}\nconst API_KEY: &str = \"{}\";", crate::dummy_registry::DUMMY_SECRET_MARKER, dummy)
+            }),
+        );
+        input
+            .secret_policy
+            .dummy_registry
+            .mint(
+                dummy,
+                "openai",
+                "router-tests",
+                vec!["**/tests/**".to_owned()],
+                true,
+            )
+            .expect("register dummy");
+        input.secret_policy.known_secrets.insert_value(&key, dummy);
+        input.secret_policy.hmac_key = Some(key);
+
+        let output = pre_write(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+        assert!(output
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("Known Real Secret"));
+    }
+
+    #[test]
     fn pre_write_allows_normal_file() {
         let input = make_input(
             "write",
@@ -4449,6 +3245,68 @@ mod tests {
         );
         let output = pre_read(&input);
         assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    // ---- Claude Code working file allowlist tests ----
+
+    #[test]
+    fn pre_read_allows_claude_memory_md() {
+        let input = make_input(
+            "read",
+            json!({ "file_path": "/Users/user/.claude/projects/-some-project/memory/MEMORY.md" }),
+        );
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_read_allows_claude_memory_file() {
+        let input = make_input(
+            "read",
+            json!({ "file_path": "/Users/user/.claude/projects/-some-project/memory/feedback_tracing.md" }),
+        );
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_read_allows_claude_plan_file() {
+        let input = make_input(
+            "read",
+            json!({ "file_path": "/Users/user/.claude/plans/binary-petting-sunbeam.md" }),
+        );
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_read_allows_claude_md_instructions() {
+        let input = make_input(
+            "read",
+            json!({ "file_path": "/Users/user/.claude/projects/-some-project/CLAUDE.md" }),
+        );
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Allow);
+    }
+
+    #[test]
+    fn pre_read_still_blocks_claude_settings() {
+        let input = make_input(
+            "read",
+            json!({ "file_path": "/Users/user/.claude/settings.json" }),
+        );
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
+    }
+
+    #[test]
+    fn pre_read_still_blocks_claude_settings_local() {
+        let input = make_input(
+            "read",
+            json!({ "file_path": "/Users/user/.claude/settings.local.json" }),
+        );
+        let output = pre_read(&input);
+        assert_eq!(output.decision, HookDecision::Block);
     }
 
     // ---- Credential detection expansion tests ----
@@ -5094,6 +3952,7 @@ mod tests {
             tool_input,
             config: None,
             entropy_allowlist: Vec::new(),
+            secret_policy: SecretPolicyContext::default(),
         }
     }
 
@@ -5114,6 +3973,7 @@ mod tests {
                 ..Default::default()
             }),
             entropy_allowlist: Vec::new(),
+            secret_policy: SecretPolicyContext::default(),
         }
     }
 
@@ -5253,6 +4113,7 @@ mod tests {
                 ..Default::default()
             }),
             entropy_allowlist: Vec::new(),
+            secret_policy: SecretPolicyContext::default(),
         };
         let mut log = McpAuditLog::new();
         let _output = pre_mcp_tool_use(&input, Some(&mut log));
@@ -5276,6 +4137,7 @@ mod tests {
                 ..Default::default()
             }),
             entropy_allowlist: Vec::new(),
+            secret_policy: SecretPolicyContext::default(),
         };
         let output = pre_mcp_tool_use(&input, None);
         assert_eq!(
@@ -7602,27 +6464,19 @@ mod tests {
         assert!(!is_valid_curl_package_name("foo%0d%0abar"));
     }
 
-    // ---- check_package_exists: curl args include --max-redirs ----
+    // ---- check_package_exists: HTTP checker without subprocess curl ----
 
     #[test]
-    fn test_curl_command_includes_max_redirs() {
-        // The check_package_exists function constructs a curl command.
-        // We verify --max-redirs is in the args by examining the function
-        // directly. Since we can't easily inspect the Command, we verify
-        // the function returns a sensible result for a valid package name
-        // (it will fail because curl can't reach the network in CI, but
-        // the point is it doesn't fail at validation).
-        // The actual --max-redirs inclusion is verified by code review
-        // and the compile-time presence in the args array.
-        //
-        // For a structural test, we verify the source contains --max-redirs.
-        // This is an intentional compile-time contract test.
-        let source = include_str!("claude.rs");
+    fn test_package_check_uses_http_checker_without_subprocess_curl() {
+        let source = include_str!("../package_policy.rs");
         assert!(
-            source.contains("\"--max-redirs\""),
-            "curl args must include --max-redirs"
+            source.contains("reqwest::blocking::Client"),
+            "package checks should use the cross-platform HTTP client"
         );
-        assert!(source.contains("\"0\""), "--max-redirs must be set to 0");
+        assert!(
+            !source.contains("Command::new(\"curl\")"),
+            "package checks must not shell out to curl"
+        );
     }
 
     // ---- Fix 1: pre_read blocks .env.backup/.bak/.old/.save ----
@@ -7690,6 +6544,7 @@ mod expanded_claude_tests {
             tool_input,
             config: None,
             entropy_allowlist: Vec::new(),
+            secret_policy: SecretPolicyContext::default(),
         }
     }
 

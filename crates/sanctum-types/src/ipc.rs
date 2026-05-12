@@ -65,15 +65,32 @@ pub enum IpcCommand {
         action: String,
         note: String,
     },
+    /// Register a dummy secret hash with runtime policy.
+    DummyMint {
+        provider: String,
+        label: String,
+        hash: String,
+        allowed_paths: Vec<String>,
+        require_marker: bool,
+    },
+    /// List registered dummy secret metadata.
+    DummyList,
+    /// Revoke a registered dummy secret by label or hash prefix.
+    DummyRevoke {
+        label: Option<String>,
+        hash_prefix: Option<String>,
+    },
 }
 
 impl IpcCommand {
     /// Returns `true` for commands that modify daemon state and require
     /// authentication via an IPC auth token.
     ///
-    /// Read-only / informational commands (`Status`, `ListQuarantine`,
-    /// `BudgetStatus`, `ListThreats`, `GetThreatDetails`)
-    /// do not require authentication.
+    /// General read-only / informational commands (`Status`,
+    /// `ListQuarantine`, `BudgetStatus`, `ListThreats`, `GetThreatDetails`)
+    /// do not require authentication. `DummyList` is intentionally
+    /// auth-protected because dummy metadata exposes allowed fixture paths and
+    /// provider labels.
     #[must_use]
     pub const fn requires_auth(&self) -> bool {
         matches!(
@@ -87,6 +104,9 @@ impl IpcCommand {
                 | Self::BudgetReset
                 | Self::ResolveThreat { .. }
                 | Self::RecordUsage { .. }
+                | Self::DummyMint { .. }
+                | Self::DummyList
+                | Self::DummyRevoke { .. }
         )
     }
 }
@@ -156,6 +176,18 @@ pub enum IpcResponse {
         action_taken: String,
         quarantine_id: Option<String>,
     },
+    /// Registered dummy secret metadata with non-sensitive hash prefixes.
+    DummyList { items: Vec<DummyListItem> },
+}
+
+/// Dummy registry item safe for IPC/display.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DummyListItem {
+    pub label: String,
+    pub provider: String,
+    pub hash_prefix: String,
+    pub allowed_paths: Vec<String>,
+    pub require_marker: bool,
 }
 
 /// Summary of a quarantined item for listing.
@@ -476,6 +508,24 @@ mod tests {
             model: "claude".to_string(),
             input_tokens: 100,
             output_tokens: 50,
+        }
+        .requires_auth());
+    }
+
+    #[test]
+    fn dummy_commands_require_auth() {
+        assert!(IpcCommand::DummyMint {
+            provider: "openai".to_owned(),
+            label: "router-tests".to_owned(),
+            hash: "a".repeat(64),
+            allowed_paths: vec!["tests/**".to_owned()],
+            require_marker: true,
+        }
+        .requires_auth());
+        assert!(IpcCommand::DummyList.requires_auth());
+        assert!(IpcCommand::DummyRevoke {
+            label: Some("router-tests".to_owned()),
+            hash_prefix: None,
         }
         .requires_auth());
     }

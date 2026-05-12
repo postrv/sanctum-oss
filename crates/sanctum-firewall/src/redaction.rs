@@ -95,7 +95,22 @@ pub struct RedactionEvent {
     pub end: usize,
 }
 
+/// A credential detection with the original matched text retained for
+/// policy decisions that must distinguish real, dummy, and unknown values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialDetection {
+    /// The type of credential that was detected.
+    pub credential_type: String,
+    /// The original matched value.
+    pub matched_text: String,
+    /// Byte offset where the match starts in the original text.
+    pub start: usize,
+    /// Byte offset where the match ends in the original text.
+    pub end: usize,
+}
+
 /// A match found during scanning, before overlap resolution.
+#[derive(Clone)]
 struct RawMatch {
     credential_type: Cow<'static, str>,
     start: usize,
@@ -286,6 +301,83 @@ fn collect_pattern_matches(text: &str) -> Vec<RawMatch> {
     raw_matches
 }
 
+/// Collect base64 tokens whose decoded content contains a known credential.
+fn collect_base64_matches(text: &str, existing_matches: &[RawMatch]) -> Vec<RawMatch> {
+    RE_BASE64_TOKEN
+        .find_iter(text)
+        .filter_map(|mat| {
+            let token = mat.as_str();
+            let overlaps_existing = existing_matches
+                .iter()
+                .any(|m| mat.start() < m.end && mat.end() > m.start);
+            if overlaps_existing {
+                return None;
+            }
+            try_base64_decode_and_rescan_recursive(token, PATTERNS, 0).map(|evt| RawMatch {
+                credential_type: Cow::Owned(evt.credential_type),
+                start: mat.start(),
+                end: mat.end(),
+                matched_text: token.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Collect high-entropy fallback detections from original text.
+fn collect_entropy_detections(
+    text: &str,
+    threshold: f64,
+    min_length: usize,
+    entropy_allowlist: &HashSet<String>,
+    selected: &[RawMatch],
+) -> Vec<CredentialDetection> {
+    let mut detections = Vec::new();
+    let mut search_from = 0_usize;
+
+    for token in text.split_inclusive(|c: char| c.is_whitespace()) {
+        let Some(rel_start) = text[search_from..].find(token) else {
+            continue;
+        };
+        let token_start = search_from + rel_start;
+        search_from = token_start + token.len();
+
+        let trimmed = token.trim_end();
+        if trimmed.is_empty()
+            || trimmed.starts_with("[REDACTED:")
+            || trimmed.starts_with("[POSSIBLE_SECRET_REDACTED:")
+            || is_allowlisted(entropy_allowlist, trimmed)
+        {
+            continue;
+        }
+
+        let token_end = token_start + trimmed.len();
+        let overlaps_selected = selected
+            .iter()
+            .any(|m| token_start < m.end && token_end > m.start);
+        if overlaps_selected {
+            continue;
+        }
+
+        let sub_tokens = split_on_delimiters(trimmed);
+        let any_high_entropy = sub_tokens.iter().any(|sub| {
+            !is_known_non_secret_format(sub)
+                && !is_allowlisted(entropy_allowlist, sub)
+                && is_high_entropy_secret(sub, threshold, min_length)
+        });
+
+        if any_high_entropy {
+            detections.push(CredentialDetection {
+                credential_type: "High-Entropy Secret".to_owned(),
+                matched_text: trimmed.to_owned(),
+                start: token_start,
+                end: token_end,
+            });
+        }
+    }
+
+    detections
+}
+
 /// Apply entropy-based fallback redaction to already pattern-redacted text,
 /// with delimiter splitting and allowlist support.
 fn apply_entropy_fallback(
@@ -430,24 +522,7 @@ pub fn redact_credentials_with_config(
     let mut raw_matches = collect_pattern_matches(text);
 
     // Base64 decode-and-rescan pass
-    let b64_matches: Vec<RawMatch> = RE_BASE64_TOKEN
-        .find_iter(text)
-        .filter_map(|mat| {
-            let token = mat.as_str();
-            let overlaps_existing = raw_matches
-                .iter()
-                .any(|m| mat.start() < m.end && mat.end() > m.start);
-            if overlaps_existing {
-                return None;
-            }
-            try_base64_decode_and_rescan_recursive(token, PATTERNS, 0).map(|evt| RawMatch {
-                credential_type: Cow::Owned(evt.credential_type),
-                start: mat.start(),
-                end: mat.end(),
-                matched_text: token.to_owned(),
-            })
-        })
-        .collect();
+    let b64_matches = collect_base64_matches(text, &raw_matches);
     raw_matches.extend(b64_matches);
 
     let selected = resolve_overlaps(raw_matches);
@@ -473,6 +548,46 @@ pub fn redact_credentials_with_config(
     );
 
     (entropy_pass, events)
+}
+
+/// Detect credentials without redacting them.
+///
+/// This is intentionally separate from [`redact_credentials_with_config`]:
+/// callers that enforce policy need the original matched value so they can
+/// compare it against known-real and dummy secret registries without widening
+/// the entropy allowlist into a broad pattern bypass.
+#[must_use]
+#[allow(clippy::implicit_hasher)]
+pub fn detect_credentials_with_config(
+    text: &str,
+    threshold: f64,
+    min_length: usize,
+    entropy_allowlist: &HashSet<String>,
+) -> Vec<CredentialDetection> {
+    let mut raw_matches = collect_pattern_matches(text);
+    let b64_matches = collect_base64_matches(text, &raw_matches);
+    raw_matches.extend(b64_matches);
+
+    let selected = resolve_overlaps(raw_matches);
+    let mut detections: Vec<CredentialDetection> = selected
+        .iter()
+        .map(|m| CredentialDetection {
+            credential_type: m.credential_type.to_string(),
+            matched_text: m.matched_text.clone(),
+            start: m.start,
+            end: m.end,
+        })
+        .collect();
+
+    detections.extend(collect_entropy_detections(
+        text,
+        threshold,
+        min_length,
+        entropy_allowlist,
+        &selected,
+    ));
+
+    detections
 }
 
 /// Like [`redact_credentials`] but skips the entropy-based fallback pass.
@@ -1397,6 +1512,34 @@ mod expanded_tests {
         assert!(!events
             .iter()
             .any(|e| e.credential_type == "High-Entropy Secret"));
+    }
+
+    #[test]
+    fn entropy_allowlist_does_not_bypass_pattern_credentials() {
+        let secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut allowlist = HashSet::new();
+        allowlist.insert(hex::encode(Sha256::digest(secret.as_bytes())));
+
+        let input = format!("api_key = {secret}");
+        let (output, events) = redact_credentials_with_config(&input, 5.0, 20, &allowlist);
+
+        assert!(!output.contains(secret));
+        assert!(events.iter().any(|e| e.credential_type == "OpenAI API Key"));
+    }
+
+    #[test]
+    fn detect_credentials_returns_original_pattern_value_for_policy() {
+        let secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let detections = detect_credentials_with_config(
+            &format!("api_key = {secret}"),
+            5.0,
+            20,
+            &HashSet::new(),
+        );
+
+        assert!(detections
+            .iter()
+            .any(|d| { d.credential_type == "OpenAI API Key" && d.matched_text == secret }));
     }
 
     #[test]

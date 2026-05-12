@@ -71,6 +71,15 @@ pub struct SentinelConfig {
     /// Homebrew ecosystem monitoring settings.
     #[serde(default)]
     pub homebrew: HomebrewConfig,
+    /// NuGet/.NET ecosystem monitoring settings.
+    #[serde(default)]
+    pub nuget: NugetConfig,
+    /// Maven ecosystem monitoring settings.
+    #[serde(default)]
+    pub maven: MavenConfig,
+    /// Gradle ecosystem monitoring settings.
+    #[serde(default)]
+    pub gradle: GradleConfig,
 }
 
 impl Default for SentinelConfig {
@@ -89,6 +98,9 @@ impl Default for SentinelConfig {
             cargo: CargoConfig::default(),
             pip: PipConfig::default(),
             homebrew: HomebrewConfig::default(),
+            nuget: NugetConfig::default(),
+            maven: MavenConfig::default(),
+            gradle: GradleConfig::default(),
         }
     }
 }
@@ -301,6 +313,103 @@ pub fn default_homebrew_trusted_taps() -> Vec<String> {
         "homebrew/cask".to_owned(),
         "homebrew/services".to_owned(),
         "homebrew/bundle".to_owned(),
+    ]
+}
+
+/// Configuration for NuGet/.NET ecosystem monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NugetConfig {
+    /// `NuGet` package IDs whose checks are bypassed.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+
+    /// `NuGet` sources considered trusted.
+    #[serde(default = "default_nuget_trusted_sources")]
+    pub trusted_sources: Vec<String>,
+
+    /// Warn when dotnet/msbuild commands may implicitly restore packages.
+    #[serde(default = "default_true")]
+    pub warn_implicit_restore: bool,
+}
+
+impl Default for NugetConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            trusted_sources: default_nuget_trusted_sources(),
+            warn_implicit_restore: true,
+        }
+    }
+}
+
+#[must_use]
+pub fn default_nuget_trusted_sources() -> Vec<String> {
+    vec!["https://api.nuget.org/v3/index.json".to_owned()]
+}
+
+/// Configuration for Maven ecosystem monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MavenConfig {
+    /// Maven coordinates in `groupId:artifactId` format whose checks are bypassed.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+
+    /// Trusted Maven groupId prefixes whose checks are skipped.
+    #[serde(default = "default_java_trusted_prefixes")]
+    pub trusted_prefixes: Vec<String>,
+
+    /// Warn when Maven wrappers or repositories may download code.
+    #[serde(default = "default_true")]
+    pub warn_wrapper_download: bool,
+}
+
+impl Default for MavenConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            trusted_prefixes: default_java_trusted_prefixes(),
+            warn_wrapper_download: true,
+        }
+    }
+}
+
+/// Configuration for Gradle ecosystem monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GradleConfig {
+    /// Gradle coordinates or plugin IDs whose checks are bypassed.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+
+    /// Trusted Maven group/plugin prefixes whose checks are skipped.
+    #[serde(default = "default_java_trusted_prefixes")]
+    pub trusted_prefixes: Vec<String>,
+
+    /// Warn when Gradle dynamic versions are used.
+    #[serde(default = "default_true")]
+    pub warn_dynamic_versions: bool,
+}
+
+impl Default for GradleConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: Vec::new(),
+            trusted_prefixes: default_java_trusted_prefixes(),
+            warn_dynamic_versions: true,
+        }
+    }
+}
+
+#[must_use]
+pub fn default_java_trusted_prefixes() -> Vec<String> {
+    vec![
+        "org.apache.".to_owned(),
+        "com.google.".to_owned(),
+        "org.springframework.".to_owned(),
+        "org.jetbrains.".to_owned(),
+        "io.micrometer.".to_owned(),
     ]
 }
 

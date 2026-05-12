@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 
+use crate::ipc_transport::IpcEndpoint;
+
 /// Well-known paths for credential files and Sanctum data.
 #[derive(Debug, Clone)]
 pub struct WellKnownPaths {
@@ -64,6 +66,12 @@ impl WellKnownPaths {
             socket_path,
         })
     }
+
+    /// Return the platform IPC endpoint.
+    #[must_use]
+    pub fn ipc_endpoint(&self) -> IpcEndpoint {
+        IpcEndpoint::platform_default(self.socket_path.clone())
+    }
 }
 
 impl Default for WellKnownPaths {
@@ -84,9 +92,18 @@ impl Default for WellKnownPaths {
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .and_then(|s| s.trim().parse::<u32>().ok())
                 .unwrap_or_else(std::process::id);
-            #[cfg(not(unix))]
-            let uid = std::process::id();
+            #[cfg(unix)]
             let fallback = PathBuf::from(format!("/tmp/sanctum-{uid}"));
+            #[cfg(windows)]
+            let fallback = std::env::var_os("TEMP")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows\Temp"))
+                .join(format!(
+                    "sanctum-{}",
+                    current_username().unwrap_or_else(|| std::process::id().to_string())
+                ));
+            #[cfg(not(any(unix, windows)))]
+            let fallback = PathBuf::from(format!("/tmp/sanctum-{}", std::process::id()));
 
             // Create the directory with restricted permissions (0o700) so other
             // users cannot plant symlinks or read contents.
@@ -120,7 +137,8 @@ pub fn credential_paths() -> Vec<PathBuf> {
         return Vec::new();
     };
 
-    vec![
+    #[allow(unused_mut)]
+    let mut paths = vec![
         home.join(".ssh"),
         home.join(".aws/credentials"),
         home.join(".aws/config"),
@@ -130,12 +148,35 @@ pub fn credential_paths() -> Vec<PathBuf> {
         home.join(".pypirc"),
         home.join(".docker/config.json"),
         home.join(".kube/config"),
-    ]
+    ];
+
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            paths.push(appdata.join("NuGet/NuGet.Config"));
+            paths.push(appdata.join("GitHub CLI/hosts.yml"));
+        }
+        if let Some(localappdata) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            paths.push(localappdata.join("NuGet/Cache"));
+            paths.push(localappdata.join("Docker/config.json"));
+        }
+        paths.push(home.join(".nuget/NuGet/NuGet.Config"));
+        paths.push(home.join(".azure"));
+        paths.push(home.join(".git-credentials"));
+        paths.push(home.join(".kube/config"));
+        paths.push(home.join("AppData/Roaming/gcloud"));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    paths
 }
 
 /// Resolve the home directory.
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// Platform-specific data and config directories.
@@ -161,11 +202,31 @@ fn platform_dirs(home: &std::path::Path) -> (PathBuf, PathBuf) {
         (data, config)
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let data = std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| home.join("AppData").join("Local"), PathBuf::from)
+            .join("sanctum");
+
+        let config = std::env::var_os("APPDATA")
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| home.join("AppData").join("Roaming"), PathBuf::from)
+            .join("sanctum");
+
+        (data, config)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let base = home.join(".sanctum");
         (base.clone(), base)
     }
+}
+
+#[cfg(windows)]
+fn current_username() -> Option<String> {
+    crate::windows_security::current_username_for_endpoint()
 }
 
 #[cfg(test)]
@@ -266,5 +327,28 @@ mod tests {
             let paths = credential_paths();
             assert!(!paths.is_empty());
         }
+    }
+
+    #[test]
+    fn credential_paths_do_not_contain_duplicates() {
+        let paths = credential_paths();
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(unique.len(), paths.len());
+    }
+
+    #[test]
+    fn ipc_endpoint_is_platform_appropriate() {
+        let paths = WellKnownPaths::default();
+        #[cfg(windows)]
+        assert!(matches!(paths.ipc_endpoint(), IpcEndpoint::NamedPipe(_)));
+        #[cfg(not(windows))]
+        assert!(matches!(paths.ipc_endpoint(), IpcEndpoint::Unix(_)));
+    }
+
+    #[test]
+    fn ipc_endpoint_matches_transport_default() {
+        let paths = WellKnownPaths::default();
+        let endpoint = paths.ipc_endpoint();
+        assert_eq!(endpoint, IpcEndpoint::platform_default(paths.socket_path));
     }
 }

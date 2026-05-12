@@ -11,12 +11,12 @@
 use std::path::PathBuf;
 
 use sanctum_firewall::hooks::claude;
-use sanctum_firewall::hooks::claude::{
-    CargoConfig, DockerConfig, GoConfig, HomebrewConfig, NpmConfig, PackageManagerConfigs,
-    PipConfig,
-};
 use sanctum_firewall::hooks::protocol::{HookDecision, HookInput, HookOutput};
 use sanctum_firewall::mcp::audit::McpAuditLog;
+use sanctum_firewall::package_policy::{
+    CargoConfig, DockerConfig, GoConfig, GradleConfig, HomebrewConfig, MavenConfig, NpmConfig,
+    NugetConfig, PackageManagerConfigs, PipConfig,
+};
 use sanctum_types::config::AiFirewallConfig;
 use sanctum_types::errors::CliError;
 use sanctum_types::ipc::{IpcCommand, IpcMessage};
@@ -698,6 +698,176 @@ fn is_valid_homebrew_tap_name(tap: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'/')
 }
 
+fn load_config_for_package_section(
+    label: &str,
+) -> Option<(
+    sanctum_types::config::SanctumConfig,
+    bool,
+    std::path::PathBuf,
+)> {
+    let config_path = {
+        let local = std::path::PathBuf::from(".sanctum/config.toml");
+        if local.exists() {
+            Some((local, true))
+        } else {
+            let paths = sanctum_types::paths::WellKnownPaths::default();
+            let global = paths.config_dir.join("config.toml");
+            global.exists().then_some((global, false))
+        }
+    }?;
+
+    let (path, is_local) = config_path;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to read {label} config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            return None;
+        }
+    };
+
+    match toml::from_str::<sanctum_types::config::SanctumConfig>(&content) {
+        Ok(cfg) => Some((cfg, is_local, path)),
+        Err(e) => {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "sanctum: warning: failed to parse {label} config from {}, using defaults: {e}",
+                    path.display()
+                );
+            }
+            None
+        }
+    }
+}
+
+fn is_valid_package_policy_entry(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with('.')
+        && !value.starts_with('-')
+        && !value.contains("..")
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || b == b'-'
+                || b == b'_'
+                || b == b'.'
+                || b == b'/'
+                || b == b':'
+                || b == b'+'
+        })
+}
+
+fn filter_package_policy_entries<I>(entries: I, label: &str) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let valid = is_valid_package_policy_entry(entry);
+            if !valid {
+                tracing::warn!(entry = %entry, "ignoring invalid {label} entry");
+            }
+            valid
+        })
+        .collect()
+}
+
+fn clamp_local_entries(entries: &mut Vec<String>, label: &str, is_local: bool) {
+    if is_local && entries.len() > MAX_LOCAL_ALLOWLIST_SIZE {
+        tracing::warn!(
+            count = entries.len(),
+            max = MAX_LOCAL_ALLOWLIST_SIZE,
+            "project-local {label} truncated to {MAX_LOCAL_ALLOWLIST_SIZE} entries"
+        );
+        entries.truncate(MAX_LOCAL_ALLOWLIST_SIZE);
+    }
+}
+
+fn load_nuget_config() -> NugetConfig {
+    let Some((cfg, is_local, _path)) = load_config_for_package_section("NuGet") else {
+        return NugetConfig::default();
+    };
+    let mut allowlist =
+        filter_package_policy_entries(cfg.sentinel.nuget.allowlist, "NuGet allowlist");
+    let mut trusted_sources = cfg
+        .sentinel
+        .nuget
+        .trusted_sources
+        .into_iter()
+        .filter(|source| {
+            let valid = !source.is_empty() && source.len() <= 512 && !source.contains('\n');
+            if !valid {
+                tracing::warn!(source = %source, "ignoring invalid NuGet trusted source");
+            }
+            valid
+        })
+        .collect::<Vec<_>>();
+    clamp_local_entries(&mut allowlist, "NuGet allowlist", is_local);
+    clamp_local_entries(&mut trusted_sources, "NuGet trusted_sources", is_local);
+    NugetConfig {
+        allowlist,
+        trusted_sources,
+        warn_implicit_restore: if is_local {
+            true
+        } else {
+            cfg.sentinel.nuget.warn_implicit_restore
+        },
+    }
+}
+
+fn load_maven_config() -> MavenConfig {
+    let Some((cfg, is_local, _path)) = load_config_for_package_section("Maven") else {
+        return MavenConfig::default();
+    };
+    let mut allowlist =
+        filter_package_policy_entries(cfg.sentinel.maven.allowlist, "Maven allowlist");
+    let mut trusted_prefixes = filter_package_policy_entries(
+        cfg.sentinel.maven.trusted_prefixes,
+        "Maven trusted_prefixes",
+    );
+    clamp_local_entries(&mut allowlist, "Maven allowlist", is_local);
+    clamp_local_entries(&mut trusted_prefixes, "Maven trusted_prefixes", is_local);
+    MavenConfig {
+        allowlist,
+        trusted_prefixes,
+        warn_wrapper_download: if is_local {
+            true
+        } else {
+            cfg.sentinel.maven.warn_wrapper_download
+        },
+    }
+}
+
+fn load_gradle_config() -> GradleConfig {
+    let Some((cfg, is_local, _path)) = load_config_for_package_section("Gradle") else {
+        return GradleConfig::default();
+    };
+    let mut allowlist =
+        filter_package_policy_entries(cfg.sentinel.gradle.allowlist, "Gradle allowlist");
+    let mut trusted_prefixes = filter_package_policy_entries(
+        cfg.sentinel.gradle.trusted_prefixes,
+        "Gradle trusted_prefixes",
+    );
+    clamp_local_entries(&mut allowlist, "Gradle allowlist", is_local);
+    clamp_local_entries(&mut trusted_prefixes, "Gradle trusted_prefixes", is_local);
+    GradleConfig {
+        allowlist,
+        trusted_prefixes,
+        warn_dynamic_versions: if is_local {
+            true
+        } else {
+            cfg.sentinel.gradle.warn_dynamic_versions
+        },
+    }
+}
+
 /// Load `DockerConfig` from the config file (best-effort).
 ///
 /// Reads the `[ai_firewall.docker]` section. Returns defaults if unavailable.
@@ -909,28 +1079,24 @@ fn record_hook_threat_event(
 
 /// Send an IPC command to the daemon synchronously (best-effort).
 ///
-/// Uses blocking Unix socket I/O with a 2-second timeout. All errors are
+/// Uses blocking platform IPC I/O. All errors are
 /// silently swallowed -- the hook's decision must never be affected by IPC
 /// failures or a missing daemon.
 fn send_usage_ipc_best_effort(command: &IpcCommand) {
     use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     let paths = sanctum_types::paths::WellKnownPaths::default();
-    let socket_path = &paths.socket_path;
-
-    if !socket_path.exists() {
+    let endpoint = paths.ipc_endpoint();
+    if endpoint
+        .as_unix_path()
+        .is_some_and(|socket_path| !socket_path.exists())
+    {
         return;
     }
 
-    let Ok(mut stream) = UnixStream::connect(socket_path) else {
+    let Ok(mut stream) = sanctum_types::ipc_transport::connect_sync(&endpoint) else {
         return;
     };
-
-    let timeout = Some(Duration::from_secs(2));
-    let _ = stream.set_write_timeout(timeout);
-    let _ = stream.set_read_timeout(timeout);
 
     // Read auth token from data dir (best-effort).
     let auth_token = sanctum_types::auth::read_token(&paths.data_dir).ok();
@@ -1048,6 +1214,22 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
         "entropy allowlist"
     );
 
+    // Load runtime-only secret policy context. These fields are skipped during
+    // hook JSON deserialisation so repos cannot inject their own policy.
+    let dummy_registry_path = sanctum_firewall::dummy_registry::registry_path(&paths.data_dir);
+    input.secret_policy.dummy_registry =
+        sanctum_firewall::dummy_registry::load_registry_best_effort(&dummy_registry_path);
+
+    let known_path = sanctum_firewall::known_secrets::denylist_path(&paths.data_dir);
+    input.secret_policy.known_secrets =
+        sanctum_firewall::known_secrets::load_denylist_best_effort(&known_path);
+    if !input.secret_policy.known_secrets.is_empty() {
+        match sanctum_firewall::known_secrets::load_or_create_hmac_key(&paths.data_dir) {
+            Ok(key) => input.secret_policy.hmac_key = Some(key),
+            Err(e) => tracing::warn!(%e, "failed to load HMAC key; known-secret denylist disabled"),
+        }
+    }
+
     // Load package manager configs (best-effort; defaults if unavailable).
     let npm_config = load_npm_config();
     let go_config = load_go_config();
@@ -1064,6 +1246,9 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
     let cargo_config = load_cargo_config();
     let pip_config = load_pip_config();
     let homebrew_config = load_homebrew_config();
+    let nuget_config = load_nuget_config();
+    let maven_config = load_maven_config();
+    let gradle_config = load_gradle_config();
     let docker_config = load_docker_config();
 
     let pkg_configs = PackageManagerConfigs {
@@ -1072,6 +1257,9 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
         cargo: cargo_config,
         pip: pip_config,
         homebrew: homebrew_config,
+        nuget: nuget_config,
+        maven: maven_config,
+        gradle: gradle_config,
         docker: docker_config,
     };
 
@@ -1087,7 +1275,7 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
 
     let output: HookOutput = match action {
         "pre-bash" => claude::pre_bash_with_configs(&input, &pkg_configs),
-        "pre-write" => claude::pre_write(&input),
+        "pre-write" => claude::pre_write_with_configs(&input, &pkg_configs),
         "pre-read" => claude::pre_read(&input),
         "pre-mcp" => claude::pre_mcp_tool_use(&input, audit_log.as_mut()),
         "post-bash" => claude::post_bash_with_configs(&input, &pkg_configs),
@@ -1186,7 +1374,7 @@ fn run_inner(action: &str, verbose: bool) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use sanctum_firewall::hooks::claude;
-    use sanctum_firewall::hooks::protocol::{HookDecision, HookInput};
+    use sanctum_firewall::hooks::protocol::{HookDecision, HookInput, SecretPolicyContext};
     use sanctum_types::threat::{Action, ThreatCategory, ThreatEvent, ThreatLevel};
     use serde_json::json;
     use std::path::PathBuf;
@@ -1197,6 +1385,7 @@ mod tests {
             tool_input,
             config: None,
             entropy_allowlist: Vec::new(),
+            secret_policy: SecretPolicyContext::default(),
         }
     }
 
@@ -1984,6 +2173,7 @@ mod tests {
                 ..Default::default()
             }),
             entropy_allowlist: Vec::new(),
+            secret_policy: SecretPolicyContext::default(),
         };
         let _output = claude::pre_mcp_tool_use(&input, audit_log.as_mut());
 

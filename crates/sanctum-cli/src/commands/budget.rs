@@ -361,16 +361,28 @@ mod tests {
 
     #[test]
     fn record_daemon_not_running_produces_error() {
-        // When the daemon isn't running, send_command should return DaemonNotRunning.
-        // We can't easily call run() here because it needs a socket, but we can
-        // verify the ipc_client handles a missing socket correctly.
-        let result = ipc_client::send_command(&IpcCommand::RecordUsage {
-            provider: "anthropic".to_string(),
-            model: "claude-sonnet-4-6".to_string(),
-            input_tokens: 100,
-            output_tokens: 50,
-        });
-        // Should fail gracefully, not crash.
+        // Verify that connecting to a nonexistent socket produces an error,
+        // not a crash.  We use send_command_to_path (which accepts an explicit
+        // socket path) so the test is independent of whether the real daemon
+        // is running.
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let bogus_socket = tmp.path().join("nonexistent.sock");
+
+        let result = ipc_client::send_command_to_path(
+            &bogus_socket,
+            &IpcCommand::RecordUsage {
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-6".to_string(),
+                input_tokens: 100,
+                output_tokens: 50,
+            },
+        );
+        // Should fail gracefully with DaemonNotRunning (socket doesn't exist).
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, sanctum_types::errors::CliError::DaemonNotRunning),
+            "expected DaemonNotRunning, got {err:?}"
+        );
     }
 }

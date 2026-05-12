@@ -10,5 +10,8 @@ pub mod config;
 pub mod errors;
 pub mod fs_safety;
 pub mod ipc;
+pub mod ipc_transport;
 pub mod paths;
 pub mod threat;
+
+mod windows_security;

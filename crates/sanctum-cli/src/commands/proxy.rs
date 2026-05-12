@@ -122,8 +122,14 @@ fn cmd_status() -> Result<(), CliError> {
 /// Generate and install the CA certificate.
 fn cmd_install_ca() -> Result<(), CliError> {
     let paths = WellKnownPaths::require().map_err(CliError::InvalidArgs)?;
-    let key_path = ca::default_key_path(&paths.data_dir);
-    let cert_path = ca::default_cert_path(&paths.data_dir);
+    cmd_install_ca_in(&paths.data_dir)
+}
+
+fn cmd_install_ca_in(data_dir: &std::path::Path) -> Result<(), CliError> {
+    let key_path = ca::default_key_path(data_dir);
+    let cert_path = ca::default_cert_path(data_dir);
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| CliError::CommandFailed(format!("failed to create data directory: {e}")))?;
 
     let config = sanctum_types::config::ProxyConfig::default();
     let ca_identity = ca::generate_ca(config.ca_validity_days)
@@ -175,7 +181,13 @@ fn trust_platform(cert_path: &std::path::Path) -> Result<(), CliError> {
 }
 
 /// Platform-specific trust store installation.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+fn trust_platform(cert_path: &std::path::Path) -> Result<(), CliError> {
+    trust_windows(cert_path)
+}
+
+/// Platform-specific trust store installation.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn trust_platform(cert_path: &std::path::Path) -> Result<(), CliError> {
     write_info("Automatic trust store installation is not supported on this platform.")?;
     write_info(&format!(
@@ -185,6 +197,27 @@ fn trust_platform(cert_path: &std::path::Path) -> Result<(), CliError> {
     Err(CliError::PreviewFeature(
         "trust store installation not supported on this platform".to_string(),
     ))
+}
+
+/// Trust the CA on Windows using certutil for the current user.
+#[cfg(target_os = "windows")]
+fn trust_windows(cert_path: &std::path::Path) -> Result<(), CliError> {
+    write_info("Adding CA to Windows current-user Root trust store...")?;
+    let output = std::process::Command::new("certutil")
+        .args(["-user", "-addstore", "Root"])
+        .arg(cert_path)
+        .output()
+        .map_err(CliError::Io)?;
+
+    if output.status.success() {
+        write_info("CA certificate added to Windows current-user trust store.")?;
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(CliError::CommandFailed(format!(
+            "certutil failed to add CA to trust store: {stderr}"
+        )))
+    }
 }
 
 /// Trust the CA on macOS using the security command.
@@ -271,20 +304,14 @@ mod tests {
 
     #[test]
     fn test_proxy_install_ca_succeeds() {
-        // This should succeed as long as HOME is set.
-        let result = run(&ProxyCliAction::InstallCa);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = cmd_install_ca_in(temp.path());
         assert!(result.is_ok(), "install-ca should succeed");
 
-        // Verify CA files were created.
-        let paths = WellKnownPaths::require().unwrap();
-        let key_path = ca::default_key_path(&paths.data_dir);
-        let cert_path = ca::default_cert_path(&paths.data_dir);
+        let key_path = ca::default_key_path(temp.path());
+        let cert_path = ca::default_cert_path(temp.path());
         assert!(key_path.exists(), "CA key should exist after install-ca");
         assert!(cert_path.exists(), "CA cert should exist after install-ca");
-
-        // Clean up.
-        let _ = std::fs::remove_file(&key_path);
-        let _ = std::fs::remove_file(&cert_path);
     }
 
     #[test]

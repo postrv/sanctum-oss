@@ -181,6 +181,21 @@ warn_no_quarantine = true                # warn on cask --no-quarantine
 block_external_formula_installs = true   # block brew install URL/path formula files
 warn_brewfile = true                     # warn on brew bundle/Brewfile installs
 
+[sentinel.nuget]
+allowlist = []                           # NuGet package IDs that skip registry checks
+trusted_sources = ["https://api.nuget.org/v3/index.json"]
+warn_implicit_restore = true             # warn on dotnet/msbuild implicit restore
+
+[sentinel.maven]
+allowlist = []                           # "groupId:artifactId" entries that skip checks
+trusted_prefixes = ["org.apache.", "com.google.", "org.springframework.", "org.jetbrains.", "io.micrometer."]
+warn_wrapper_download = true             # warn on risky Maven repository/wrapper downloads
+
+[sentinel.gradle]
+allowlist = []                           # Maven coordinates or Gradle plugin IDs that skip checks
+trusted_prefixes = ["org.apache.", "com.google.", "org.springframework.", "org.jetbrains.", "io.micrometer."]
+warn_dynamic_versions = true             # warn on 1.+ / latest.release style versions
+
 [ai_firewall]
 redact_credentials = true
 claude_hooks = true

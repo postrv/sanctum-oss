@@ -8,18 +8,25 @@ repository.workspace = true
 description = "AI firewall with credential redaction and hook handlers for Sanctum"
 
 [dependencies]
-sanctum-types = { path = "../sanctum-types", version = "0.4.2" }
-sanctum-sentinel = { path = "../sanctum-sentinel", version = "0.4.2" }
+sanctum-types = { path = "../sanctum-types", version = "0.5.0" }
+sanctum-sentinel = { path = "../sanctum-sentinel", version = "0.5.0" }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
+getrandom = { workspace = true }
+zeroize = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+quick-xml = { workspace = true }
 cel = { version = "0.13", default-features = false }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+keyring = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

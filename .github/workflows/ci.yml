@@ -60,6 +60,19 @@ jobs:
       - run: cargo test --all --all-features
       - run: cargo test --all --all-features -- --ignored
 
+  test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.94.0
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - run: cargo check --target x86_64-pc-windows-msvc --all-targets --all-features
+      - run: cargo test --all --all-features
+
   property-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -177,7 +190,7 @@ jobs:
         run: diff /tmp/build1.sha256 /tmp/build2.sha256
 
   build-release:
-    needs: [lint, deny, test-linux, test-macos, property-tests, audit, fuzz, reproducible-build]
+    needs: [lint, deny, test-linux, test-macos, test-windows, property-tests, audit, fuzz, reproducible-build]
     if: ${{ !failure() && !cancelled() }}
     timeout-minutes: 30
     strategy:
@@ -185,13 +198,20 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            bin_ext: ''
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
+            bin_ext: ''
           - target: x86_64-apple-darwin
             os: macos-latest
+            bin_ext: ''
           - target: aarch64-apple-darwin
             os: macos-latest
+            bin_ext: ''
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bin_ext: '.exe'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -213,8 +233,8 @@ jobs:
         with:
           name: sanctum-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/sanctum
-            target/${{ matrix.target }}/release/sanctum-daemon
+            target/${{ matrix.target }}/release/sanctum${{ matrix.bin_ext }}
+            target/${{ matrix.target }}/release/sanctum-daemon${{ matrix.bin_ext }}
 
   test-installer:
     runs-on: ubuntu-latest

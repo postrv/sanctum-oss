@@ -23,7 +23,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Checking CI check runs for commit ${GITHUB_SHA}..."
-          REQUIRED_CHECKS="lint deny test-linux test-macos property-tests audit fuzz"
+          REQUIRED_CHECKS="lint deny test-linux test-macos test-windows property-tests audit fuzz"
           # Wait up to 30 minutes for CI checks to complete (tag push may race with CI)
           for i in $(seq 1 180); do
             ALL_PASSED=true
@@ -71,13 +71,20 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            bin_ext: ''
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
+            bin_ext: ''
           - target: x86_64-apple-darwin
             os: macos-latest
+            bin_ext: ''
           - target: aarch64-apple-darwin
             os: macos-latest
+            bin_ext: ''
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bin_ext: '.exe'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -101,8 +108,8 @@ jobs:
         with:
           name: sanctum-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/sanctum
-            target/${{ matrix.target }}/release/sanctum-daemon
+            target/${{ matrix.target }}/release/sanctum${{ matrix.bin_ext }}
+            target/${{ matrix.target }}/release/sanctum-daemon${{ matrix.bin_ext }}
 
   # ── Sign all binaries with Sigstore (keyless OIDC) ─────────────────────────
   sign:
@@ -115,17 +122,27 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       - name: Generate SHA256 checksums
         run: |
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc; do
             dir="sanctum-${target}"
             if [ -d "$dir" ]; then
-              sha256sum "$dir/sanctum" | sed "s|  ${dir}/sanctum|  sanctum-${target}|" >> SHA256SUMS
-              sha256sum "$dir/sanctum-daemon" | sed "s|  ${dir}/sanctum-daemon|  sanctum-daemon-${target}|" >> SHA256SUMS
+              for binary in sanctum sanctum-daemon; do
+                file="$dir/$binary"
+                asset="$binary-${target}"
+                if [ -f "$file.exe" ]; then
+                  file="$file.exe"
+                  asset="$asset.exe"
+                fi
+                if [ -f "$file" ]; then
+                  sha256sum "$file" | sed "s|  ${file}|  ${asset}|" >> SHA256SUMS
+                fi
+              done
             fi
           done
           cat SHA256SUMS
       - name: Sign binaries
         run: |
-          for binary in sanctum-*/sanctum sanctum-*/sanctum-daemon; do
+          for binary in sanctum-*/sanctum sanctum-*/sanctum-daemon sanctum-*/sanctum.exe sanctum-*/sanctum-daemon.exe; do
+            [ -f "$binary" ] || continue
             echo "Signing ${binary}..."
             cosign sign-blob --yes "$binary" \
               --output-signature "${binary}.sig" \
@@ -193,12 +210,17 @@ jobs:
         run: |
           mkdir -p release-assets
           # Flatten binaries and signatures into release-assets/
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc; do
             dir="sanctum-${target}"
             if [ -d "$dir" ]; then
-              for file in "$dir"/sanctum "$dir"/sanctum-daemon; do
+              for file in "$dir"/sanctum "$dir"/sanctum-daemon "$dir"/sanctum.exe "$dir"/sanctum-daemon.exe; do
                 if [ -f "$file" ]; then
-                  base="$(basename "$file")-${target}"
+                  name="$(basename "$file")"
+                  if [[ "$name" == *.exe ]]; then
+                    base="${name%.exe}-${target}.exe"
+                  else
+                    base="${name}-${target}"
+                  fi
                   cp "$file" "release-assets/${base}"
                 fi
               done
@@ -206,17 +228,22 @@ jobs:
           done
           # Copy signatures (from the signatures artifact)
           if [ -d "signatures" ]; then
-            for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc; do
               dir="signatures/sanctum-${target}"
               if [ -d "$dir" ]; then
                 for sigfile in "$dir"/*.sig "$dir"/*.cert; do
                   if [ -f "$sigfile" ]; then
                     # e.g. sanctum.sig -> sanctum-x86_64-unknown-linux-gnu.sig
                     fname="$(basename "$sigfile")"
-                    # Extract binary name and extension
-                    binary_name="${fname%%.*}"
-                    ext="${fname#*.}"
-                    cp "$sigfile" "release-assets/${binary_name}-${target}.${ext}"
+                    if [[ "$fname" == *.exe.sig || "$fname" == *.exe.cert ]]; then
+                      binary_name="${fname%%.exe.*}"
+                      ext="${fname##*.}"
+                      cp "$sigfile" "release-assets/${binary_name}-${target}.exe.${ext}"
+                    else
+                      binary_name="${fname%%.*}"
+                      ext="${fname#*.}"
+                      cp "$sigfile" "release-assets/${binary_name}-${target}.${ext}"
+                    fi
                   fi
                 done
               fi

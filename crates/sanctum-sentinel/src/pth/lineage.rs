@@ -380,7 +380,140 @@ fn platform_get_process_info(pid: u32) -> Option<ProcessInfo> {
     })
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn platform_get_process_info(pid: u32) -> Option<ProcessInfo> {
+    static PROCESS_TABLE: std::sync::OnceLock<std::collections::HashMap<u32, ProcessInfo>> =
+        std::sync::OnceLock::new();
+    PROCESS_TABLE
+        .get_or_init(load_windows_process_table)
+        .get(&pid)
+        .cloned()
+}
+
+#[cfg(target_os = "windows")]
+fn load_windows_process_table() -> std::collections::HashMap<u32, ProcessInfo> {
+    let script = "Get-CimInstance Win32_Process | Select-Object ProcessId,Name,ExecutablePath,ParentProcessId | ConvertTo-Json -Compress";
+    run_powershell_json(script, std::time::Duration::from_secs(10))
+        .map(|output| parse_windows_process_table_json(&output))
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn run_powershell_json(script: &str, timeout: std::time::Duration) -> Option<String> {
+    let mut child = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().ok()?;
+                if status.success() {
+                    return String::from_utf8(output.stdout).ok();
+                }
+                return None;
+            }
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_process_json(json: &str) -> Option<ProcessInfo> {
+    let value: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
+    if value.is_null() {
+        return None;
+    }
+    let obj = value
+        .as_array()
+        .and_then(|arr| arr.first())
+        .unwrap_or(&value);
+    let pid = obj
+        .get("ProcessId")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let name = obj.get("Name")?.as_str()?.to_owned();
+    let exe = obj
+        .get("ExecutablePath")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+    let parent_pid = obj
+        .get("ParentProcessId")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok());
+    Some(ProcessInfo {
+        pid,
+        name,
+        exe,
+        ppid: parent_pid,
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_process_table_json(json: &str) -> std::collections::HashMap<u32, ProcessInfo> {
+    let value: serde_json::Value = match serde_json::from_str::<serde_json::Value>(json.trim()) {
+        Ok(value) if !value.is_null() => value,
+        _ => return std::collections::HashMap::new(),
+    };
+
+    let mut table = std::collections::HashMap::new();
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                if let Some(info) = parse_windows_process_json_value(&value) {
+                    table.insert(info.pid, info);
+                }
+            }
+        }
+        other => {
+            if let Some(info) = parse_windows_process_json_value(&other) {
+                table.insert(info.pid, info);
+            }
+        }
+    }
+    table
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_process_json_value(value: &serde_json::Value) -> Option<ProcessInfo> {
+    if value.is_null() {
+        return None;
+    }
+    let obj = value.as_object()?;
+    let pid = obj
+        .get("ProcessId")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let name = obj.get("Name")?.as_str()?.to_owned();
+    let exe = obj
+        .get("ExecutablePath")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+    let parent_pid = obj
+        .get("ParentProcessId")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok());
+    Some(ProcessInfo {
+        pid,
+        name,
+        exe,
+        ppid: parent_pid,
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn platform_get_process_info(pid: u32) -> Option<ProcessInfo> {
     let _ = pid;
     None
@@ -402,6 +535,51 @@ mod tests {
         assert!(lineage.has_ancestor_named("pip"));
         let root = lineage.root_ancestor().expect("root should exist");
         assert_eq!(root.name, "pip");
+    }
+
+    #[test]
+    fn parse_windows_process_json_object() {
+        let json = r#"{"ProcessId":123,"Name":"powershell.exe","ExecutablePath":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","ParentProcessId":42}"#;
+        let info = parse_windows_process_json(json).expect("parse");
+        assert_eq!(info.pid, 123);
+        assert_eq!(info.name, "powershell.exe");
+        assert_eq!(info.ppid, Some(42));
+        assert!(info.exe.is_some());
+    }
+
+    #[test]
+    fn parse_windows_process_json_array() {
+        let json =
+            r#"[{"ProcessId":123,"Name":"dotnet.exe","ExecutablePath":null,"ParentProcessId":42}]"#;
+        let info = parse_windows_process_json(json).expect("parse");
+        assert_eq!(info.pid, 123);
+        assert_eq!(info.name, "dotnet.exe");
+        assert!(info.exe.is_none());
+    }
+
+    #[test]
+    fn parse_windows_process_json_null_or_malformed() {
+        assert!(parse_windows_process_json("null").is_none());
+        assert!(parse_windows_process_json("{bad").is_none());
+    }
+
+    #[test]
+    fn parse_windows_process_table_json_indexes_by_pid() {
+        let json = r#"[
+            {"ProcessId":123,"Name":"dotnet.exe","ExecutablePath":null,"ParentProcessId":42},
+            {"ProcessId":42,"Name":"powershell.exe","ExecutablePath":"C:\\Windows\\System32\\powershell.exe","ParentProcessId":4}
+        ]"#;
+        let table = parse_windows_process_table_json(json);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.get(&123).expect("pid 123").ppid, Some(42));
+        assert_eq!(table.get(&42).expect("pid 42").name, "powershell.exe");
+    }
+
+    #[test]
+    fn parse_windows_process_table_json_handles_empty_null_and_malformed() {
+        assert!(parse_windows_process_table_json("[]").is_empty());
+        assert!(parse_windows_process_table_json("null").is_empty());
+        assert!(parse_windows_process_table_json("{bad").is_empty());
     }
 
     #[test]

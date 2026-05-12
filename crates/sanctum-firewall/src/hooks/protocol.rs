@@ -4,6 +4,24 @@
 //! These types are serialisation-friendly and used across all hook handlers.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use crate::dummy_registry::DummyRegistry;
+use crate::known_secrets::KnownSecretsDenylist;
+
+/// Runtime-only secret policy context loaded by the hook process.
+///
+/// This is skipped during hook JSON deserialisation so a repository or tool
+/// invocation cannot inject its own registry/denylist.
+#[derive(Debug, Clone, Default)]
+pub struct SecretPolicyContext {
+    /// Registered shape-valid dummy secrets.
+    pub dummy_registry: DummyRegistry,
+    /// Known-real local secret HMAC denylist.
+    pub known_secrets: KnownSecretsDenylist,
+    /// Local HMAC key for known-secret checks.
+    pub hmac_key: Option<Zeroizing<Vec<u8>>>,
+}
 
 /// Input to a hook handler, describing the tool invocation being evaluated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +39,9 @@ pub struct HookInput {
     /// Loaded from `$DATA_DIR/entropy_allowlist.txt` at runtime.
     #[serde(skip)]
     pub entropy_allowlist: Vec<String>,
+    /// Runtime-only policy for distinguishing known-real and dummy secrets.
+    #[serde(skip, default)]
+    pub secret_policy: SecretPolicyContext,
 }
 
 /// Output from a hook handler, containing the policy decision and optional message.

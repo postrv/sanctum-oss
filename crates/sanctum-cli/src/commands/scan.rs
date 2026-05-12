@@ -92,7 +92,17 @@ pub fn run(
     npm: bool,
     npm_path: Option<PathBuf>,
     npm_depth: usize,
+    populate_denylist: bool,
 ) -> Result<(), CliError> {
+    if npm && populate_denylist {
+        return Err(CliError::InvalidArgs(
+            "--populate-denylist cannot be combined with --npm".to_owned(),
+        ));
+    }
+    if populate_denylist {
+        return populate_known_secret_denylist(json);
+    }
+
     if npm {
         return run_npm_scan(json, npm_path, npm_depth);
     }
@@ -181,6 +191,68 @@ pub fn run(
     } else {
         Err(CliError::ScanFindings(findings.len()))
     }
+}
+
+fn populate_known_secret_denylist(json: bool) -> Result<(), CliError> {
+    let cwd = std::env::current_dir()?;
+    let paths = sanctum_types::paths::WellKnownPaths::default();
+    let key = sanctum_firewall::known_secrets::load_or_create_hmac_key(&paths.data_dir)?;
+    let denylist_path = sanctum_firewall::known_secrets::denylist_path(&paths.data_dir);
+    let mut denylist = sanctum_firewall::known_secrets::load_denylist(&denylist_path)?;
+
+    let mut scanned_files = 0_usize;
+    let mut inserted = 0_usize;
+    for rel in CREDENTIAL_FILES {
+        let path = cwd.join(rel);
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(metadata) = fs::metadata(&path) {
+            if metadata.len() > 1024 * 1024 {
+                continue;
+            }
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        scanned_files += 1;
+        let detections = sanctum_firewall::redaction::detect_credentials_with_config(
+            &content,
+            sanctum_firewall::redaction::DEFAULT_ENTROPY_THRESHOLD,
+            sanctum_firewall::redaction::DEFAULT_ENTROPY_MIN_LENGTH,
+            &HashSet::new(),
+        );
+        for detection in detections {
+            if denylist.insert_value(&key, &detection.matched_text) {
+                inserted += 1;
+            }
+        }
+    }
+
+    sanctum_firewall::known_secrets::save_denylist(&denylist_path, &denylist)?;
+
+    #[allow(clippy::print_stdout)]
+    {
+        if json {
+            let obj = serde_json::json!({
+                "summary": true,
+                "type": "known_secret_denylist",
+                "files_scanned": scanned_files,
+                "new_hashes": inserted,
+                "total_hashes": denylist.len(),
+            });
+            let line = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_owned());
+            println!("{line}");
+        } else {
+            println!(
+                "Known-real denylist populated: {inserted} new hash(es), {} total, {scanned_files} file(s) scanned.",
+                denylist.len()
+            );
+            println!("Plaintext secret values were not stored or printed.");
+        }
+    }
+
+    Ok(())
 }
 
 // ============================================================

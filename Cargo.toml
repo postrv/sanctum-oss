@@ -14,7 +14,7 @@ exclude = ["fuzz"]
 
 [workspace.package]
 publish = false
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.94.0"
 license = "MIT"
@@ -51,15 +51,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
+hmac = "0.12"
+getrandom = "0.3"
+zeroize = "1"
 hex = "0.4"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+quick-xml = "0.38"
 hyper = { version = "1.6", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1", "server-auto"] }
 http-body-util = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json", "stream"] }
 bytes = "1"
+keyring = { version = "3", default-features = true }
 
 # Dev dependencies
 tempfile = "3"

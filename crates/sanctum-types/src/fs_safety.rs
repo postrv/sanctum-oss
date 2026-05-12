@@ -8,7 +8,7 @@
 //! On non-Unix platforms, the helpers fall back to standard operations.
 
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 /// Open a file for appending with symlink protection and 0o600 permissions.
@@ -85,6 +85,83 @@ pub fn safe_create_exclusive(path: &Path) -> io::Result<File> {
     }
 }
 
+/// Write a security-sensitive file with owner-only permissions.
+///
+/// On Unix, the file is created with the requested owner mode and `O_NOFOLLOW`.
+/// On Windows, the parent directory and final file are restricted to the
+/// current user via ACLs and reparse-point parents are rejected.
+///
+/// # Errors
+///
+/// Returns `io::Error` if the file cannot be written or permissions cannot be
+/// applied.
+pub fn write_private_file(path: &Path, data: &[u8], owner_mode: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let open_exclusive = || {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(owner_mode)
+                .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+                .open(path)
+        };
+
+        let mut file = match open_exclusive() {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(path)?;
+                open_exclusive()?
+            }
+            Err(e) => return Err(e),
+        };
+        file.write_all(data)?;
+        file.sync_all()?;
+        fchmod_mode(&file, owner_mode)?;
+    }
+
+    #[cfg(windows)]
+    {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private file path has no parent directory",
+            )
+        })?;
+        ensure_secure_dir(parent)?;
+
+        let open_exclusive = || OpenOptions::new().write(true).create_new(true).open(path);
+
+        let mut file = match open_exclusive() {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                crate::windows_security::reject_reparse_point(path)?;
+                std::fs::remove_file(path)?;
+                open_exclusive()?
+            }
+            Err(e) => return Err(e),
+        };
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        crate::windows_security::reject_reparse_point(path)?;
+        crate::windows_security::restrict_path_to_current_user(
+            path,
+            crate::windows_security::acl_access_for_owner_mode(owner_mode),
+        )?;
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = owner_mode;
+        std::fs::write(path, data)?;
+    }
+
+    Ok(())
+}
+
 /// Set 0o600 permissions on an already-open file descriptor (TOCTOU-safe).
 ///
 /// This is useful when the file was opened by another mechanism (e.g.,
@@ -95,19 +172,27 @@ pub fn safe_create_exclusive(path: &Path) -> io::Result<File> {
 ///
 /// Returns `io::Error` if `fchmod` fails.
 pub fn fchmod_600(file: &File) -> io::Result<()> {
+    fchmod_mode(file, 0o600)
+}
+
+fn fchmod_mode(file: &File, mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
 
+        let mode_bits = mode.try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "file mode is out of range")
+        })?;
         nix::sys::stat::fchmod(
             file.as_raw_fd(),
-            nix::sys::stat::Mode::from_bits_truncate(0o600),
+            nix::sys::stat::Mode::from_bits_truncate(mode_bits),
         )
         .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
     }
 
     #[cfg(not(unix))]
     {
+        let _ = mode;
         let _ = file;
     }
 
@@ -144,7 +229,21 @@ pub fn ensure_secure_dir(path: &Path) -> io::Result<()> {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match std::fs::create_dir_all(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        crate::windows_security::reject_reparse_point(path)?;
+        crate::windows_security::restrict_path_to_current_user(
+            path,
+            crate::windows_security::WindowsAclAccess::DirectoryFullControl,
+        )
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         match std::fs::create_dir(path) {
             Ok(()) => Ok(()),
@@ -274,6 +373,24 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_private_file_sets_requested_owner_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("private.txt");
+        write_private_file(&path, b"secret", 0o400).expect("write private file");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o400);
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "secret");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! modify daemon state (shutdown, quarantine ops, budget changes, etc.).
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// Length of the auth token in bytes (before hex encoding).
@@ -21,30 +21,14 @@ pub const AUTH_TOKEN_FILENAME: &str = "auth_token";
 /// Generate a cryptographically random 32-byte token and return it as a
 /// 64-character hex string.
 ///
-/// Uses `/dev/urandom` (or platform equivalent via `getrandom`) to avoid
-/// adding a `rand` dependency.
+/// Uses the operating system random source via `getrandom`.
 ///
 /// # Errors
 ///
 /// Returns an `io::Error` if the random source cannot be read.
 pub fn generate_token() -> io::Result<String> {
     let mut buf = [0u8; TOKEN_BYTES];
-
-    #[cfg(unix)]
-    {
-        let mut f = fs::File::open("/dev/urandom")?;
-        f.read_exact(&mut buf)?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        // Fallback: use a less-ideal but functional approach for non-unix
-        // This path is not expected to be used in production (daemon is Unix-only)
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "auth token generation requires Unix /dev/urandom",
-        ));
-    }
+    getrandom::fill(&mut buf).map_err(|e| io::Error::other(e.to_string()))?;
 
     Ok(hex::encode(buf))
 }
@@ -61,10 +45,9 @@ pub fn generate_token() -> io::Result<String> {
 pub fn write_token(data_dir: &Path, token: &str) -> io::Result<PathBuf> {
     let token_path = data_dir.join(AUTH_TOKEN_FILENAME);
 
-    // Ensure parent directory exists
-    if let Some(parent) = token_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    // Ensure parent directory exists and is private before writing the token.
+    fs::create_dir_all(data_dir)?;
+    crate::fs_safety::ensure_secure_dir(data_dir)?;
 
     // Remove any existing token file (from a previous run)
     match fs::remove_file(&token_path) {
@@ -76,6 +59,7 @@ pub fn write_token(data_dir: &Path, token: &str) -> io::Result<PathBuf> {
     // Create the file and write the token
     #[cfg(unix)]
     {
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
 
         let mut file = fs::OpenOptions::new()
@@ -92,15 +76,14 @@ pub fn write_token(data_dir: &Path, token: &str) -> io::Result<PathBuf> {
         fchmod_400(&file)?;
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&token_path)?;
+        crate::fs_safety::write_private_file(&token_path, token.as_bytes(), 0o400)?;
+    }
 
-        file.write_all(token.as_bytes())?;
-        file.sync_all()?;
+    #[cfg(not(any(unix, windows)))]
+    {
+        crate::fs_safety::write_private_file(&token_path, token.as_bytes(), 0o400)?;
     }
 
     Ok(token_path)
@@ -116,6 +99,7 @@ pub fn read_token(data_dir: &Path) -> io::Result<String> {
 
     #[cfg(unix)]
     {
+        use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
 
         let file = fs::OpenOptions::new()
@@ -127,7 +111,13 @@ pub fn read_token(data_dir: &Path) -> io::Result<String> {
             .read_to_string(&mut token)?;
         Ok(token.trim().to_owned())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        crate::windows_security::reject_reparse_point(&token_path)?;
+        let content = fs::read_to_string(&token_path)?;
+        Ok(content.trim().to_owned())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let content = fs::read_to_string(&token_path)?;
         Ok(content.trim().to_owned())

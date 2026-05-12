@@ -218,11 +218,35 @@ fn is_process_running(pid: u32) -> bool {
         nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw_pid), None).is_ok()
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        is_process_running_windows(pid)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
     }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn is_process_running_windows(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    // SAFETY: OpenProcess is called with a read-only query right and a PID
+    // supplied by the daemon PID file. The returned handle is checked for null
+    // and closed exactly once below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    // SAFETY: `handle` is a non-null handle returned by OpenProcess above and
+    // has not been closed yet.
+    let _ = unsafe { CloseHandle(handle) };
+    true
 }
 
 #[cfg(test)]

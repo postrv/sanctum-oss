@@ -40,8 +40,8 @@ enum Commands {
         /// Directory to initialise in (defaults to current).
         #[arg(long, default_value = ".")]
         dir: String,
-        /// Output shell hook for the specified shell (bash, zsh, or fish).
-        #[arg(long, value_parser = ["bash", "zsh", "fish"])]
+        /// Output shell hook for the specified shell (bash, zsh, fish, or powershell).
+        #[arg(long, value_parser = ["bash", "zsh", "fish", "powershell", "pwsh"])]
         shell: Option<String>,
     },
     /// Show daemon status.
@@ -72,6 +72,9 @@ enum Commands {
         /// Maximum depth for traversing into `node_modules` (default: 2).
         #[arg(long, default_value = "2", requires = "npm")]
         npm_depth: usize,
+        /// Populate the known-real secret denylist from local credential files.
+        #[arg(long)]
+        populate_denylist: bool,
     },
     /// Run a command under Sanctum monitoring (auto-starts daemon, enables file and credential watchers).
     Run {
@@ -147,6 +150,11 @@ enum Commands {
     Entropy {
         #[command(subcommand)]
         action: EntropyAction,
+    },
+    /// Manage registered dummy secrets for tests and docs.
+    Dummy {
+        #[command(subcommand)]
+        action: DummyAction,
     },
     /// Check installation health.
     Doctor,
@@ -273,6 +281,55 @@ pub enum EntropyAction {
 }
 
 #[derive(Subcommand)]
+pub enum DummyAction {
+    /// Generate a shape-valid dummy secret and register it.
+    Generate {
+        /// Provider family, e.g. openai, anthropic, stripe, github.
+        #[arg(long)]
+        provider: String,
+        /// Human-readable label for this dummy value.
+        #[arg(long)]
+        label: String,
+        /// Allowed path glob. Repeat for multiple paths.
+        #[arg(long = "path", default_value = "tests/**")]
+        paths: Vec<String>,
+        /// Require the `SANCTUM_DUMMY_SECRET` marker.
+        #[arg(long, default_value_t = true)]
+        require_marker: bool,
+    },
+    /// Register a dummy secret read from stdin.
+    Mint {
+        /// Provider family, e.g. openai, anthropic, stripe, github.
+        #[arg(long)]
+        provider: String,
+        /// Human-readable label for this dummy value.
+        #[arg(long)]
+        label: String,
+        /// Allowed path glob. Repeat for multiple paths.
+        #[arg(long = "path", default_value = "tests/**")]
+        paths: Vec<String>,
+        /// Require the `SANCTUM_DUMMY_SECRET` marker.
+        #[arg(long, default_value_t = true)]
+        require_marker: bool,
+    },
+    /// List registered dummy secrets.
+    List {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke dummy entries by label or hash prefix.
+    Revoke {
+        /// Label to revoke.
+        #[arg(long, conflicts_with = "hash")]
+        label: Option<String>,
+        /// Hash prefix to revoke.
+        #[arg(long)]
+        hash: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum DaemonAction {
     /// Start the daemon.
     Start,
@@ -282,6 +339,10 @@ enum DaemonAction {
     Restart,
     /// Show daemon status.
     Status,
+    /// Install Sanctum as a Windows service.
+    InstallService,
+    /// Uninstall the Windows service.
+    UninstallService,
 }
 
 fn main() -> ExitCode {
@@ -300,7 +361,8 @@ fn main() -> ExitCode {
             npm,
             npm_path,
             npm_depth,
-        } => commands::scan::run(json, npm, npm_path, npm_depth),
+            populate_denylist,
+        } => commands::scan::run(json, npm, npm_path, npm_depth, populate_denylist),
         Commands::Run { sandbox, command } => commands::run::run(sandbox, &command),
         Commands::Config { edit, recommended } => commands::config::run(edit, recommended),
         Commands::Budget { action } => commands::budget::run(action.as_ref()),
@@ -311,6 +373,7 @@ fn main() -> ExitCode {
         Commands::Hook { action, verbose } => commands::hook::run(&action, verbose),
         Commands::Hooks { action } => commands::hooks::run(&action),
         Commands::Entropy { action } => commands::entropy::run(&action),
+        Commands::Dummy { action } => commands::dummy::run(&action),
         Commands::Proxy { action } => commands::proxy::run(&action),
         Commands::Daemon { action } => commands::daemon::run(&action),
         Commands::Doctor => commands::doctor::run(),
@@ -390,6 +453,18 @@ mod tests {
     }
 
     #[test]
+    fn scan_populate_denylist_parses() {
+        let cli =
+            Cli::try_parse_from(["sanctum", "scan", "--populate-denylist"]).expect("should parse");
+        match cli.command {
+            Commands::Scan {
+                populate_denylist, ..
+            } => assert!(populate_denylist),
+            _ => panic!("expected Scan command"),
+        }
+    }
+
+    #[test]
     fn entropy_allow_accepts_optional_value() {
         let cli = Cli::try_parse_from(["sanctum", "entropy", "allow", "my-secret"])
             .expect("should parse");
@@ -413,6 +488,39 @@ mod tests {
                 assert!(value.is_none(), "value should be None when omitted");
             }
             _ => panic!("expected Entropy Allow variant"),
+        }
+    }
+
+    #[test]
+    fn dummy_generate_parses() {
+        let cli = Cli::try_parse_from([
+            "sanctum",
+            "dummy",
+            "generate",
+            "--provider",
+            "openai",
+            "--label",
+            "router-tests",
+            "--path",
+            "tests/**",
+        ])
+        .expect("should parse");
+        match cli.command {
+            Commands::Dummy {
+                action:
+                    DummyAction::Generate {
+                        provider,
+                        label,
+                        paths,
+                        require_marker,
+                    },
+            } => {
+                assert_eq!(provider, "openai");
+                assert_eq!(label, "router-tests");
+                assert_eq!(paths, vec!["tests/**"]);
+                assert!(require_marker);
+            }
+            _ => panic!("expected Dummy Generate variant"),
         }
     }
 

@@ -42,8 +42,9 @@ fn parse_shell(name: &str) -> Result<Shell, CliError> {
         "bash" => Ok(Shell::Bash),
         "zsh" => Ok(Shell::Zsh),
         "fish" => Ok(Shell::Fish),
+        "powershell" | "pwsh" => Ok(Shell::PowerShell),
         other => Err(CliError::InvalidArgs(format!(
-            "unsupported shell '{other}'. Supported: bash, zsh, fish"
+            "unsupported shell '{other}'. Supported: bash, zsh, fish, powershell"
         ))),
     }
 }
@@ -441,8 +442,16 @@ mod tests {
 
     #[test]
     fn parse_shell_invalid() {
-        let shell = parse_shell("powershell");
+        let shell = parse_shell("csh");
         assert!(shell.is_err());
+    }
+
+    #[test]
+    fn parse_shell_powershell() {
+        let shell = parse_shell("powershell");
+        assert!(shell.is_ok());
+        let shell = parse_shell("pwsh");
+        assert!(shell.is_ok());
     }
 
     #[test]
@@ -473,6 +482,14 @@ mod tests {
         assert!(hook.contains("sanctum daemon start"));
         assert!(hook.contains("SANCTUM_ACTIVE"));
         assert!(hook.contains("config.fish"));
+    }
+
+    #[test]
+    fn init_shell_powershell_outputs_hook() {
+        let shell = parse_shell("powershell").expect("should parse powershell");
+        let hook = shell::generate_shell_hook(shell);
+        assert!(hook.contains("Start-Process"));
+        assert!(hook.contains("SANCTUM_ACTIVE"));
     }
 
     #[test]

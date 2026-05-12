@@ -21,10 +21,88 @@ pub async fn collect_connections() -> HashSet<ConnectionInfo> {
     {
         collect_linux()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        collect_windows().await
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         HashSet::new()
     }
+}
+
+#[cfg(target_os = "windows")]
+async fn collect_windows() -> HashSet<ConnectionInfo> {
+    use tokio::process::Command;
+    use tokio::time::{timeout, Duration};
+
+    let script = "Get-NetTCPConnection -State Established | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess | ConvertTo-Json -Compress";
+    let result = timeout(
+        Duration::from_secs(10),
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await;
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            parse_get_net_tcp_connection_json(&stdout)
+        }
+        Ok(Ok(_)) | Ok(Err(_)) | Err(_) => HashSet::new(),
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_get_net_tcp_connection_json(output: &str) -> HashSet<ConnectionInfo> {
+    let mut connections = HashSet::new();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) else {
+        return connections;
+    };
+    if value.is_null() {
+        return connections;
+    }
+    let rows: Vec<&serde_json::Value> = value
+        .as_array()
+        .map_or_else(|| vec![&value], |arr| arr.iter().collect());
+    for row in rows {
+        let Some(local_addr) = parse_windows_socket(row, "LocalAddress", "LocalPort") else {
+            continue;
+        };
+        let Some(remote_addr) = parse_windows_socket(row, "RemoteAddress", "RemotePort") else {
+            continue;
+        };
+        let pid = row
+            .get("OwningProcess")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok());
+        connections.insert(ConnectionInfo {
+            pid,
+            process_name: None,
+            local_addr,
+            remote_addr,
+        });
+    }
+    connections
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_socket(
+    row: &serde_json::Value,
+    host_key: &str,
+    port_key: &str,
+) -> Option<SocketAddr> {
+    let host = row.get(host_key)?.as_str()?;
+    let port = row
+        .get(port_key)?
+        .as_u64()
+        .and_then(|v| u16::try_from(v).ok())?;
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Some(SocketAddr::from((ip, port)));
+    }
+    None
 }
 
 /// Collect network connections on macOS using `lsof`.
@@ -322,6 +400,24 @@ n127.0.0.1:52341->93.184.216.34:443
             conn.remote_addr,
             "93.184.216.34:443".parse::<SocketAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn parse_get_net_tcp_connection_json_object() {
+        let json = r#"{"LocalAddress":"127.0.0.1","LocalPort":5000,"RemoteAddress":"93.184.216.34","RemotePort":443,"OwningProcess":1234}"#;
+        let connections = parse_get_net_tcp_connection_json(json);
+        assert_eq!(connections.len(), 1);
+        let conn = connections.iter().next().expect("connection");
+        assert_eq!(conn.pid, Some(1234));
+        assert_eq!(conn.remote_addr.port(), 443);
+    }
+
+    #[test]
+    fn parse_get_net_tcp_connection_json_array_and_empty() {
+        let json = r#"[{"LocalAddress":"::1","LocalPort":5000,"RemoteAddress":"::1","RemotePort":443,"OwningProcess":1234}]"#;
+        assert_eq!(parse_get_net_tcp_connection_json(json).len(), 1);
+        assert!(parse_get_net_tcp_connection_json("null").is_empty());
+        assert!(parse_get_net_tcp_connection_json("{bad").is_empty());
     }
 
     #[test]

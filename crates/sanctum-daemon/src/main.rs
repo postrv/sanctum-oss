@@ -286,7 +286,7 @@ async fn run_daemon(
     let (sigterm_tx, mut sigterm) = tokio::sync::mpsc::channel(1);
     let (sigint_tx, mut sigint) = tokio::sync::mpsc::channel(1);
     let (sighup_tx, mut sighup) = tokio::sync::mpsc::channel(1);
-    register_signal_forwarders(sigterm_tx, sigint_tx, sighup_tx);
+    register_signal_forwarders(&sigterm_tx, &sigint_tx, &sighup_tx);
 
     let ipc_semaphore = Arc::new(Semaphore::new(MAX_IPC_CONNECTIONS));
 
@@ -333,12 +333,13 @@ async fn run_daemon(
 }
 
 fn register_signal_forwarders(
-    sigterm_tx: tokio::sync::mpsc::Sender<()>,
-    sigint_tx: tokio::sync::mpsc::Sender<()>,
-    sighup_tx: tokio::sync::mpsc::Sender<()>,
+    sigterm_tx: &tokio::sync::mpsc::Sender<()>,
+    sigint_tx: &tokio::sync::mpsc::Sender<()>,
+    sighup_tx: &tokio::sync::mpsc::Sender<()>,
 ) {
     #[cfg(unix)]
     {
+        let sigterm_tx = sigterm_tx.clone();
         tokio::spawn(async move {
             if let Ok(mut signal) =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -347,6 +348,7 @@ fn register_signal_forwarders(
                 let _ = sigterm_tx.send(()).await;
             }
         });
+        let sigint_tx = sigint_tx.clone();
         tokio::spawn(async move {
             if let Ok(mut signal) =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -355,6 +357,7 @@ fn register_signal_forwarders(
                 let _ = sigint_tx.send(()).await;
             }
         });
+        let sighup_tx = sighup_tx.clone();
         tokio::spawn(async move {
             if let Ok(mut signal) =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
@@ -367,8 +370,8 @@ fn register_signal_forwarders(
 
     #[cfg(not(unix))]
     {
-        let _ = sigterm_tx;
-        let _ = sighup_tx;
+        let _ = (sigterm_tx, sighup_tx);
+        let sigint_tx = sigint_tx.clone();
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
                 let _ = sigint_tx.send(()).await;

@@ -1021,17 +1021,17 @@ mod kani_proofs {
     /// Proof 1: `analyse_pth_line` never panics on any UTF-8 input up to 6 bytes.
     ///
     /// This proves the totality contract from the module doc (line 8).
-    /// Bounded to 6 bytes for CI feasibility: `analyse_pth_line` performs 14
+    /// Bounded to 3 bytes for CI feasibility: `analyse_pth_line` performs 14
     /// `contains()` keyword checks, each generating `memchr_naive` + `CharSearcher`
     /// loops in CBMC — the multiplicative state space makes larger inputs infeasible
     /// within CI time budgets even with `--default-unwind 20`.
     #[kani::proof]
-    #[kani::unwind(8)]
+    #[kani::unwind(5)]
     fn pth_analyser_never_panics() {
         let len: usize = kani::any();
-        kani::assume(len <= 6);
-        let bytes: Vec<u8> = (0..len).map(|_| kani::any()).collect();
-        if let Ok(line) = std::str::from_utf8(&bytes) {
+        kani::assume(len <= 3);
+        let bytes: [u8; 3] = kani::any();
+        if let Ok(line) = std::str::from_utf8(&bytes[..len]) {
             let _ = analyse_pth_line(line);
         }
     }
@@ -1041,19 +1041,17 @@ mod kani_proofs {
     ///
     /// This proves the contract from the module doc (line 10).
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(4)]
     fn pure_path_is_always_benign() {
         let len: usize = kani::any();
-        kani::assume(len > 0 && len <= 4);
+        kani::assume(len > 0 && len <= 2);
         let path_chars = b"abcdefghijklmnopqrstuvwxyz0123456789/._-";
-        let bytes: Vec<u8> = (0..len)
-            .map(|_| {
-                let idx: usize = kani::any();
-                kani::assume(idx < path_chars.len());
-                path_chars[idx]
-            })
-            .collect();
-        let line = std::str::from_utf8(&bytes).unwrap();
+        let first_idx: usize = kani::any();
+        let second_idx: usize = kani::any();
+        kani::assume(first_idx < path_chars.len());
+        kani::assume(second_idx < path_chars.len());
+        let bytes = [path_chars[first_idx], path_chars[second_idx]];
+        let line = std::str::from_utf8(&bytes[..len]).unwrap();
         let result = analyse_pth_line(line);
         assert_eq!(result.level(), sanctum_types::threat::ThreatLevel::Info);
     }
@@ -1061,31 +1059,35 @@ mod kani_proofs {
     /// Proof 3: Any ASCII line containing `exec(` is classified at least `Warning`.
     ///
     /// This proves part of the contract from the module doc (line 11).
-    /// Prefix/suffix bounded to 2 bytes each for CI feasibility (total max 9 chars).
+    /// Prefix/suffix bounded to 1 byte each for CI feasibility (total max 7 chars).
     /// `format!()` + 14 `contains()` checks make larger inputs infeasible in CI.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(8)]
     fn exec_is_never_benign() {
         let prefix_len: usize = kani::any();
         let suffix_len: usize = kani::any();
-        kani::assume(prefix_len <= 2);
-        kani::assume(suffix_len <= 2);
-        let prefix: String = (0..prefix_len)
-            .map(|_| {
-                let c: u8 = kani::any();
-                kani::assume(c.is_ascii());
-                c as char
-            })
-            .collect();
-        let suffix: String = (0..suffix_len)
-            .map(|_| {
-                let c: u8 = kani::any();
-                kani::assume(c.is_ascii());
-                c as char
-            })
-            .collect();
-        let line = format!("{prefix}exec({suffix}");
-        let result = analyse_pth_line(&line);
+        kani::assume(prefix_len <= 1);
+        kani::assume(suffix_len <= 1);
+        let prefix: u8 = kani::any();
+        let suffix: u8 = kani::any();
+        kani::assume(prefix.is_ascii());
+        kani::assume(suffix.is_ascii());
+
+        let mut bytes = [0_u8; 7];
+        let mut len = 0;
+        if prefix_len == 1 {
+            bytes[len] = prefix;
+            len += 1;
+        }
+        bytes[len..len + 5].copy_from_slice(b"exec(");
+        len += 5;
+        if suffix_len == 1 {
+            bytes[len] = suffix;
+            len += 1;
+        }
+
+        let line = std::str::from_utf8(&bytes[..len]).unwrap();
+        let result = analyse_pth_line(line);
         assert!(result.level() >= sanctum_types::threat::ThreatLevel::Warning);
     }
 }

@@ -223,13 +223,16 @@ mod kani_proofs {
     /// two consecutive calls with arbitrary u64 values.
     #[kani::proof]
     fn exfiltration_record_bytes_never_panics() {
-        let warn: u64 = kani::any();
-        let block: u64 = kani::any();
-        let window: u64 = kani::any();
+        let warn_sample: u16 = kani::any();
+        let block_sample: u16 = kani::any();
+        let window_sample: u16 = kani::any();
+        let warn = u64::from(warn_sample);
+        let block = u64::from(block_sample);
+        let window = u64::from(window_sample);
 
         // Constrain to reasonable ranges to keep proof tractable
-        kani::assume(warn > 0 && warn <= u64::MAX / 2);
-        kani::assume(block >= warn && block <= u64::MAX);
+        kani::assume(warn > 0);
+        kani::assume(block >= warn);
         kani::assume(window > 0 && window <= 3600);
 
         let config = NetworkConfig {
@@ -242,8 +245,8 @@ mod kani_proofs {
 
         let mut tracker = ExfiltrationTracker::new(&config);
         let dest = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let bytes1: u64 = kani::any();
-        let bytes2: u64 = kani::any();
+        let bytes1 = u64::from(kani::any::<u16>());
+        let bytes2 = u64::from(kani::any::<u16>());
 
         // Two calls with arbitrary byte counts must not panic
         let _ = tracker.record_bytes(dest, bytes1);

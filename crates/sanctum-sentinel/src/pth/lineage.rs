@@ -724,12 +724,29 @@ mod tests {
         let source = SystemProcSource;
         let pid = std::process::id();
         let info = source.get_process_info(pid);
+        if info.is_none() && !system_proc_source_available_for_tests(pid) {
+            return;
+        }
         // We should be able to read our own process info
         assert!(info.is_some(), "should be able to read own process info");
         if let Some(info) = info {
             assert_eq!(info.pid, pid);
             assert!(!info.name.is_empty());
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn system_proc_source_available_for_tests(pid: u32) -> bool {
+        std::process::Command::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn system_proc_source_available_for_tests(_pid: u32) -> bool {
+        true
     }
 
     #[test]

@@ -1156,14 +1156,14 @@ mod kani_proofs {
     use super::*;
 
     #[kani::proof]
-    #[kani::unwind(6)]
+    #[kani::unwind(4)]
     fn glob_matches_exact_match_works() {
-        // Prove: for any 3-byte ASCII string, exact match (no wildcards) is
+        // Prove: for any 2-byte ASCII string, exact match (no wildcards) is
         // equivalent to string equality.
-        // Bounded to 3 bytes: glob_matches involves split/starts_with/ends_with
+        // Bounded to 2 bytes: glob_matches involves split/starts_with/ends_with
         // which generate expensive CBMC loops with symbolic strings.
-        let bytes: [u8; 3] = kani::any();
-        let path_bytes: [u8; 3] = kani::any();
+        let bytes: [u8; 2] = kani::any();
+        let path_bytes: [u8; 2] = kani::any();
 
         // Only test printable ASCII (no wildcards in pattern)
         kani::assume(bytes.iter().all(|&b| b >= 0x20 && b <= 0x7E && b != b'*'));

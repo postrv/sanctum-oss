@@ -178,23 +178,22 @@ fn e2e_concurrent_quarantine_operations() {
 }
 
 /// Find a PID that is not currently running.
+#[cfg(unix)]
 fn find_unused_pid() -> u32 {
-    #[cfg(unix)]
-    {
-        // Start from a high PID and search downward for one that's not running.
-        for pid in (50000..99999_i32).rev() {
-            if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
-                #[allow(clippy::cast_sign_loss)]
-                return pid as u32;
-            }
+    // Start from a high PID and search downward for one that's not running.
+    for pid in (50000..99999_i32).rev() {
+        if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+            #[allow(clippy::cast_sign_loss)]
+            return pid as u32;
         }
-        99998
     }
+    99998
+}
 
-    #[cfg(not(unix))]
-    {
-        99998
-    }
+/// Find a PID that is not currently running.
+#[cfg(not(unix))]
+const fn find_unused_pid() -> u32 {
+    99998
 }
 
 /// Thin wrapper to access `DaemonManager` from the daemon crate in tests.

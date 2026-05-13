@@ -133,52 +133,60 @@ const fn category_display(event: &ThreatEvent) -> &'static str {
     }
 }
 
-/// Send a notification using platform-specific shell commands.
+/// Send a notification using Linux desktop notification tooling.
+#[cfg(target_os = "linux")]
 fn send_notification(summary: &str, body: &str) -> Result<(), String> {
-    #[cfg(target_os = "linux")]
+    // Linux: notify-send passes arguments safely (no shell interpolation).
+    match std::process::Command::new("notify-send")
+        .args(["--urgency=critical", "--app-name=Sanctum", summary, body])
+        .spawn()
     {
-        // Linux: notify-send passes arguments safely (no shell interpolation).
-        match std::process::Command::new("notify-send")
-            .args(["--urgency=critical", "--app-name=Sanctum", summary, body])
-            .spawn()
-        {
-            Ok(mut child) => {
-                // Reap the child in a background thread to prevent zombie accumulation.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-            }
-            Err(e) => return Err(format!("notify-send failed: {e}")),
+        Ok(mut child) => {
+            // Reap the child in a background thread to prevent zombie accumulation.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
         }
+        Err(e) => return Err(format!("notify-send failed: {e}")),
     }
 
-    #[cfg(target_os = "macos")]
+    Ok(())
+}
+
+/// Send a notification using macOS Notification Center.
+#[cfg(target_os = "macos")]
+fn send_notification(summary: &str, body: &str) -> Result<(), String> {
+    // macOS: osascript executes AppleScript, so we must sanitize all
+    // interpolated text to prevent script injection. The sanitizer
+    // strips everything except a strict allowlist of safe characters.
+    let safe_body = sanitize_for_applescript(body);
+    let safe_summary = sanitize_for_applescript(summary);
+    let script = format!("display notification \"{safe_body}\" with title \"{safe_summary}\"",);
+    match std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .spawn()
     {
-        // macOS: osascript executes AppleScript, so we must sanitize all
-        // interpolated text to prevent script injection. The sanitizer
-        // strips everything except a strict allowlist of safe characters.
-        let safe_body = sanitize_for_applescript(body);
-        let safe_summary = sanitize_for_applescript(summary);
-        let script = format!("display notification \"{safe_body}\" with title \"{safe_summary}\"",);
-        match std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .spawn()
-        {
-            Ok(mut child) => {
-                // Reap the child in a background thread to prevent zombie accumulation.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-            }
-            Err(e) => return Err(format!("osascript failed: {e}")),
+        Ok(mut child) => {
+            // Reap the child in a background thread to prevent zombie accumulation.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
         }
+        Err(e) => return Err(format!("osascript failed: {e}")),
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        tracing::info!(%summary, %body, "notification (no desktop backend available)");
-    }
+    Ok(())
+}
 
+/// Unsupported desktop targets intentionally degrade to structured logging.
+///
+/// Returning `Ok(())` keeps threat notifications non-fatal until a native
+/// backend is added for the platform. This currently covers Windows release
+/// builds.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[allow(clippy::unnecessary_wraps)]
+fn send_notification(summary: &str, body: &str) -> Result<(), String> {
+    tracing::info!(%summary, %body, "notification (no desktop backend available)");
     Ok(())
 }
 
@@ -474,6 +482,15 @@ mod tests {
         let result = send_notification("Test Title", "Test Body");
         // We accept both Ok and Err — the important thing is no panic.
         let _ = result;
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn unsupported_notification_backend_is_non_fatal() {
+        assert!(
+            send_notification("Sanctum", "Test notification").is_ok(),
+            "unsupported desktop targets should log notifications without failing the daemon",
+        );
     }
 
     // ── Existing sanitize_for_applescript tests ────────────────────

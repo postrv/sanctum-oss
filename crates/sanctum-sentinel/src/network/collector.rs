@@ -51,7 +51,7 @@ async fn collect_windows() -> HashSet<ConnectionInfo> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             parse_get_net_tcp_connection_json(&stdout)
         }
-        Ok(Ok(_)) | Ok(Err(_)) | Err(_) => HashSet::new(),
+        Ok(Ok(_) | Err(_)) | Err(_) => HashSet::new(),
     }
 }
 

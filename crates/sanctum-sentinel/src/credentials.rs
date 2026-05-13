@@ -225,6 +225,7 @@ fn is_credential_path(path: &Path, credential_paths: &[PathBuf]) -> bool {
 /// On Linux, scans `/proc/*/fd/` for open file descriptors pointing to the path.
 /// On macOS, runs `lsof <path>` to find the accessor process.
 /// Returns `(None, None)` if the accessor cannot be determined.
+#[allow(clippy::missing_const_for_fn)]
 fn try_find_accessor_info(path: &Path) -> (Option<u32>, Option<String>) {
     #[cfg(target_os = "linux")]
     {

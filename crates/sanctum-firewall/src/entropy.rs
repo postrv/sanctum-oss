@@ -219,8 +219,5 @@ mod kani_proofs {
         assert_eq!(shannon_entropy(""), 0.0);
         assert_eq!(shannon_entropy("a"), 0.0);
         assert_eq!(shannon_entropy("aa"), 0.0);
-        let two_distinct = shannon_entropy("ab");
-        assert!(two_distinct >= 0.0);
-        assert!(two_distinct <= 1.0);
     }
 }

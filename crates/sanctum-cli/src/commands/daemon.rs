@@ -164,33 +164,8 @@ fn stop_daemon() -> Result<(), CliError> {
         .as_unix_path()
         .is_some_and(|path| !path.exists());
     if endpoint_absent {
-        // Try to find and kill via PID file
-        if paths.pid_file.exists() {
-            if let Ok(pid_str) = std::fs::read_to_string(&paths.pid_file) {
-                if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                    #[cfg(unix)]
-                    {
-                        let raw_pid = i32::try_from(pid).map_err(|_| {
-                            CliError::InvalidArgs(format!("PID {pid} exceeds i32::MAX"))
-                        })?;
-                        let _ = nix::sys::signal::kill(
-                            nix::unistd::Pid::from_raw(raw_pid),
-                            nix::sys::signal::Signal::SIGTERM,
-                        );
-                    }
-                    #[cfg(windows)]
-                    {
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/PID", &pid.to_string(), "/T"])
-                            .status();
-                    }
-                    #[allow(clippy::print_stdout)]
-                    {
-                        println!("Sent SIGTERM to daemon (PID {pid}).");
-                    }
-                    return Ok(());
-                }
-            }
+        if stop_daemon_from_pid_file(&paths)? {
+            return Ok(());
         }
 
         #[allow(clippy::print_stdout)]
@@ -208,38 +183,77 @@ fn stop_daemon() -> Result<(), CliError> {
         }
     } else {
         // Fallback: send SIGTERM via PID file
-        if paths.pid_file.exists() {
-            if let Ok(pid_str) = std::fs::read_to_string(&paths.pid_file) {
-                if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                    #[cfg(unix)]
-                    {
-                        let raw_pid = i32::try_from(pid).map_err(|_| {
-                            CliError::InvalidArgs(format!("PID {pid} exceeds i32::MAX"))
-                        })?;
-                        let _ = nix::sys::signal::kill(
-                            nix::unistd::Pid::from_raw(raw_pid),
-                            nix::sys::signal::Signal::SIGTERM,
-                        );
-                    }
-                    #[cfg(windows)]
-                    {
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/PID", &pid.to_string(), "/T"])
-                            .status();
-                    }
-                    #[allow(clippy::print_stdout)]
-                    {
-                        println!("Sent SIGTERM to daemon (PID {pid}).");
-                    }
-                    return Ok(());
-                }
-            }
+        if stop_daemon_from_pid_file(&paths)? {
+            return Ok(());
         }
         #[allow(clippy::print_stdout)]
         {
-            println!("Daemon stopped.");
+            println!("No daemon is running.");
         }
     }
 
     Ok(())
+}
+
+fn stop_daemon_from_pid_file(paths: &WellKnownPaths) -> Result<bool, CliError> {
+    let Some(pid) = read_pid_file(paths)? else {
+        return Ok(false);
+    };
+    terminate_daemon_process(pid)?;
+    #[allow(clippy::print_stdout)]
+    {
+        println!("Sent stop request to daemon (PID {pid}).");
+    }
+    Ok(true)
+}
+
+fn read_pid_file(paths: &WellKnownPaths) -> Result<Option<u32>, CliError> {
+    if !paths.pid_file.exists() {
+        return Ok(None);
+    }
+
+    let pid_str = match std::fs::read_to_string(&paths.pid_file) {
+        Ok(pid_str) => pid_str,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(CliError::Io(e)),
+    };
+    let trimmed = pid_str.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let pid = trimmed.parse::<u32>().map_err(|e| {
+        CliError::InvalidArgs(format!(
+            "invalid daemon PID file {}: {e}",
+            paths.pid_file.display()
+        ))
+    })?;
+    Ok(Some(pid))
+}
+
+#[cfg(unix)]
+fn terminate_daemon_process(pid: u32) -> Result<(), CliError> {
+    let raw_pid = i32::try_from(pid)
+        .map_err(|_| CliError::InvalidArgs(format!("PID {pid} exceeds i32::MAX")))?;
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(raw_pid),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .map_err(|e| CliError::CommandFailed(format!("failed to send SIGTERM to PID {pid}: {e}")))
+}
+
+#[cfg(windows)]
+fn terminate_daemon_process(pid: u32) -> Result<(), CliError> {
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T"])
+        .status()
+        .map_err(|e| {
+            CliError::CommandFailed(format!("failed to run taskkill for PID {pid}: {e}"))
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CliError::CommandFailed(format!(
+            "taskkill failed for PID {pid} with status {status}"
+        )))
+    }
 }

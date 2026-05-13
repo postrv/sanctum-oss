@@ -31,7 +31,7 @@ pub enum WindowsAclAccess {
 
 impl WindowsAclAccess {
     #[cfg(windows)]
-    fn icacls_rights(self) -> &'static str {
+    const fn icacls_rights(self) -> &'static str {
         match self {
             Self::Read => "R",
             Self::ReadWrite => "M",
@@ -172,7 +172,7 @@ impl CurrentUserSecurityAttributes {
         Self::from_sddl(&named_pipe_security_sddl(&sid))
     }
 
-    pub fn as_mut_ptr(&mut self) -> *mut c_void {
+    pub const fn as_mut_ptr(&mut self) -> *mut c_void {
         std::ptr::addr_of_mut!(self.attrs).cast()
     }
 
@@ -187,16 +187,23 @@ impl CurrentUserSecurityAttributes {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 wide.as_mut_ptr(),
                 SDDL_REVISION_1,
-                &mut descriptor,
+                &raw mut descriptor,
                 std::ptr::null_mut(),
             )
         };
         if ok == 0 || descriptor.is_null() {
             return Err(io::Error::last_os_error());
         }
+        let attrs_len =
+            u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SECURITY_ATTRIBUTES size does not fit u32",
+                )
+            })?;
         Ok(Self {
             attrs: SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                nLength: attrs_len,
                 lpSecurityDescriptor: descriptor,
                 bInheritHandle: 0,
             },

@@ -70,7 +70,7 @@ impl WellKnownPaths {
     /// Return the platform IPC endpoint.
     #[must_use]
     pub fn ipc_endpoint(&self) -> IpcEndpoint {
-        IpcEndpoint::platform_default(self.socket_path.clone())
+        IpcEndpoint::platform_default(&self.socket_path)
     }
 }
 
@@ -96,8 +96,7 @@ impl Default for WellKnownPaths {
             let fallback = PathBuf::from(format!("/tmp/sanctum-{uid}"));
             #[cfg(windows)]
             let fallback = std::env::var_os("TEMP")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(r"C:\Windows\Temp"))
+                .map_or_else(|| PathBuf::from(r"C:\Windows\Temp"), PathBuf::from)
                 .join(format!(
                     "sanctum-{}",
                     current_username().unwrap_or_else(|| std::process::id().to_string())
@@ -349,6 +348,6 @@ mod tests {
     fn ipc_endpoint_matches_transport_default() {
         let paths = WellKnownPaths::default();
         let endpoint = paths.ipc_endpoint();
-        assert_eq!(endpoint, IpcEndpoint::platform_default(paths.socket_path));
+        assert_eq!(endpoint, IpcEndpoint::platform_default(&paths.socket_path));
     }
 }

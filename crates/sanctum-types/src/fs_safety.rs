@@ -171,33 +171,35 @@ pub fn write_private_file(path: &Path, data: &[u8], owner_mode: u32) -> io::Resu
 /// # Errors
 ///
 /// Returns `io::Error` if `fchmod` fails.
+#[allow(clippy::missing_const_for_fn)]
 pub fn fchmod_600(file: &File) -> io::Result<()> {
-    fchmod_mode(file, 0o600)
-}
-
-fn fchmod_mode(file: &File, mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::io::AsRawFd;
-
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        let mode_bits = mode;
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let mode_bits = mode.try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "file mode is out of range")
-        })?;
-        nix::sys::stat::fchmod(
-            file.as_raw_fd(),
-            nix::sys::stat::Mode::from_bits_truncate(mode_bits),
-        )
-        .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+        fchmod_mode(file, 0o600)
     }
 
     #[cfg(not(unix))]
     {
-        let _ = mode;
         let _ = file;
+        Ok(())
     }
+}
+
+#[cfg(unix)]
+fn fchmod_mode(file: &File, mode: u32) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let mode_bits = mode;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let mode_bits = mode
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "file mode is out of range"))?;
+    nix::sys::stat::fchmod(
+        file.as_raw_fd(),
+        nix::sys::stat::Mode::from_bits_truncate(mode_bits),
+    )
+    .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
 
     Ok(())
 }

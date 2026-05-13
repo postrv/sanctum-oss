@@ -106,7 +106,7 @@ impl IpcServer {
     ///
     /// Returns an error if the socket cannot be bound.
     pub fn bind(socket_path: &Path) -> Result<Self, DaemonError> {
-        let endpoint = IpcEndpoint::platform_default(socket_path.to_path_buf());
+        let endpoint = IpcEndpoint::platform_default(socket_path);
 
         // Ensure parent directory exists
         if let Some(parent) = endpoint.as_unix_path().and_then(Path::parent) {

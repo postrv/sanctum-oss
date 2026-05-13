@@ -22,19 +22,19 @@ impl IpcEndpoint {
     /// Build the platform-default endpoint from the legacy socket path/name.
     #[must_use]
     #[allow(clippy::missing_const_for_fn)]
-    pub fn platform_default(socket_path: PathBuf) -> Self {
+    pub fn platform_default(socket_path: &Path) -> Self {
         #[cfg(unix)]
         {
-            Self::Unix(socket_path)
+            Self::Unix(socket_path.to_path_buf())
         }
         #[cfg(windows)]
         {
             let user = crate::windows_security::current_username_for_endpoint();
-            Self::NamedPipe(pipe_name_from_socket_path(&socket_path, user.as_deref()))
+            Self::NamedPipe(pipe_name_from_socket_path(socket_path, user.as_deref()))
         }
         #[cfg(not(any(unix, windows)))]
         {
-            Self::Unix(socket_path)
+            Self::Unix(socket_path.to_path_buf())
         }
     }
 
@@ -162,6 +162,7 @@ impl IpcListener {
 ///
 /// Returns an error if the endpoint cannot be reached or the platform does not
 /// support the endpoint kind.
+#[allow(clippy::unused_async)]
 pub async fn connect_async(endpoint: &IpcEndpoint) -> io::Result<Box<dyn AsyncIpcStream>> {
     match endpoint {
         IpcEndpoint::Unix(path) => {

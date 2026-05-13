@@ -470,7 +470,7 @@ fn validate_script_path(package_dir: &Path, relative_path: &str) -> Result<PathB
     }
 
     // Also reject absolute paths
-    if Path::new(relative_path).is_absolute() {
+    if is_absolute_script_reference(relative_path) {
         return Err(format!(
             "absolute path in script reference: {relative_path}"
         ));
@@ -504,6 +504,14 @@ fn validate_script_path(package_dir: &Path, relative_path: &str) -> Result<PathB
         }
         Ok(joined)
     }
+}
+
+fn is_absolute_script_reference(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    Path::new(path).is_absolute()
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
 /// Read and scan a script file referenced from a lifecycle script.
@@ -664,6 +672,16 @@ mod tests {
         // Absolute path
         let result = validate_script_path(dir.path(), "/etc/passwd");
         assert!(result.is_err(), "absolute paths should be blocked");
+
+        // Windows absolute and rooted forms should be blocked on all platforms.
+        let result = validate_script_path(dir.path(), r"C:\Windows\System32\cmd.exe");
+        assert!(result.is_err(), "Windows drive paths should be blocked");
+
+        let result = validate_script_path(dir.path(), r"\Windows\System32\cmd.exe");
+        assert!(result.is_err(), "Windows rooted paths should be blocked");
+
+        let result = validate_script_path(dir.path(), r"\\server\share\install.js");
+        assert!(result.is_err(), "UNC paths should be blocked");
     }
 
     #[test]

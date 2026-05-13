@@ -413,9 +413,9 @@ mod kani_proofs {
 
     #[kani::proof]
     #[kani::unwind(2)]
-    fn ceiling_cost_u16_inputs_match_exact_ceiling_division() {
-        let token_sample: u16 = kani::any();
-        let price_sample: u16 = kani::any();
+    fn ceiling_cost_u8_inputs_match_exact_ceiling_division() {
+        let token_sample: u8 = kani::any();
+        let price_sample: u8 = kani::any();
         let tokens = u64::from(token_sample);
         let price = u64::from(price_sample);
 
@@ -435,6 +435,15 @@ mod kani_proofs {
             result * 1_000_000 >= product,
             "ceiling division must never undercount"
         );
+    }
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn ceiling_cost_representative_real_prices_are_exact() {
+        assert_eq!(ceiling_cost(1, 7_500), 1);
+        assert_eq!(ceiling_cost(999_999, 7_500), 7_500);
+        assert_eq!(ceiling_cost(1_000_000, 7_500), 7_500);
+        assert_eq!(ceiling_cost(1_000_001, 7_500), 7_501);
     }
 
     #[kani::proof]

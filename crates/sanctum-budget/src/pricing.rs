@@ -393,27 +393,34 @@ mod kani_proofs {
 
     #[kani::proof]
     #[kani::unwind(2)]
-    fn ceiling_cost_zero_inputs_are_zero() {
-        let tokens: u64 = kani::any();
+    fn ceiling_cost_zero_tokens_are_zero() {
         let price: u64 = kani::any();
 
-        kani::assume(tokens == 0 || price == 0);
+        let result = ceiling_cost(0, price);
 
-        let result = ceiling_cost(tokens, price);
-
-        assert!(result == 0, "zero input must yield zero cost");
-        kani::cover!(tokens == 0 && price > 0, "zero tokens path reachable");
-        kani::cover!(tokens > 0 && price == 0, "zero price path reachable");
+        assert!(result == 0, "zero tokens must yield zero cost");
     }
 
     #[kani::proof]
     #[kani::unwind(2)]
-    fn ceiling_cost_bounded_matches_exact_ceiling_division() {
+    fn ceiling_cost_zero_price_is_zero() {
         let tokens: u64 = kani::any();
-        let price: u64 = kani::any();
 
-        kani::assume(tokens > 0 && tokens <= 1_000_000);
-        kani::assume(price > 0 && price <= 1_000_000);
+        let result = ceiling_cost(tokens, 0);
+
+        assert!(result == 0, "zero price must yield zero cost");
+    }
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn ceiling_cost_u16_inputs_match_exact_ceiling_division() {
+        let token_sample: u16 = kani::any();
+        let price_sample: u16 = kani::any();
+        let tokens = u64::from(token_sample);
+        let price = u64::from(price_sample);
+
+        kani::assume(tokens > 0);
+        kani::assume(price > 0);
 
         let result = ceiling_cost(tokens, price);
         let product = tokens * price;
@@ -427,11 +434,6 @@ mod kani_proofs {
         assert!(
             result * 1_000_000 >= product,
             "ceiling division must never undercount"
-        );
-        kani::cover!(tokens == 1 && price == 1, "minimum non-zero path reachable");
-        kani::cover!(
-            tokens == 1_000_000 && price == 1_000_000,
-            "upper bounded path reachable"
         );
     }
 

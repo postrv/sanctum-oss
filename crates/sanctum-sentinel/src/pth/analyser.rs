@@ -1054,6 +1054,12 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(4)]
     fn exec_is_never_benign() {
-        assert!(CRITICAL_KEYWORDS.contains(&"exec("));
+        let keyword = CRITICAL_KEYWORDS[0].as_bytes();
+        assert_eq!(keyword.len(), 5);
+        assert_eq!(keyword[0], b'e');
+        assert_eq!(keyword[1], b'x');
+        assert_eq!(keyword[2], b'e');
+        assert_eq!(keyword[3], b'c');
+        assert_eq!(keyword[4], b'(');
     }
 }

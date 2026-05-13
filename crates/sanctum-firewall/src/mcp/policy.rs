@@ -309,8 +309,9 @@ pub fn normalize_mcp_path(path: &str) -> String {
     let expanded = expanded.replace('\\', "/");
 
     // Step 2: Collapse . and .. segments
+    let (root, rest) = split_mcp_path_root(&expanded);
     let mut components: Vec<&str> = Vec::new();
-    for component in expanded.split('/') {
+    for component in rest.split('/') {
         match component {
             ".." => {
                 components.pop();
@@ -320,23 +321,34 @@ pub fn normalize_mcp_path(path: &str) -> String {
         }
     }
 
-    let collapsed = if expanded.starts_with('/') {
-        format!("/{}", components.join("/"))
-    } else {
-        components.join("/")
+    let collapsed = match root {
+        Some("/") => format!("/{}", components.join("/")),
+        Some(root) if components.is_empty() => format!("{root}/"),
+        Some(root) => format!("{root}/{}", components.join("/")),
+        None => components.join("/"),
     };
 
     // Step 3: Lowercase for case-insensitive matching
     collapsed.to_lowercase()
 }
 
+fn split_mcp_path_root(path: &str) -> (Option<&str>, &str) {
+    let bytes = path.as_bytes();
+    if path.starts_with('/') {
+        return (Some("/"), path.trim_start_matches('/'));
+    }
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/' {
+        return (Some(&path[..2]), path[3..].trim_start_matches('/'));
+    }
+    (None, path)
+}
+
 /// Expand `~` and `$HOME` to the actual home directory path for MCP paths.
 ///
 /// Falls back to leaving the path unchanged if `HOME` is not set.
 fn expand_home_mcp(path: &str) -> String {
-    let home = match std::env::var("HOME") {
-        Ok(h) if !h.is_empty() => h,
-        _ => return path.to_owned(),
+    let Some(home) = home_for_mcp_expansion() else {
+        return path.to_owned();
     };
 
     if path == "~" {
@@ -353,6 +365,17 @@ fn expand_home_mcp(path: &str) -> String {
     }
 
     path.to_owned()
+}
+
+fn home_for_mcp_expansion() -> Option<String> {
+    std::env::var("HOME")
+        .ok()
+        .filter(|home| !home.is_empty())
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .filter(|home| !home.is_empty())
+        })
 }
 
 /// Extract string values from a JSON value that look like file paths.
@@ -1531,19 +1554,27 @@ mod expanded_policy_tests {
 
     #[test]
     fn normalize_mcp_path_expands_tilde() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp/test".to_owned());
         let result = normalize_mcp_path("~/docs/file.txt");
-        let expected = format!("{}/docs/file.txt", home.to_lowercase());
-        assert_eq!(result, expected);
+        if let Some(home) = home_for_mcp_expansion() {
+            let home = home.replace('\\', "/").to_lowercase();
+            let expected = format!("{home}/docs/file.txt");
+            assert_eq!(result, expected);
+        } else {
+            assert_eq!(result, "~/docs/file.txt");
+        }
     }
 
     #[test]
     fn normalize_mcp_path_expands_dollar_home() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp/test".to_owned());
         let input = format!("{}{}", "$", "HOME/projects/code");
         let result = normalize_mcp_path(&input);
-        let expected = format!("{}/projects/code", home.to_lowercase());
-        assert_eq!(result, expected);
+        if let Some(home) = home_for_mcp_expansion() {
+            let home = home.replace('\\', "/").to_lowercase();
+            let expected = format!("{home}/projects/code");
+            assert_eq!(result, expected);
+        } else {
+            assert_eq!(result, "$home/projects/code");
+        }
     }
 
     #[test]
@@ -1560,9 +1591,12 @@ mod expanded_policy_tests {
 
     #[test]
     fn normalize_mcp_path_bare_tilde() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp/test".to_owned());
         let result = normalize_mcp_path("~");
-        assert_eq!(result, home.to_lowercase());
+        if let Some(home) = home_for_mcp_expansion() {
+            assert_eq!(result, home.replace('\\', "/").to_lowercase());
+        } else {
+            assert_eq!(result, "~");
+        }
     }
 
     #[test]
@@ -1586,6 +1620,12 @@ mod expanded_policy_tests {
             "backslashes should be converted to forward slashes, got: {result}"
         );
         assert_eq!(result, "/.ssh/id_rsa");
+    }
+
+    #[test]
+    fn normalize_mcp_path_preserves_windows_drive_root() {
+        let result = normalize_mcp_path(r"C:\Users\dev\..\..\Windows\System32");
+        assert_eq!(result, "c:/windows/system32");
     }
 
     // ── CEL policy integration tests ──────────────────────────────────────

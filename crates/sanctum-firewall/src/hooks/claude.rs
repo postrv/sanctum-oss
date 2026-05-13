@@ -108,10 +108,11 @@ fn contains_env_var_ref(command: &str, var: &str) -> bool {
 /// access the filesystem.
 fn normalize_path(path: &str) -> String {
     // Expand ~ and $HOME before collapsing
-    let expanded = expand_home(path);
+    let expanded = expand_home(path).replace('\\', "/");
 
+    let (root, rest) = split_path_root(&expanded);
     let mut components: Vec<&str> = Vec::new();
-    for component in expanded.split('/') {
+    for component in rest.split('/') {
         match component {
             ".." => {
                 components.pop();
@@ -120,21 +121,33 @@ fn normalize_path(path: &str) -> String {
             _ => components.push(component),
         }
     }
-    if expanded.starts_with('/') {
-        format!("/{}", components.join("/"))
-    } else {
-        components.join("/")
+
+    match root {
+        Some("/") => format!("/{}", components.join("/")),
+        Some(root) if components.is_empty() => format!("{root}/"),
+        Some(root) => format!("{root}/{}", components.join("/")),
+        None => components.join("/"),
     }
+}
+
+fn split_path_root(path: &str) -> (Option<&str>, &str) {
+    let bytes = path.as_bytes();
+    if path.starts_with('/') {
+        return (Some("/"), path.trim_start_matches('/'));
+    }
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/' {
+        return (Some(&path[..2]), path[3..].trim_start_matches('/'));
+    }
+    (None, path)
 }
 
 /// Expand `~` and `$HOME` to the actual home directory path.
 ///
 /// Falls back to leaving the path unchanged if `HOME` is not set.
 fn expand_home(path: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    if home.is_empty() {
+    let Some(home) = home_for_expansion() else {
         return path.to_owned();
-    }
+    };
 
     // Handle ~/... and $HOME/...
     if path == "~" {
@@ -151,6 +164,17 @@ fn expand_home(path: &str) -> String {
     }
 
     path.to_owned()
+}
+
+fn home_for_expansion() -> Option<String> {
+    std::env::var("HOME")
+        .ok()
+        .filter(|home| !home.is_empty())
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .filter(|home| !home.is_empty())
+        })
 }
 
 /// Check whether a path is a Claude Code working file that should be allowed
@@ -6125,29 +6149,45 @@ mod tests {
 
     #[test]
     fn test_normalize_path_expands_tilde() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/testuser".to_owned());
+        let Some(home) = home_for_expansion() else {
+            assert_eq!(normalize_path("~/foo"), "~/foo");
+            return;
+        };
+        let home = home.replace('\\', "/");
         let result = normalize_path("~/foo");
         assert_eq!(result, format!("{home}/foo"));
     }
 
     #[test]
     fn test_normalize_path_expands_home_var() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/testuser".to_owned());
+        let Some(home) = home_for_expansion() else {
+            assert_eq!(normalize_path("$HOME/bar"), "$HOME/bar");
+            return;
+        };
+        let home = home.replace('\\', "/");
         let result = normalize_path("$HOME/bar");
         assert_eq!(result, format!("{home}/bar"));
     }
 
     #[test]
     fn test_normalize_path_expands_tilde_with_traversal() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/testuser".to_owned());
         let result = normalize_path("~/../../../etc/passwd");
+        if home_for_expansion().is_none() {
+            assert_eq!(result, "etc/passwd");
+            return;
+        }
         // After expanding ~ to /Users/testuser, then collapsing ../../..
         // we should get /etc/passwd
         assert!(
             result.ends_with("/etc/passwd") || result == "/etc/passwd",
             "tilde + traversal should resolve correctly, got: {result}"
         );
-        let _ = home;
+    }
+
+    #[test]
+    fn test_normalize_path_preserves_windows_drive_root() {
+        let result = normalize_path(r"C:\Users\dev\..\..\Windows\System32");
+        assert_eq!(result, "C:/Windows/System32");
     }
 
     // ---- npm i bare without trailing space ----
@@ -6312,20 +6352,29 @@ mod tests {
 
     #[test]
     fn test_expand_home_tilde() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp/test".to_owned());
-        assert_eq!(expand_home("~/Documents"), format!("{home}/Documents"));
+        if let Some(home) = home_for_expansion() {
+            assert_eq!(expand_home("~/Documents"), format!("{home}/Documents"));
+        } else {
+            assert_eq!(expand_home("~/Documents"), "~/Documents");
+        }
     }
 
     #[test]
     fn test_expand_home_dollar_home() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp/test".to_owned());
-        assert_eq!(expand_home("$HOME/Documents"), format!("{home}/Documents"));
+        if let Some(home) = home_for_expansion() {
+            assert_eq!(expand_home("$HOME/Documents"), format!("{home}/Documents"));
+        } else {
+            assert_eq!(expand_home("$HOME/Documents"), "$HOME/Documents");
+        }
     }
 
     #[test]
     fn test_expand_home_bare_tilde() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp/test".to_owned());
-        assert_eq!(expand_home("~"), home);
+        if let Some(home) = home_for_expansion() {
+            assert_eq!(expand_home("~"), home);
+        } else {
+            assert_eq!(expand_home("~"), "~");
+        }
     }
 
     #[test]

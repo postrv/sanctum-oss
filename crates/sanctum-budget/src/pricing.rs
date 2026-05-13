@@ -393,35 +393,55 @@ mod kani_proofs {
 
     #[kani::proof]
     #[kani::unwind(2)]
-    fn ceiling_cost_no_overflow() {
+    fn ceiling_cost_zero_inputs_are_zero() {
         let tokens: u64 = kani::any();
         let price: u64 = kani::any();
 
+        kani::assume(tokens == 0 || price == 0);
+
         let result = ceiling_cost(tokens, price);
 
-        // Zero tokens or zero price must yield zero cost.
-        if tokens == 0 || price == 0 {
-            assert!(result == 0, "zero input must yield zero cost");
-        }
+        assert!(result == 0, "zero input must yield zero cost");
+        kani::cover!(tokens == 0 && price > 0, "zero tokens path reachable");
+        kani::cover!(tokens > 0 && price == 0, "zero price path reachable");
+    }
 
-        // Non-zero case: result must be at least 1 cent (ceiling division
-        // rounds up, so any non-zero usage produces a non-zero cost).
-        if tokens > 0 && price > 0 {
-            assert!(result >= 1, "non-zero usage must produce at least 1 cent");
-        }
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn ceiling_cost_bounded_matches_exact_ceiling_division() {
+        let tokens: u64 = kani::any();
+        let price: u64 = kani::any();
 
-        // Ceiling property: result * 1_000_000 >= tokens * price (before saturation).
-        // When the multiplication doesn't saturate, this proves we never undercount.
-        if tokens <= 1_000_000 && price <= 1_000_000 {
-            // Safe range — no saturation occurs.
-            assert!(
-                result.saturating_mul(1_000_000) >= tokens * price,
-                "ceiling division must never undercount"
-            );
-        }
+        kani::assume(tokens > 0 && tokens <= 1_000_000);
+        kani::assume(price > 0 && price <= 1_000_000);
 
-        // Verify both paths are reachable.
-        kani::cover!(tokens == 0, "zero tokens path reachable");
-        kani::cover!(tokens > 0 && price > 0, "non-zero path reachable");
+        let result = ceiling_cost(tokens, price);
+        let product = tokens * price;
+        let expected = (product + 999_999) / 1_000_000;
+
+        assert_eq!(
+            result, expected,
+            "bounded inputs must match exact ceiling division"
+        );
+        assert!(result >= 1, "non-zero usage must produce at least 1 cent");
+        assert!(
+            result * 1_000_000 >= product,
+            "ceiling division must never undercount"
+        );
+        kani::cover!(tokens == 1 && price == 1, "minimum non-zero path reachable");
+        kani::cover!(
+            tokens == 1_000_000 && price == 1_000_000,
+            "upper bounded path reachable"
+        );
+    }
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn ceiling_cost_saturated_inputs_remain_safe() {
+        assert_eq!(ceiling_cost(0, u64::MAX), 0);
+        assert_eq!(ceiling_cost(u64::MAX, 0), 0);
+        assert!(ceiling_cost(u64::MAX, 1) > 0);
+        assert!(ceiling_cost(1, u64::MAX) > 0);
+        assert!(ceiling_cost(u64::MAX, u64::MAX) > 0);
     }
 }

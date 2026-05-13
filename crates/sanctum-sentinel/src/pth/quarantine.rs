@@ -107,24 +107,10 @@ impl QuarantineState {
 /// Returns [`SentinelError::InvalidQuarantineId`] if the ID is malformed or
 /// would resolve outside the quarantine directory.
 fn validate_id(id: &str, quarantine_dir: &Path) -> Result<(), SentinelError> {
-    if id.is_empty() {
+    if let Some(reason) = invalid_quarantine_id_reason(id) {
         return Err(SentinelError::InvalidQuarantineId {
             id: id.to_string(),
-            reason: "ID must not be empty".to_string(),
-        });
-    }
-
-    if id.contains('/') || id.contains('\\') {
-        return Err(SentinelError::InvalidQuarantineId {
-            id: id.to_string(),
-            reason: "ID must not contain path separators".to_string(),
-        });
-    }
-
-    if id.contains("..") {
-        return Err(SentinelError::InvalidQuarantineId {
-            id: id.to_string(),
-            reason: "ID must not contain '..' components".to_string(),
+            reason: reason.to_string(),
         });
     }
 
@@ -147,6 +133,22 @@ fn validate_id(id: &str, quarantine_dir: &Path) -> Result<(), SentinelError> {
     }
 
     Ok(())
+}
+
+fn invalid_quarantine_id_reason(id: &str) -> Option<&'static str> {
+    if id.is_empty() {
+        return Some("ID must not be empty");
+    }
+
+    if id.contains('/') || id.contains('\\') {
+        return Some("ID must not contain path separators");
+    }
+
+    if id.contains("..") {
+        return Some("ID must not contain '..' components");
+    }
+
+    None
 }
 
 /// Directories that are never valid restore targets.
@@ -1492,33 +1494,24 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(4)]
     fn validate_id_rejects_traversal() {
-        // Verify that validate_id always rejects:
+        // Verify that the ID syntax gate always rejects:
         // 1. Empty strings
         // 2. Strings containing '/'
         // 3. Strings containing '\'
         // 4. Strings containing ".."
         let bytes: [u8; 2] = kani::any();
-        // Only test valid UTF-8
-        if let Ok(id) = std::str::from_utf8(&bytes) {
-            let quarantine_dir = std::path::Path::new("/tmp/quarantine");
-            let result = validate_id(id, quarantine_dir);
+        let len: usize = kani::any();
+        kani::assume(len <= bytes.len());
 
-            // If the string is empty, must be rejected
-            if id.is_empty() {
-                assert!(result.is_err());
+        // Only test valid UTF-8 and avoid filesystem canonicalization here.
+        // `validate_id` calls this syntax gate before touching the filesystem;
+        // unit tests cover the full path-level behavior.
+        if let Ok(id) = std::str::from_utf8(&bytes[..len]) {
+            let invalid =
+                id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..");
+            if invalid {
+                assert!(invalid_quarantine_id_reason(id).is_some());
             }
-            // If the string contains path separators, must be rejected
-            if id.contains('/') || id.contains('\\') {
-                assert!(result.is_err());
-            }
-            // If the string contains "..", must be rejected
-            if id.contains("..") {
-                assert!(result.is_err());
-            }
-
-            // Prevent CBMC from verifying SentinelError's recursive drop impl
-            // (std::io::Error -> Box<dyn Error> -> deallocate spiral).
-            std::mem::forget(result);
         }
     }
 }

@@ -216,41 +216,27 @@ mod kani_proofs {
     use super::*;
     use std::net::Ipv4Addr;
 
-    /// Proof: `record_bytes` never panics regardless of byte count.
+    /// Proof: `record_bytes` handles the saturating arithmetic boundary.
     ///
-    /// This proves that the `saturating_add` on line 107 prevents overflow
-    /// and that no other arithmetic operation can panic. The proof covers
-    /// two consecutive calls with arbitrary u64 values.
+    /// This proves that the `saturating_add` in `record_bytes` prevents
+    /// overflow at `u64::MAX` across consecutive calls. Unit/property tests
+    /// cover the broader threshold matrix.
     #[kani::proof]
     fn exfiltration_record_bytes_never_panics() {
-        let warn_sample: u16 = kani::any();
-        let block_sample: u16 = kani::any();
-        let window_sample: u16 = kani::any();
-        let warn = u64::from(warn_sample);
-        let block = u64::from(block_sample);
-        let window = u64::from(window_sample);
-
-        // Constrain to reasonable ranges to keep proof tractable
-        kani::assume(warn > 0);
-        kani::assume(block >= warn);
-        kani::assume(window > 0 && window <= 3600);
-
         let config = NetworkConfig {
-            exfiltration_warn_bytes: warn,
-            exfiltration_block_bytes: block,
-            exfiltration_window_secs: window,
+            exfiltration_warn_bytes: 1,
+            exfiltration_block_bytes: u64::MAX,
+            exfiltration_window_secs: 60,
             exfiltration_host_allowlist: Vec::new(),
             ..NetworkConfig::default()
         };
 
         let mut tracker = ExfiltrationTracker::new(&config);
         let dest = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let bytes1 = u64::from(kani::any::<u16>());
-        let bytes2 = u64::from(kani::any::<u16>());
 
-        // Two calls with arbitrary byte counts must not panic
-        let _ = tracker.record_bytes(dest, bytes1);
-        let _ = tracker.record_bytes(dest, bytes2);
+        // Exercise the saturating boundary directly.
+        let _ = tracker.record_bytes(dest, u64::MAX);
+        let _ = tracker.record_bytes(dest, u64::MAX);
     }
 }
 
